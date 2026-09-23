@@ -1,0 +1,33 @@
+{
+  "name": "carter-omp-web",
+  "private": true,
+  "version": "0.1.0",
+  "author": "Stencil Labs, Inc.",
+  "license": "MIT",
+  "type": "module",
+  "description": "Flat SolidJS operations console bundled by Vite and served by carter_omp's FastAPI app.",
+  "homepage": "https://omp.sh",
+  "packageManager": "yarn@4.9.2",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "solid-js": "1.9.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "26.6.2",
+    "eslint": "9.39.2",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.53.1",
+    "vite": "8.3.0",
+    "vite-plugin-solid": "2.11.14",
+    "vitest": "4.0.18"
+  }
+}

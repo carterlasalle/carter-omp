@@ -1,0 +1,179 @@
+services:
+  # ───────────────────────────────────────────────────────────────────────────
+  # carter-omp orchestrator
+  #
+  # NOTE: `env_file:` is INTENTIONALLY ABSENT. We never want the github-proxy's
+  # credential (`GITHUB_TOKEN` in .env) to leak into this container's
+  # environment. Every variable below is an explicit allowlist; compose still
+  # reads `.env` for `${VAR}` interpolation, but only the keys listed here
+  # flow into the container.
+  # ───────────────────────────────────────────────────────────────────────────
+  carter-omp:
+    build: .
+    image: carter-omp:dev
+    container_name: carter-omp
+    # Stable hostname: os.hostname() inside the container feeds usage
+    # attribution; without this it reports the random docker container id.
+    hostname: carter-omp
+    stop_grace_period: 30s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      # --- github-proxy channel ---
+      # The orchestrator NEVER holds GITHUB_TOKEN; it talks to the sibling
+      # github-proxy container over the internal-only network.
+      CARTER_OMP_GH_PROXY_URL: http://github-proxy:8081
+      CARTER_OMP_GH_PROXY_HMAC_KEY: ${CARTER_OMP_GH_PROXY_HMAC_KEY:?CARTER_OMP_GH_PROXY_HMAC_KEY must be set in .env}
+
+      # --- webhook + identity ---
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET must be set in .env}
+      CARTER_OMP_BOT_LOGIN: ${CARTER_OMP_BOT_LOGIN:?CARTER_OMP_BOT_LOGIN must be set in .env}
+      CARTER_OMP_GIT_AUTHOR_NAME: ${CARTER_OMP_GIT_AUTHOR_NAME:-}
+      CARTER_OMP_GIT_AUTHOR_EMAIL: ${CARTER_OMP_GIT_AUTHOR_EMAIL:?CARTER_OMP_GIT_AUTHOR_EMAIL must be set in .env}
+      CARTER_OMP_REPO_ALLOWLIST: ${CARTER_OMP_REPO_ALLOWLIST:?CARTER_OMP_REPO_ALLOWLIST must be set in .env}
+
+      # --- trigger policy (explicit invocation; strict by default) ---
+      CARTER_OMP_TRIGGER_MODE: ${CARTER_OMP_TRIGGER_MODE:-strict}
+      CARTER_OMP_TRIGGER_LABEL: ${CARTER_OMP_TRIGGER_LABEL:-carter-omp}
+      CARTER_OMP_LABEL_TRIGGERS: ${CARTER_OMP_LABEL_TRIGGERS:-true}
+      CARTER_OMP_MENTION_TRIGGERS: ${CARTER_OMP_MENTION_TRIGGERS:-true}
+      CARTER_OMP_AUTO_ISSUE_TRIAGE: ${CARTER_OMP_AUTO_ISSUE_TRIAGE:-false}
+      CARTER_OMP_AUTO_PR_REVIEW: ${CARTER_OMP_AUTO_PR_REVIEW:-false}
+      CARTER_OMP_AUTO_COMMENT_FOLLOWUPS: ${CARTER_OMP_AUTO_COMMENT_FOLLOWUPS:-false}
+
+      # --- PR review ---
+      CARTER_OMP_PR_REVIEW_ENABLED: ${CARTER_OMP_PR_REVIEW_ENABLED:-true}
+
+      # --- release sentinel (default off; explicit elevated trigger only) ---
+      CARTER_OMP_RELEASE_SENTINEL_ENABLED: ${CARTER_OMP_RELEASE_SENTINEL_ENABLED:-false}
+      CARTER_OMP_RELEASE_COMMIT_PREFIX: "${CARTER_OMP_RELEASE_COMMIT_PREFIX:-chore: bump version to }"
+      CARTER_OMP_RELEASE_MAX_ROUNDS: ${CARTER_OMP_RELEASE_MAX_ROUNDS:-5}
+      CARTER_OMP_RELEASE_TASK_TIMEOUT_SECONDS: ${CARTER_OMP_RELEASE_TASK_TIMEOUT_SECONDS:-3600}
+      CARTER_OMP_RELEASE_MODEL: ${CARTER_OMP_RELEASE_MODEL:-}
+
+      # --- model selection ---
+      CARTER_OMP_MODEL: ${CARTER_OMP_MODEL:-anthropic/claude-sonnet-4-6}
+      CARTER_OMP_PROVIDER: ${CARTER_OMP_PROVIDER:-}
+      CARTER_OMP_THINKING: ${CARTER_OMP_THINKING:-high}
+
+      # --- runtime tuning ---
+      CARTER_OMP_MAX_CONCURRENCY: ${CARTER_OMP_MAX_CONCURRENCY:-8}
+      CARTER_OMP_TASK_TIMEOUT_SECONDS: ${CARTER_OMP_TASK_TIMEOUT_SECONDS:-2400}
+      CARTER_OMP_TASK_TIMEOUT_HARD_GRACE_SECONDS: ${CARTER_OMP_TASK_TIMEOUT_HARD_GRACE_SECONDS:-60}
+      CARTER_OMP_REQUEST_TIMEOUT_SECONDS: ${CARTER_OMP_REQUEST_TIMEOUT_SECONDS:-120}
+      CARTER_OMP_RATE_LIMIT_WINDOW_SECONDS: ${CARTER_OMP_RATE_LIMIT_WINDOW_SECONDS:-3600}
+      CARTER_OMP_RATE_LIMIT_DEFAULT: ${CARTER_OMP_RATE_LIMIT_DEFAULT:-3}
+      CARTER_OMP_RATE_LIMIT_CONTRIBUTOR: ${CARTER_OMP_RATE_LIMIT_CONTRIBUTOR:-10}
+      CARTER_OMP_RATE_LIMIT_UNLIMITED: ${CARTER_OMP_RATE_LIMIT_UNLIMITED:-}
+      CARTER_OMP_QUESTION_AUTOCLOSE_ENABLED: ${CARTER_OMP_QUESTION_AUTOCLOSE_ENABLED:-false}
+      CARTER_OMP_QUESTION_AUTOCLOSE_HOURS: ${CARTER_OMP_QUESTION_AUTOCLOSE_HOURS:-4}
+      CARTER_OMP_QUESTION_AUTOCLOSE_SCAN_SECONDS: ${CARTER_OMP_QUESTION_AUTOCLOSE_SCAN_SECONDS:-60}
+      CARTER_OMP_REPLAY_TOKEN: ${CARTER_OMP_REPLAY_TOKEN:-}
+
+      # --- container-fixed paths ---
+      CARTER_OMP_OMP_COMMAND: omp
+      CARTER_OMP_WORKSPACE_ROOT: /data/workspaces
+      CARTER_OMP_SQLITE_PATH: /data/carter-omp.sqlite
+      CARTER_OMP_LOG_DIR: /data/logs
+      CARTER_OMP_BIND_HOST: ${CARTER_OMP_BIND_HOST:-0.0.0.0}
+      CARTER_OMP_BIND_PORT: ${CARTER_OMP_BIND_PORT:-8080}
+    depends_on:
+      github-proxy:
+        condition: service_started
+    # Resolve `llm-gateway.internal` (used in /srv/agent-home/.omp/agent/models.yml) to the
+    # Docker host. The actual gateway listens on 127.0.0.1:4000 on the host;
+    # `host-gateway` is Docker's alias for the host bridge IP.
+    extra_hosts:
+      - "llm-gateway.internal:host-gateway"
+    networks:
+      - default
+      - carter_omp_internal
+    volumes:
+      - carter_omp_data:/data
+      # Host agent config is mounted read-only under /srv/agent-home-stage
+      # with host-controlled permissions. The entrypoint copies it into
+      # root-owned, world-readable files under /srv/agent-home; the agent
+      # subprocess runs with HOME=/srv/agent-home.
+      - ${HOME}/.omp/agent/models.container.yml:/srv/agent-home-stage/.omp/agent/models.yml:ro
+      - ${HOME}/.agent/AGENTS.md:/srv/agent-home-stage/.agent/AGENTS.md:ro
+      - ${HOME}/.agent/rules:/srv/agent-home-stage/.agent/rules:ro
+    ports:
+      - "0.0.0.0:6543:8080"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # github-proxy
+  #
+  # The only container that ever holds GITHUB_TOKEN. Reachable only from the
+  # orchestrator on the internal-only network — no host port mapping. Every
+  # request must carry a valid HMAC signature (CARTER_OMP_GH_PROXY_HMAC_KEY).
+  # ───────────────────────────────────────────────────────────────────────────
+  github-proxy:
+    image: carter-omp:dev
+    container_name: carter-omp-gh-proxy
+    hostname: carter-omp-gh-proxy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["python", "-m", "carter_omp.proxy", "serve"]
+    environment:
+      # Credential: lives ONLY here (GitHub App preferred, PAT legacy).
+      # Set EITHER the App triple OR GITHUB_TOKEN, never both.
+      CARTER_OMP_GITHUB_APP_ID: ${CARTER_OMP_GITHUB_APP_ID:-}
+      CARTER_OMP_GITHUB_PRIVATE_KEY_FILE: /run/secrets/github-app.pem
+      CARTER_OMP_GITHUB_INSTALLATION_ID: ${CARTER_OMP_GITHUB_INSTALLATION_ID:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # Shared with the orchestrator: HMAC verification key.
+      CARTER_OMP_GH_PROXY_HMAC_KEY: ${CARTER_OMP_GH_PROXY_HMAC_KEY:?CARTER_OMP_GH_PROXY_HMAC_KEY must be set in .env}
+      # The proxy reuses the SandboxManager pool layout under /data/workspaces.
+      CARTER_OMP_WORKSPACE_ROOT: /data/workspaces
+      CARTER_OMP_SQLITE_PATH: /data/carter-omp.sqlite
+      CARTER_OMP_LOG_DIR: /data/logs
+      # Bind on the internal network only.
+      CARTER_OMP_GH_PROXY_BIND_HOST: 0.0.0.0
+      CARTER_OMP_GH_PROXY_BIND_PORT: 8081
+      # Settings still requires these on construction; the proxy never uses
+      # them but the validator runs the same code path as the orchestrator.
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET must be set in .env}
+      CARTER_OMP_BOT_LOGIN: ${CARTER_OMP_BOT_LOGIN:?CARTER_OMP_BOT_LOGIN must be set in .env}
+      CARTER_OMP_GIT_AUTHOR_EMAIL: ${CARTER_OMP_GIT_AUTHOR_EMAIL:?CARTER_OMP_GIT_AUTHOR_EMAIL must be set in .env}
+      CARTER_OMP_REPO_ALLOWLIST: ${CARTER_OMP_REPO_ALLOWLIST:?CARTER_OMP_REPO_ALLOWLIST must be set in .env}
+    secrets:
+      - source: github-app-pem
+        target: github-app.pem
+        mode: 0400
+    networks:
+      # `default` gives github-proxy outbound NAT to api.github.com;
+      # `carter_omp_internal` is how the orchestrator reaches it. No `ports:`
+      # mapping → still unreachable from the host or any sibling project.
+      - default
+      - carter_omp_internal
+    volumes:
+      # Shared workspace pool/worktrees so the proxy can drive git operations
+      # against the same per-issue worktrees the orchestrator builds.
+      - carter_omp_data:/data
+
+networks:
+  # External-facing bridge: webhook ingress (8080) and the orchestrator's
+  # outbound path to the host LLM gateway via extra_hosts.
+  default: {}
+  # Orchestrator <-> github-proxy only. internal: true means no egress and no
+  # ingress from outside the compose project.
+  carter_omp_internal:
+    internal: true
+
+volumes:
+  # Docker-managed Linux volume so UID/GID permissions on /data are enforced.
+  carter_omp_data: {}
+
+secrets:
+  # GitHub App private key (0400, visible only to github-proxy).
+  # Provide via `printf '%s' "$KEY" | docker secret create github-app-pem -`
+  # or a local file (dev only): uncomment the `file:` line below.
+  github-app-pem:
+    external: true
+    # file: ./github-app.pem
