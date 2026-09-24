@@ -7,13 +7,16 @@
 # Usage: ./scripts/setup-wizard.sh [--domain omp.example.com] [--repo-owners carterlasalle]
 set -euo pipefail
 
-DOMAIN="${1:-}"
-REPO_OWNERS="${2:-carterlasalle}"
-for arg in "$@"; do
-  case "$arg" in
-    --domain=*) DOMAIN="${arg#--domain=}" ;;
-    --repo-owners=*) REPO_OWNERS="${arg#--repo-owners=}" ;;
+DOMAIN=""
+REPO_OWNERS="carterlasalle"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --domain=*) DOMAIN="${1#--domain=}" ;;
+    --domain) DOMAIN="${2:-}"; shift ;;
+    --repo-owners=*) REPO_OWNERS="${1#--repo-owners=}" ;;
+    --repo-owners) REPO_OWNERS="${2:-}"; shift ;;
   esac
+  shift
 done
 
 pass() { printf '\033[32m[ok]\033[0m %s\n' "$*"; }
