@@ -920,6 +920,7 @@ async def handle_review(
     )
 
 
+# trace:v1 id=impl.tasks-pr-conv-ack work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 async def handle_pr_conversation(
     *,
     settings: Settings,
@@ -942,6 +943,7 @@ async def handle_pr_conversation(
     repo_full = str(repo_payload.get("full_name") or "")
     issue_payload = payload.get("issue") or {}
     pr_number = issue_payload.get("number")
+    await _ack_trigger_pickup(github, payload, delivery_id)
     if not repo_full or not isinstance(pr_number, int):
         log.info("skip: pr-conversation missing repo/number")
         return
