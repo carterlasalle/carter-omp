@@ -443,6 +443,7 @@ class GitHubProxyClient:
 # ---------- ProxyGitTransport ----------
 
 
+# trace:v1 id=impl.transport-scope work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 class ProxyGitTransport:
     """Routes clone/fetch/push to github-proxy over the same HMAC channel.
 
@@ -468,6 +469,8 @@ class ProxyGitTransport:
         self._timeout = httpx.Timeout(timeout, connect=10.0)
         self._run_token = run_token
 
+    _TRANSIENT_RETRY_DELAYS = (2.0, 5.0, 15.0)
+
     def _client(self) -> httpx.Client:
         return httpx.Client(
             base_url=self._base_url,
@@ -475,7 +478,16 @@ class ProxyGitTransport:
             timeout=self._timeout,
         )
 
-    _TRANSIENT_RETRY_DELAYS = (2.0, 5.0, 15.0)
+    # trace:v1 id=impl.transport-run-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def with_run_token(self, run_token: str | None) -> ProxyGitTransport:
+        """Return a copy of this transport carrying a per-run authorization token."""
+        return ProxyGitTransport(
+            base_url=self._base_url,
+            hmac_key=self._key,
+            transport=self._transport,
+            timeout=self._timeout.connect or 120.0,
+            run_token=run_token,
+        )
 
     def _post(self, path: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
         body_bytes = json.dumps(body).encode("utf-8")

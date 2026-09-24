@@ -478,6 +478,7 @@ def _has_prior_session(session_dir: Path) -> bool:
         return False
 
 
+# trace:v1 id=impl.worker-attach-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
     """Mint a per-run proxy token and scope the GitHub client to it.
 
@@ -486,7 +487,7 @@ def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
     shared HMAC-only clients are left untouched.
     """
     from carter_omp.github_events import TriggerContext
-    from carter_omp.proxy_client import GitHubProxyClient
+    from carter_omp.proxy_client import GitHubProxyClient, ProxyGitTransport
     from carter_omp.run_token import mint_run_token
 
     trigger = inputs.trigger
@@ -508,6 +509,8 @@ def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
     )
     if isinstance(inputs.github, GitHubProxyClient):
         object.__setattr__(bindings, "github", inputs.github.with_run_token(token))
+    if isinstance(inputs.git_transport, ProxyGitTransport):
+        object.__setattr__(bindings, "git_transport", inputs.git_transport.with_run_token(token))
 
 
 def _build_prompt(
