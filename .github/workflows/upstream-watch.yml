@@ -1,0 +1,84 @@
+# trace:v1 id=impl.upstream-watch-name work=WORK-CO-Q8Z1HJJJ
+name: upstream-watch
+
+# trace:v1 id=impl.upstream-watch-on work=WORK-CO-Q8Z1HJJJ
+on:
+  schedule:
+    # Daily 13:00 UTC.
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+
+# trace:v1 id=impl.upstream-watch work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find new upstream commits
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          UPSTREAM="can1357/oh-my-pi"
+          PATHS="python/robomp python/omp-rpc"
+          KNOWN_FILE="docs/upstream.md"
+          KNOWN=$(grep -oE 'Upstream commit used for extraction: `[0-9a-f]{40}`' "$KNOWN_FILE" | grep -oE '[0-9a-f]{40}' | head -1)
+          # Plus every hash recorded under "Later upstream commits".
+          SEEN="$KNOWN $(grep -oE '\b[0-9a-f]{40}\b' "$KNOWN_FILE" | sort -u | tr '\n' ' ')"
+          HEAD_SHA=$(gh api "repos/$UPSTREAM/commits?path=python/robomp&per_page=1" --jq '.[0].sha')
+          if [ -z "$HEAD_SHA" ]; then
+            echo "could not resolve upstream HEAD" >&2
+            exit 1
+          fi
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          if echo "$SEEN" | grep -qw "$HEAD_SHA"; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Files touching robomp/omp-rpc since the extraction commit.
+          # (The compare API returns commits + a merged file list; the file
+          # list is authoritative, per-commit `.files` is not present here.)
+          CHANGED=$(gh api "repos/$UPSTREAM/compare/$KNOWN...$HEAD_SHA" --jq '[.files[] | select(.filename | startswith("python/robomp") or startswith("python/omp-rpc")) | .filename] | unique | .[]' 2>/dev/null || true)
+          if [ -z "$CHANGED" ]; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LOG=$(gh api "repos/$UPSTREAM/commits?path=python/robomp&sha=main&per_page=20" --jq '.[] | "- \(.sha[0:12]) \(.commit.message | split("\n")[0])"' | head -20)
+          LOG="$LOG"$'\n\n'"Files changed since extraction:"$'\n'"$CHANGED"
+          {
+            echo "new=true"
+            echo "log<<EOF"
+            echo "$LOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open tracking issue
+        if: steps.upstream.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          HEAD_SHA="${{ steps.upstream.outputs.head }}"
+          # Skip if an open issue already tracks this exact HEAD.
+          if gh issue list --search "upstream $HEAD_SHA in:title" --state open --json number --jq '.[0].number' | grep -qE '^[0-9]+$'; then
+            echo "tracking issue already open for $HEAD_SHA"
+            exit 0
+          fi
+          gh issue create \
+            --title "Upstream robomp changed ($HEAD_SHA)" \
+            --label "upstream-watch" \
+            --body "oh-my-pi \`python/robomp\` (and/or \`python/omp-rpc\`) has new commits since our extraction point.
+
+          Extraction point: see \`docs/upstream.md\`.
+          Upstream HEAD touching \`python/robomp\`: \`$HEAD_SHA\`
+
+          Recent commits:
+          ${{ steps.upstream.outputs.log }}
+
+          Compare: https://github.com/can1357/oh-my-pi/compare/${{ steps.upstream.outputs.head }}...main
+
+          To triage: review the diff for behavior/security impact on our explicit-trigger contract. To port: \`@carter-omp cherry-pick the <sha> changes into carter_omp per docs/upstream.md\`, then record the hash under \"Later upstream commits\" in \`docs/upstream.md\`."
