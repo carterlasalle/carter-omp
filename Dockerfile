@@ -105,7 +105,21 @@ RUN mkdir -p /srv/agent-home/.agent /srv/agent-home/.omp/agent \
 COPY entrypoint.sh /usr/local/bin/carter-omp-entrypoint
 RUN chmod +x /usr/local/bin/carter-omp-entrypoint
 
-RUN useradd -u 10000 -m -U -s /usr/sbin/nologin carter-omp \
+ARG OMP_SLOT_COUNT=32
+ENV CARTER_OMP_BAKED_SLOT_COUNT=${OMP_SLOT_COUNT}
+# Slot identities are baked into the image: /etc is immutable runtime config,
+# /data is mutable runtime state. The entrypoint only validates them.
+RUN set -eux; \
+    groupadd --gid 2000 omp; \
+    i=1; \
+    while [ "$i" -le "$OMP_SLOT_COUNT" ]; do \
+        slot_id=$((2000 + i)); \
+        groupadd --gid "$slot_id" "omp-$i"; \
+        useradd --uid "$slot_id" --gid "$slot_id" --groups omp \
+            --no-create-home --no-user-group --shell /usr/sbin/nologin "omp-$i"; \
+        i=$((i + 1)); \
+    done; \
+    useradd -u 10000 -m -U -s /usr/sbin/nologin carter-omp \
     && mkdir -p /data/workspaces /data/logs \
     && chown -R carter-omp:carter-omp /app /data
 
