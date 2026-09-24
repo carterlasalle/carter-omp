@@ -244,8 +244,8 @@ ask_default() { # ask_default KEY DEFAULT WHY
   cur="$(env_val "$key")"
   if [ -n "$cur" ]; then skip "$key=$cur"; return 0; fi
   echo ""
-  echo "  $key (default: $default) — $why"
-  read -r -p "  Value [$default]: " val </dev/tty
+  echo "  $key (default: ${default:-(empty)}) — $why"
+  read -r -p "  Value [${default:-(empty)}]: " val </dev/tty>
   set_kv "$key" "${val:-$default}"
 }
 ask_default CARTER_OMP_TRIGGER_MODE strict "strict = only your label/mention runs; legacy = old ambient behavior (tests only)."
