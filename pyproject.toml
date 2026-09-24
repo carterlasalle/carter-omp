@@ -51,7 +51,7 @@ filterwarnings = [
 line-length = 120
 target-version = "py312"
 src = ["src", "tests"]
-extend-exclude = [".pi-context", "data"]
+extend-exclude = [".pi-context", "data", "vendor"]
 
 [tool.ruff.lint]
 select = [
