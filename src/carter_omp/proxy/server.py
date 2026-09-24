@@ -504,9 +504,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         # static token. No GITHUB_TOKEN is required in App mode.
         provider = getattr(settings, "_app_token_provider", None)
         if provider is not None and settings.github_installation_id is not None:
-            app.state.github = GitHubClient(
-                provider.token_unscoped(installation_id=settings.github_installation_id)
-            )
+            app.state.github = GitHubClient(provider.token_unscoped(installation_id=settings.github_installation_id))
         else:
             app.state.github = GitHubClient(_resolve_token(settings))
         app.state.settings = settings

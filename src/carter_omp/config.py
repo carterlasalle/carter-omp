@@ -575,6 +575,7 @@ class _ProxyEnvLoader(BaseSettings):
     log_dir: Path = Field(Path("./data/logs"), alias="CARTER_OMP_LOG_DIR")
     github_proxy_max_body_bytes: int = Field(1 << 20, alias="CARTER_OMP_GH_PROXY_MAX_BODY_BYTES")
     github_proxy_git_timeout_seconds: float = Field(60.0, alias="CARTER_OMP_GH_PROXY_GIT_TIMEOUT_SECONDS")
+
     @field_validator("github_proxy_hmac_key", mode="before")
     @classmethod
     def _reject_blank(cls, value: object) -> object:
