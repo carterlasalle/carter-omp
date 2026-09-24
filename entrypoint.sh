@@ -1,3 +1,4 @@
+# trace:exempt reason=deploy-packaging-no-runtime-behavior
 #!/usr/bin/env bash
 # carter-omp container entrypoint. No per-boot pip installs — everything is baked
 # into the image; we only sanity-check the runtime mount and create state dirs.
@@ -22,7 +23,13 @@ elif [[ "${1:-}" == *"carter_omp.proxy"* ]]; then
     is_proxy_role=1
 fi
 
-/usr/sbin/groupadd -f -g 2000 omp
+# The image runs as root; user/group creation must succeed. If /etc is
+# read-only or shadow files are corrupt, fail with a message (not a restart
+# loop under `set -e` swallowing the cause).
+/usr/sbin/groupadd -f -g 2000 omp 2>/dev/null || {
+  echo "carter-omp: cannot write /etc/group (read-only /etc or corrupt shadow?). Fix the mount/image, not the retry loop." >&2
+  exit 1
+}
 max_slots="${CARTER_OMP_MAX_CONCURRENCY:-8}"
 for i in $(seq 1 "$max_slots"); do
     user="omp-$i"

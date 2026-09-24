@@ -47,6 +47,7 @@ ARG OMP_VERSION
 ARG OMP_SHA256_X64
 ARG OMP_SHA256_ARM64
 ARG BUN_VERSION
+ARG YARN_VERSION
 ARG TARGETARCH
 
 # curl + CA certs for the pinned binary downloads below (python-slim
