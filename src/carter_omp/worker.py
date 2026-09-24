@@ -125,7 +125,6 @@ def _resolve_pragma_overrides(
     thinking_override = pragmas.resolve_thinking_level(thinking_value) if thinking_value else None
     return model_override, thinking_override
 
-
 _SCRUBBED_ENV_KEYS: tuple[str, ...] = (
     # Secrets that MUST NOT reach the agent subprocess; an agent with the
     # `bash` tool could otherwise `printenv` them out of carter-omp's env.
@@ -143,6 +142,8 @@ _SCRUBBED_ENV_KEYS: tuple[str, ...] = (
     "AWS_SESSION_TOKEN",
     "GOOGLE_APPLICATION_CREDENTIALS",
     "AZURE_CLIENT_SECRET",
+    # NOTE: OPENCODE_API_KEY is intentionally NOT scrubbed: with no host-side
+    # auth gateway, it is the agent OMP's provider credential (see compose).
 )
 
 # Prefixes scrubbed dynamically (cloud credential families).
@@ -210,6 +211,7 @@ def _stage_agent_home() -> None:
                 log.warning("Failed to normalize agent home file %s: %s", path, exc)
 
 
+# trace:v1 id=impl.worker-run-dir work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _ensure_agent_run_dir() -> None:
     """Keep ``~/.omp/run`` writable by every sandbox slot.
 
@@ -228,18 +230,23 @@ def _ensure_agent_run_dir() -> None:
         return
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
-        for root, _dirs, files in os.walk(run_dir):
+        for root, dirs, files in os.walk(run_dir):
             root_path = Path(root)
             os.chown(root_path, -1, gid)
             root_path.chmod(0o2770)
-            for name in files:
-                file_path = root_path / name
-                os.chown(file_path, -1, gid)
-                file_path.chmod(0o660)
+            for name in dirs + files:
+                child = root_path / name
+                if child.is_dir() and not child.is_symlink():
+                    os.chown(child, -1, gid)
+                    child.chmod(0o2770)
+                elif child.is_file():
+                    os.chown(child, -1, gid)
+                    child.chmod(0o660)
     except OSError as exc:
         log.warning("Failed to prepare agent run dir %s: %s", run_dir, exc)
 
 
+# trace:v1 id=impl.worker-agent-env work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_extra_env(settings: Settings) -> dict[str, str]:
     """Build the env overlay passed to the omp subprocess.
 
@@ -593,12 +600,12 @@ def _build_prompt(
     raise ValueError(f"unknown task kind: {task_kind!r}")
 
 
+# trace:v1 id=impl.worker-rpc-blocking work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _run_rpc_blocking(
     inputs: TaskInputs,
     *,
     task_kind: str,
     prompt: str,
-    loop: asyncio.AbstractEventLoop,
     bindings: ToolBindings,
     directive: DirectiveInfo | None = None,
 ) -> str | None:
@@ -820,9 +827,10 @@ def _run_rpc_blocking(
                     return None
             finally:
                 hard_timer.cancel()
+            assert turn is not None  # returned above when None; narrows for LSP
             if hard_timeout_fired.is_set():
                 raise TimeoutError("omp task exceeded hard timeout")
-            if turn is not None and turn.assistant_message is not None:
+            if turn.assistant_message is not None:
                 stop_reason = turn.assistant_message.get("stopReason")
                 if stop_reason == "error":
                     error_msg = turn.assistant_message.get("errorMessage") or "model returned error"
@@ -841,6 +849,7 @@ def _run_rpc_blocking(
             unregister_cancel_hook()
 
 
+# trace:v1 id=impl.worker-run-task work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 async def run_task(
     *,
     task_kind: str,
@@ -909,7 +918,6 @@ async def run_task(
             inputs,
             task_kind=task_kind,
             prompt=prompt,
-            loop=loop,
             bindings=bindings,
             directive=directive,
         )

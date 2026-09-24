@@ -75,6 +75,13 @@ services:
       CARTER_OMP_MODEL: ${CARTER_OMP_MODEL:-anthropic/claude-sonnet-4-6}
       CARTER_OMP_PROVIDER: ${CARTER_OMP_PROVIDER:-}
       CARTER_OMP_THINKING: ${CARTER_OMP_THINKING:-high}
+      # --- provider auth (interim direct passthrough) ---
+      # There is no host-side auth gateway yet, so the agent's OMP
+      # authenticates with the operator's own provider credential. Eyes
+      # open: the omp-N slot shell runs as the same UID as OMP itself, so
+      # anything OMP can read, agent-executed code can printenv. A gateway
+      # (transport: pi-native) removes this sharing when it exists.
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
 
       # --- runtime tuning ---
       CARTER_OMP_MAX_CONCURRENCY: ${CARTER_OMP_MAX_CONCURRENCY:-8}
@@ -114,7 +121,10 @@ services:
       # with host-controlled permissions. The entrypoint copies it into
       # root-owned, world-readable files under /srv/agent-home; the agent
       # subprocess runs with HOME=/srv/agent-home.
-      - ${HOME}/.omp/agent/models.container.yml:/srv/agent-home-stage/.omp/agent/models.yml:ro
+      # NOTE: no models.yml mount — OMP's models.yml is a provider registry
+      # and a Carter selector manifest is not valid OMP config. The agent
+      # authenticates via env passthrough below; model selection lives in
+      # CARTER_OMP_MODEL.
       - ${HOME}/.agent/AGENTS.md:/srv/agent-home-stage/.agent/AGENTS.md:ro
       - ${HOME}/.agent/rules:/srv/agent-home-stage/.agent/rules:ro
     # Localhost-only: the only ingress is a TLS reverse proxy (see Caddyfile)
