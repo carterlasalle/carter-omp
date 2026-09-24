@@ -48,6 +48,12 @@ ARG OMP_SHA256_ARM64
 ARG BUN_VERSION
 ARG TARGETARCH
 
+# curl + CA certs for the pinned binary downloads below (python-slim
+# omits both). No `curl | sh`; every download is checksum-verified.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    ca-certificates curl unzip git tini sqlite3 \
+ && rm -rf /var/lib/apt/lists/*
 # Pinned OMP prebuilt binary (no `curl | sh`; checksum-verified download).
 # Release assets: omp-linux-x64 / omp-linux-arm64 (bare binaries, not zips).
 RUN case "${TARGETARCH:-amd64}" in \
