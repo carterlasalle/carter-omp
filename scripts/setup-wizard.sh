@@ -135,7 +135,13 @@ sudo sed -i "s/omp\\.example\\.com/$ESCAPED/" /etc/caddy/Caddyfile
 if [ -n "${VPS_IP4:-}" ]; then
   sudo sed -i "s/{\$PUBLIC_IP:0.0.0.0}/$VPS_IP4/" /etc/caddy/Caddyfile
 fi
-sudo systemctl reload caddy 2>/dev/null || sudo caddy reload 2>/dev/null || { echo "caddy reload failed; check 'systemctl status caddy'"; exit 1; }
+if sudo systemctl is-active --quiet caddy 2>/dev/null; then
+  sudo systemctl reload caddy 2>/dev/null || sudo caddy reload 2>/dev/null || { echo "caddy reload failed; check 'systemctl status caddy'"; exit 1; }
+else
+  # reload is a no-op on a failed/inactive unit — restart fresh so the new
+  # Caddyfile (bind IP, webhook routes) actually loads.
+  sudo systemctl restart caddy || { echo "caddy restart failed; check 'systemctl status caddy'"; exit 1; }
+fi
 pass "caddy serving (TLS automatic)"
 sleep 3
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://$DOMAIN/healthz" || true)
