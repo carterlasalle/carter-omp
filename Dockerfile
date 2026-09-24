@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7-labs
 ###############################################################################
+# trace:exempt reason=deploy-packaging-no-runtime-behavior
 # carter-omp — explicitly-invoked GitHub coding-agent orchestrator.
 #
 # Standalone image: no oh-my-pi monorepo checkout required. OMP arrives as a
