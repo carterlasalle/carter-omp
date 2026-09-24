@@ -111,6 +111,11 @@ getent hosts "$DOMAIN" >/dev/null 2>&1 || { echo "DNS still not resolving; conti
 
 # --- 4. firewall + caddy ------------------------------------------------------
 step "4. Firewall and Caddy"
+if ! sudo -n true 2>/dev/null; then
+  echo "[sudo needed] step 4 runs: ufw allow/enable, cp Caddyfile, systemctl reload caddy."
+  echo "Run: sudo -v  (enter your password once to cache it), then re-run this script."
+  exit 1
+fi
 if command -v ufw >/dev/null 2>&1; then
   sudo ufw allow OpenSSH >/dev/null 2>&1 || true
   sudo ufw allow 80,443/tcp >/dev/null 2>&1 || true
