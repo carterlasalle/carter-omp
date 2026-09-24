@@ -93,7 +93,12 @@ COPY --from=web-builder /work/web/dist/ ./src/carter_omp/static/
 
 RUN pip install --no-cache-dir uv \
     && uv sync --frozen --no-dev \
-    && uv pip install --system --no-deps .
+    && uv pip install --no-deps .
+# uv sync created /app/.venv holding the deps + project, but the image's
+# default `python` is system python. Point PATH at the venv so runtime
+# `python -m carter_omp` and the `carter-omp` console script resolve there.
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:${PATH}"
 
 # Host agent config is mounted read-only under /srv/agent-home-stage with
 # host-controlled permissions (see compose.yaml). The entrypoint copies it
