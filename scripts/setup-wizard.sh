@@ -170,7 +170,15 @@ step "5. Identity — who may trigger, where, and as what"
 echo "Each value below says what it is, why the bot needs it, and where it goes."
 ask_kv() { # ask_kv KEY PROMPT WHY [FETCH_HINT]
   local key="$1" prompt="$2" why="$3" hint="${4:-}"
-  if env_set "$key"; then skip "$key already set ($(env_val "$key" | cut -c1-24))"; return 0; fi
+  if env_set "$key"; then
+    if [ "$key" = "CARTER_OMP_GITHUB_PRIVATE_KEY_FILE" ] && [ ! -f "$(env_val "$key")" ]; then
+      echo ""
+      todo "$key is '$(env_val "$key")' but that file does not exist — re-enter it below."
+    else
+      skip "$key already set ($(env_val "$key" | cut -c1-24))"
+      return 0
+    fi
+  fi
   echo ""
   echo "  $key — $why"
   [ -n "$hint" ] && echo "  Find it: $hint"
