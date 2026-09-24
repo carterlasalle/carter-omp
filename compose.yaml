@@ -158,7 +158,8 @@ services:
     command: ["python", "-m", "carter_omp.proxy", "serve"]
     environment:
       # Credential: lives ONLY here (GitHub App preferred, PAT legacy).
-      # Set EITHER the App triple OR GITHUB_TOKEN, never both.
+      # Set EITHER the App triple OR GITHUB_TOKEN, never both. Empty means
+      # unset for the validator below (compose passes "" for `:-` defaults).
       CARTER_OMP_GITHUB_APP_ID: ${CARTER_OMP_GITHUB_APP_ID:-}
       CARTER_OMP_GITHUB_PRIVATE_KEY_FILE: ${CARTER_OMP_GITHUB_PRIVATE_KEY_FILE:?CARTER_OMP_GITHUB_PRIVATE_KEY_FILE must be set in .env}
       CARTER_OMP_GITHUB_INSTALLATION_ID: ${CARTER_OMP_GITHUB_INSTALLATION_ID:-}

@@ -544,6 +544,7 @@ def reset_settings_cache() -> None:
     get_settings.cache_clear()
 
 
+# trace:v1 id=impl.config-proxy-env work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 class _ProxyEnvLoader(BaseSettings):
     """Minimal env loader for `python -m carter_omp.proxy serve`.
 
@@ -585,8 +586,16 @@ class _ProxyEnvLoader(BaseSettings):
                 raise ValueError("must be a non-empty string")
         return value
 
+    # trace:v1 id=impl.config-proxy-credential work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @model_validator(mode="after")
     def _require_credential(self) -> _ProxyEnvLoader:
+        # Compose passes "" for unset `:-` defaults; treat blank as absent.
+        if self.github_token is not None and not self.github_token.get_secret_value().strip():
+            self.github_token = None
+        if self.github_app_id is not None and not self.github_app_id.strip():
+            self.github_app_id = None
+        if self.github_app_private_key_file is not None and not str(self.github_app_private_key_file).strip():
+            self.github_app_private_key_file = None
         has_token = self.github_token is not None
         has_app = self.github_app_id is not None or self.github_app_private_key_file is not None
         if has_token and has_app:
