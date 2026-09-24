@@ -1,0 +1,19 @@
+# trace:exempt reason=deploy-packaging-no-runtime-behavior
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-minor:
+        patterns:
+          - "*"
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+    groups:
+      js-minor:
+        patterns:
+          - "*"

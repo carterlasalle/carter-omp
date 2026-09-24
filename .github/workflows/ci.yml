@@ -4,6 +4,7 @@ on:
   push:
   pull_request:
 
+# trace:v1 id=impl.ci-jobs work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY
 jobs:
   python:
     runs-on: ubuntu-latest
@@ -42,3 +43,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t carter-omp:ci .
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gitleaks/gitleaks-action@v2
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python, javascript
+      - uses: github/codeql-action/analyze@v3
