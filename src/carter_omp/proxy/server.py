@@ -992,6 +992,26 @@ def create_proxy_app(settings: Settings) -> FastAPI:
             return _gh_error_response(exc)
         return JSONResponse({"ok": True})
 
+    # trace:v1 id=impl.proxy-add-issue-reaction work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @app.post("/gh/v1/add_issue_reaction")
+    async def add_issue_reaction(request: Request) -> JSONResponse:
+        data = await _json_body(request)
+        cfg: Settings = request.app.state.settings
+        token = _require_run_token(request, cfg)
+        repo = _require_str(data.get("repo"), "repo")
+        number = _require_int(data.get("number"), "number")
+        content = _require_str(data.get("content"), "content")
+        _enforce_repo_scope(cfg, repo)
+        _require_run_cap(token, "comment")
+        _require_run_repo(token, repo)
+        _require_run_thread(token, number)
+        github = _scoped_client(request, repo)
+        try:
+            await github.add_issue_reaction(repo, number, content)
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse({"ok": True})
+
     @app.post("/gh/v1/close_issue")
     async def close_issue(request: Request) -> JSONResponse:
         data = await _json_body(request)

@@ -793,6 +793,15 @@ class GitHubClient:
             json={"content": content},
         )
 
+    # trace:v1 id=impl.client-add-issue-reaction work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def add_issue_reaction(self, repo: str, number: int, content: str) -> None:
+        """Add a reaction (`eyes`, …) to the issue itself (not a comment)."""
+        await self.request(
+            "POST",
+            f"/repos/{repo}/issues/{number}/reactions",
+            json={"content": content},
+        )
+
     async def close_issue(self, repo: str, number: int, *, reason: str = "completed") -> None:
         """Close an issue with `state_reason` (`completed`/`not_planned`/`reopened`)."""
         await self.request(

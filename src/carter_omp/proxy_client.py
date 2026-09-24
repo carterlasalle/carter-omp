@@ -432,6 +432,14 @@ class GitHubProxyClient:
             json_body={"repo": repo, "comment_id": comment_id, "content": content},
         )
 
+    # trace:v1 id=impl.proxy-client-add-issue-reaction work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def add_issue_reaction(self, repo: str, number: int, content: str) -> None:
+        await self._request(
+            "POST",
+            "/gh/v1/add_issue_reaction",
+            json_body={"repo": repo, "number": number, "content": content},
+        )
+
     async def close_issue(self, repo: str, number: int, *, reason: str = "completed") -> None:
         await self._request(
             "POST",

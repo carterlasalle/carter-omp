@@ -515,10 +515,11 @@ def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
 
 # trace:v1 id=impl.worker-pickup-ack work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 async def _ack_pickup_reaction(inputs: TaskInputs, bindings: ToolBindings) -> None:
-    """Eyes-react to the triggering comment through the run-token channel.
+    """Eyes-react to the trigger through the run-token channel.
 
     Runs after `_attach_run_token`, so `bindings.github` already carries the
-    per-run token the proxy's `add_comment_reaction` endpoint requires.
+    per-run token the proxy's reaction endpoints require. Mention triggers
+    react to the comment; label triggers react to the issue itself.
     Best-effort UX: failures are swallowed — admission already happened.
     """
     from carter_omp.github_events import TriggerContext
@@ -526,12 +527,16 @@ async def _ack_pickup_reaction(inputs: TaskInputs, bindings: ToolBindings) -> No
     trigger = inputs.trigger
     if not isinstance(trigger, TriggerContext):
         return
-    if trigger.trigger_kind != "mention" or trigger.trigger_object_id is None:
-        return
     try:
-        await bindings.github.add_comment_reaction(
-            trigger.repository_full_name, trigger.trigger_object_id, "eyes"
-        )
+        if trigger.trigger_kind == "mention" and trigger.trigger_object_id is not None:
+            await bindings.github.add_comment_reaction(
+                trigger.repository_full_name, trigger.trigger_object_id, "eyes"
+            )
+        elif trigger.trigger_kind == "label":
+            number = trigger.issue_number or trigger.pull_request_number
+            if number is None:
+                return
+            await bindings.github.add_issue_reaction(trigger.repository_full_name, number, "eyes")
     except Exception as exc:
         log.debug("pickup ack failed", extra={"delivery": inputs.delivery_id, "err": str(exc)[:120]})
 
