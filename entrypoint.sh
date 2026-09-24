@@ -17,11 +17,9 @@ umask 0002
 # as $@ here (after tini --), so $1=python, $2=-m, $3=carter_omp.proxy is the
 # canonical shape; we also accept a single concatenated arg for safety.
 is_proxy_role=0
-if [ "${1:-}" = "python" ] && [ "${2:-}" = "-m" ] && [[ "${3:-}" == carter_omp.proxy* ]]; then
-    is_proxy_role=1
-elif [[ "${1:-}" == *"carter_omp.proxy"* ]]; then
-    is_proxy_role=1
-fi
+case "${3:-} ${1:-}" in
+  carter_omp.proxy*|*"carter_omp.proxy"*) is_proxy_role=1 ;;
+esac
 
 # The image runs as root; user/group creation must succeed. If /etc is
 # read-only or shadow files are corrupt, fail with a message (not a restart
