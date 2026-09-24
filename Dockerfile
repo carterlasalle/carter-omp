@@ -32,9 +32,10 @@ ARG YARN_VERSION=4.9.2
 FROM node:22-slim AS web-builder
 ARG YARN_VERSION
 WORKDIR /work
+ENV COREPACK_ENABLE_PROJECT_SPEC=1
 COPY web/package.json web/yarn.lock* ./web/
 COPY web/tsconfig.json web/vite.config.ts ./web/
-RUN yarn --cwd=web install --immutable
+RUN corepack enable && yarn --cwd=web install --immutable
 COPY web/ ./web/
 RUN yarn --cwd=web build
 
