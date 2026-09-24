@@ -90,9 +90,18 @@ if [ -z "$DOMAIN" ]; then
   read -r -p "Webhook subdomain (e.g. omp.example.com): " DOMAIN </dev/tty
 fi
 echo "Your domain's DNS lives wherever your nameservers point (registrar, Cloudflare, Route53...),"
-echo "NOT on this VPS. This VPS only needs an A record pointing at it."
-echo "  VPS public IP: $(curl -s --max-time 10 ifconfig.me || echo '<could not detect>')"
-pause "Add this DNS record at your provider:" "  Type: A | Name: $DOMAIN | Value: <VPS-IP-above> | TTL: 300 (or Auto)"
+echo "NOT on this VPS. This VPS only needs a record pointing at it."
+VPS_IP4=$(curl -4 -s --max-time 10 ifconfig.me 2>/dev/null || true)
+VPS_IP6=$(curl -6 -s --max-time 10 ifconfig.me 2>/dev/null || true)
+if [ -n "$VPS_IP4" ]; then
+  echo "  VPS public IPv4: $VPS_IP4"
+  pause "Add this DNS record at your provider:" "  Type: A | Name: $DOMAIN | Value: $VPS_IP4 | TTL: 300 (or Auto)"
+elif [ -n "$VPS_IP6" ]; then
+  echo "  VPS has IPv6 only: $VPS_IP6"
+  pause "Add this DNS record at your provider:" "  Type: AAAA | Name: $DOMAIN | Value: $VPS_IP6 | TTL: 300 (or Auto)"
+else
+  pause "Could not detect a public IP. Find it (provider panel / 'ip route get 1.1.1.1') then add:" "  Type: A | Name: $DOMAIN | Value: <VPS-IPv4> | TTL: 300 (or Auto)"
+fi
 echo "waiting for DNS to propagate..."
 for _ in $(seq 1 30); do
   if getent hosts "$DOMAIN" >/dev/null 2>&1; then pass "DNS resolves: $DOMAIN"; break; fi
