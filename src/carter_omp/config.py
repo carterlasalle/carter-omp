@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 ThinkingLevel = Literal["off", "low", "medium", "high", "xhigh", "max"]
 
 
+# trace:v1 id=impl.config-repo-owner-scope work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 class Settings(BaseSettings):
     """Strongly-typed runtime configuration.
 
@@ -67,6 +68,11 @@ class Settings(BaseSettings):
     authorized_logins_raw: str = Field("", alias="CARTER_OMP_AUTHORIZED_LOGINS")
     allowed_repo_ids_raw: str = Field("", alias="CARTER_OMP_REPO_IDS")
     allowed_repo_names_raw: str = Field("", alias="CARTER_OMP_REPOS")
+    # Owner scope: when set (e.g. `carterlasalle`), any repository owned by
+    # these GitHub user/org logins is authorized — past, present, and future —
+    # without listing IDs. The App-install list stays the real boundary:
+    # only repos where the App is actually installed can deliver webhooks.
+    allowed_repo_owners_raw: str = Field("", alias="CARTER_OMP_REPO_OWNERS")
     github_installation_id: int | None = Field(None, alias="CARTER_OMP_GITHUB_INSTALLATION_ID")
 
     @property
@@ -110,6 +116,14 @@ class Settings(BaseSettings):
     def allowed_repo_names(self) -> frozenset[str]:
         """Readable repo names for display/startup validation only."""
         return frozenset(piece.strip().lower() for piece in self.allowed_repo_names_raw.split(",") if piece.strip())
+
+    # trace:exempt reason=internal-detail
+    @property
+    def allowed_repo_owners(self) -> frozenset[str]:
+        """Owner logins whose repos are all authorized (past/present/future)."""
+        return frozenset(
+            piece.strip().lstrip("@").lower() for piece in self.allowed_repo_owners_raw.split(",") if piece.strip()
+        )
 
     @property
     def trigger_policy(self) -> TriggerPolicy:
@@ -344,6 +358,7 @@ class Settings(BaseSettings):
             )
         return self
 
+    # trace:exempt reason=internal-detail
     @model_validator(mode="after")
     def _validate_strict_identity(self) -> Settings:
         """Refuse to start when the strict authorization identity is incomplete.
@@ -356,8 +371,8 @@ class Settings(BaseSettings):
             return self
         if not self.authorized_user_ids:
             raise ValueError("refusing to start: no CARTER_OMP_AUTHORIZED_USER_IDS configured")
-        if not self.allowed_repo_ids:
-            raise ValueError("refusing to start: no CARTER_OMP_REPO_IDS configured")
+        if not self.allowed_repo_ids and not self.allowed_repo_owners:
+            raise ValueError("refusing to start: no CARTER_OMP_REPO_IDS or CARTER_OMP_REPO_OWNERS configured")
         if self.auto_issue_triage or self.auto_pr_review or self.auto_comment_followups:
             raise ValueError(
                 "refusing to start: strict mode forbids ambient triggers "

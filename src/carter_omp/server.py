@@ -378,6 +378,7 @@ def _build_state(settings: Settings, pool_factory: _PoolFactory) -> dict[str, An
     }
 
 
+# trace:v1 id=impl.server-repo-owner-scope work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory = _build_worker_pool) -> FastAPI:
     """Build the FastAPI app, optionally using an injected worker-pool factory."""
 
@@ -416,6 +417,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             raise HTTPException(503, "not initialized")
         return {"status": "ready"}
 
+    # trace:v1 id=impl.server-webhook work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
     @app.post("/webhook/github")
     async def webhook(
         request: Request,
@@ -471,6 +473,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             resolve_issue_from_pr=_resolve,
             policy=cfg.trigger_policy,
             allowed_repo_ids=cfg.allowed_repo_ids or None,
+            allowed_repo_owners=cfg.allowed_repo_owners or None,
             installation_id=cfg.github_installation_id,
             delivery_id=x_github_delivery,
         )
