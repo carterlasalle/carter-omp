@@ -634,6 +634,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         if token != cfg.replay_token.get_secret_value():
             raise HTTPException(401, "invalid replay token")
 
+    # trace:v1 id=impl.server-browse-issues work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-XM327PK3
     @app.get("/api/github/issues")
     async def api_github_issues(
         request: Request,
@@ -657,7 +658,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         capped = max(1, min(int(limit), 100))
         github: GitHubBackend = bag["github"]
         issue_cache: _IssueBrowseCache = bag["issue_browse_cache"]
-        repos = tuple(sorted(cfg.repo_allowlist))
+        repos = tuple(sorted(cfg.repo_allowlist | {f"{o}/*" for o in cfg.allowed_repo_owners}))
         if not repos:
             return {"issues": [], "errors": [], "repos": [], "cache": {"hit": False, "fetched_at": time.time()}}
 

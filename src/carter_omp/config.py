@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     github_webhook_secret: SecretStr = Field(..., alias="GITHUB_WEBHOOK_SECRET")
     bot_login: str = Field(..., alias="CARTER_OMP_BOT_LOGIN")
     git_author_name: str | None = Field(None, alias="CARTER_OMP_GIT_AUTHOR_NAME")
-    git_author_email: str = Field(..., alias="CARTER_OMP_GIT_AUTHOR_EMAIL")
+    git_author_email: str = Field("carter-omp[bot]@users.noreply.github.com", alias="CARTER_OMP_GIT_AUTHOR_EMAIL")
     repo_allowlist_raw: str = Field("", alias="CARTER_OMP_REPO_ALLOWLIST")
     pr_review_enabled: bool = Field(True, alias="CARTER_OMP_PR_REVIEW_ENABLED")
 
@@ -321,6 +321,17 @@ class Settings(BaseSettings):
                 return None
         return value
 
+    # trace:exempt reason=internal-detail
+    @field_validator("github_app_id", "github_installation_id", "github_app_private_key_file", mode="before")
+    @classmethod
+    def _blank_app_disables(cls, value: object) -> object:
+        """Treat empty App-key strings as unset (test .env shadowing; see conftest)."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        if isinstance(value, Path) and str(value).strip() == "":
+            return None
+        return value
+
     @model_validator(mode="after")
     def _validate_proxy_or_pat(self) -> Settings:
         """Enforce credential-mode exclusivity.
@@ -448,8 +459,12 @@ class Settings(BaseSettings):
         ]
         return frozenset(item for item in items if item)
 
+    # trace:v1 id=impl.config-allows-owner-scope work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     def allows(self, full_name: str) -> bool:
-        return full_name.lower() in self.repo_allowlist
+        lowered = full_name.lower()
+        if lowered in self.repo_allowlist:
+            return True
+        return "/" in lowered and lowered.split("/")[0] in self.allowed_repo_owners
 
     @property
     def model_pool(self) -> tuple[str, ...]:

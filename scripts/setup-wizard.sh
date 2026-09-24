@@ -1,31 +1,46 @@
 #!/usr/bin/env bash
 # trace:exempt reason=deploy-packaging-no-runtime-behavior
-# carter-omp VPS setup wizard. Automates everything automatable, pauses with
-# a clear PASTE prompt wherever only a human can act (DNS registrar, GitHub
-# App form). Idempotent: safe to re-run; completed steps detect and skip.
-#
-# Usage: ./scripts/setup-wizard.sh [--domain omp.example.com] [--repo-owners carterlasalle]
+# carter-omp setup wizard. Two modes:
+#   ./scripts/setup-wizard.sh --domain omp.example.com   # full VPS run
+#   ./scripts/setup-wizard.sh --resume                    # re-check everything,
+#      report what is done vs missing, fix what is fixable, resume where stopped
+# Idempotent: every step detects prior completion and skips or verifies.
 set -euo pipefail
 
 DOMAIN=""
 REPO_OWNERS="carterlasalle"
+RESUME=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain=*) DOMAIN="${1#--domain=}" ;;
     --domain) DOMAIN="${2:-}"; shift ;;
     --repo-owners=*) REPO_OWNERS="${1#--repo-owners=}" ;;
     --repo-owners) REPO_OWNERS="${2:-}"; shift ;;
+    --resume) RESUME=1 ;;
   esac
   shift
 done
 
 pass() { printf '\033[32m[ok]\033[0m %s\n' "$*"; }
+skip() { printf '\033[34m[skip]\033[0m %s\n' "$*"; }
+todo() { printf '\033[33m[TODO]\033[0m %s\n' "$*"; }
 step() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 pause() { # pause "WHY" "WHAT-TO-DO"
   printf '\n\033[33m[PASTE NEEDED] %s\033[0m\n%s\n' "$1" "$2"
   read -r -p "Press Enter when done... " _ </dev/tty
 }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1 ($2)"; exit 1; }; }
+env_val() { grep "^$1=" .env 2>/dev/null | cut -d= -f2-; }
+env_set() { # env_set KEY — true if non-empty
+  [ -f .env ] && [ -n "$(env_val "$1")" ]
+}
+set_kv() { # set_kv KEY VALUE — replace empty value or append
+  if grep -q "^$1=$" .env; then
+    sed -i "s|^$1=$|$1=$2|" .env
+  elif ! grep -q "^$1=" .env; then
+    printf '%s=%s\n' "$1" "$2" >> .env
+  fi
+}
 
 # --- 0. sanity ---------------------------------------------------------------
 step "0. Sanity"
@@ -47,6 +62,8 @@ corepack enable
 # web/package.json pins yarn@4.9.2 via `packageManager`. This env var makes
 # the corepack shim honor the nearest package.json instead of the global
 # default (4.18 on hosts that installed it first) — no --activate needed.
+# (A standalone yarn binary shadowing the shim, e.g. ~/.local/bin/yarn,
+# ignores this entirely: remove it so the shim resolves.)
 export COREPACK_ENABLE_PROJECT_SPEC=1
 if [ "$(yarn --version)" != "4.9.2" ]; then
   YARN_BIN="$(command -v yarn)"
@@ -63,12 +80,9 @@ yarn --cwd=web install --immutable
 pass "dashboard deps installed (yarn 4.9.2)"
 
 # --- 2. .env skeleton --------------------------------------------------------
-step "2. .env skeleton"
+step "2. Secrets (.env)"
 [ -f .env ] || cp .env.example .env
-pass ".env present"
-
 gen_secret() { openssl rand -hex 32; }
-
 if grep -q "^GITHUB_WEBHOOK_SECRET=$" .env 2>/dev/null; then
   SECRET=$(gen_secret)
   sed -i "s/^GITHUB_WEBHOOK_SECRET=$/GITHUB_WEBHOOK_SECRET=$SECRET/" .env
@@ -95,7 +109,11 @@ VPS_IP4=$(curl -4 -s --max-time 10 ifconfig.me 2>/dev/null || true)
 VPS_IP6=$(curl -6 -s --max-time 10 ifconfig.me 2>/dev/null || true)
 if [ -n "$VPS_IP4" ]; then
   echo "  VPS public IPv4: $VPS_IP4"
-  pause "Add this DNS record at your provider:" "  Type: A | Name: $DOMAIN | Value: $VPS_IP4 | TTL: 300 (or Auto)"
+  if getent hosts "$DOMAIN" >/dev/null 2>&1; then
+    skip "DNS already resolves: $DOMAIN"
+  else
+    pause "Add this DNS record at your provider:" "  Type: A | Name: $DOMAIN | Value: $VPS_IP4 | TTL: 300 (or Auto)"
+  fi
 elif [ -n "$VPS_IP6" ]; then
   echo "  VPS has IPv6 only: $VPS_IP6"
   pause "Add this DNS record at your provider:" "  Type: AAAA | Name: $DOMAIN | Value: $VPS_IP6 | TTL: 300 (or Auto)"
@@ -147,49 +165,130 @@ sleep 3
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://$DOMAIN/healthz" || true)
 [ "$CODE" = "404" ] && pass "ingress verified: /healthz → 404, /webhook/* proxied" || echo "[warn] /healthz → $CODE (want 404; cert may still be issuing — retry in a minute)"
 
-# --- 5. GitHub App form --------------------------------------------------------
-step "5. GitHub App form (manual, ~5 min)"
-WEBHOOK_SECRET=$(grep "^GITHUB_WEBHOOK_SECRET=" .env | cut -d= -f2)
-echo "Field-by-field walkthrough: docs/github-app.md"
-echo "  Webhook URL: https://$DOMAIN/webhook/github"
-echo "  Webhook secret: $WEBHOOK_SECRET"
-pause "Create the App, then come back with:" "  App ID, installation ID, bot login, private-key .pem path, your user ID, one repo ID"
-read -r -p "App ID: " APP_ID </dev/tty
-read -r -p "Installation ID: " INSTALL_ID </dev/tty
-read -r -p "Bot login (e.g. carter-omp[bot]): " BOT_LOGIN </dev/tty
-read -r -p "Private key .pem path on this VPS: " KEY_PATH </dev/tty
-read -r -p "Your GitHub user ID (gh api users/<you> --jq .id): " USER_ID </dev/tty
-
-set_kv() { # set_kv KEY VALUE — replace empty value or append
-  if grep -q "^$1=$" .env; then
-    sed -i "s|^$1=$|$1=$2|" .env
-  elif ! grep -q "^$1=" .env; then
-    printf '%s=%s\n' "$1" "$2" >> .env
-  fi
+# --- 5. identity (.env values, each explained) ----------------------------------
+step "5. Identity — who may trigger, where, and as what"
+echo "Each value below says what it is, why the bot needs it, and where it goes."
+ask_kv() { # ask_kv KEY PROMPT WHY [FETCH_HINT]
+  local key="$1" prompt="$2" why="$3" hint="${4:-}"
+  if env_set "$key"; then skip "$key already set ($(env_val "$key" | cut -c1-24))"; return 0; fi
+  echo ""
+  echo "  $key — $why"
+  [ -n "$hint" ] && echo "  Find it: $hint"
+  local val=""
+  read -r -p "  $prompt: " val </dev/tty
+  [ -n "$val" ] && set_kv "$key" "$val" && pass "$key set" || { todo "$key left empty — re-run with --resume"; return 1; }
 }
-set_kv CARTER_OMP_BOT_LOGIN "$BOT_LOGIN"
-set_kv CARTER_OMP_AUTHORIZED_USER_IDS "$USER_ID"
-set_kv CARTER_OMP_AUTHORIZED_LOGINS "$(gh api users 2>/dev/null --jq .login || echo carterlasalle)"
-set_kv CARTER_OMP_REPO_OWNERS "$REPO_OWNERS"
-set_kv CARTER_OMP_GITHUB_APP_ID "$APP_ID"
-set_kv CARTER_OMP_GITHUB_INSTALLATION_ID "$INSTALL_ID"
-set_kv CARTER_OMP_GITHUB_PRIVATE_KEY_FILE "$KEY_PATH"
-chmod 0400 "$KEY_PATH" 2>/dev/null || echo "[warn] could not chmod 0400 $KEY_PATH"
-pass ".env filled (IDs, App, key path)"
 
-# --- 6. models -----------------------------------------------------------------
-step "6. Models"
-if command -v omp >/dev/null 2>&1 && [ -x "$(command -v uv)" ]; then
-  uv run carter-omp init-models || echo "[warn] init-models skipped; set CARTER_OMP_MODEL manually"
+ask_kv CARTER_OMP_BOT_LOGIN "Bot login" \
+  "Github-App bot identity. The router rejects events sent BY the bot (loop protection) and matches @mentions against it." \
+  "App settings URL slug: github.com/settings/apps/<slug> → <slug>[bot]; verify: gh api \"/users/<slug>[bot]\" --jq .login"
+
+ask_kv CARTER_OMP_AUTHORIZED_USER_IDS "Your GitHub user ID" \
+  "Immutable operator identity. ONLY this sender.id can trigger runs — logins can be renamed/reused, IDs cannot." \
+  "gh api users/<you> --jq .id"
+
+if ! env_set CARTER_OMP_AUTHORIZED_LOGINS; then
+  echo ""
+  echo "  CARTER_OMP_AUTHORIZED_LOGINS — readability twin of the ID above (diagnostics only, never authority). Startup refuses when login/ID disagree (username-reuse protection)."
+  set_kv CARTER_OMP_AUTHORIZED_LOGINS "$(gh api users 2>/dev/null --jq .login || echo carterlasalle)"
+fi
+
+echo ""
+echo "  Repo scope — pick ONE:"
+echo "    (a) CARTER_OMP_REPO_OWNERS=$REPO_OWNERS — every repo under your slug, past/present/future, zero bookkeeping. The App-install list stays the real boundary."
+echo "    (b) CARTER_OMP_REPO_IDS — explicit immutable repo IDs (gh api repos/<o>/<r> --jq .id), maximal control."
+if env_set CARTER_OMP_REPO_OWNERS || env_set CARTER_OMP_REPO_IDS; then
+  skip "repo scope already set"
+else
+  set_kv CARTER_OMP_REPO_OWNERS "$REPO_OWNERS" && pass "repo scope: owner $REPO_OWNERS"
+fi
+
+ask_kv CARTER_OMP_GITHUB_APP_ID "App ID" \
+  "Identifies the GitHub App for JWT minting (proxy side). Public, not secret." \
+  "App settings page → App ID (numeric, e.g. 5055738)"
+
+ask_kv CARTER_OMP_GITHUB_INSTALLATION_ID "Installation ID" \
+  "Which install of the App (your account). Scopes tokens to your repos. Rotates on reinstall — re-run --resume if webhooks 401." \
+  "Install page URL ends /installations/<ID>, or JWT + GET /app/installations"
+
+ask_kv CARTER_OMP_GITHUB_PRIVATE_KEY_FILE "Private key .pem path on this VPS" \
+  "Signs installation-token requests. Mode 0400, visible ONLY to the github-proxy container — never pasted into .env." \
+  "scp the .pem here, then chmod 0400 <path>"
+
+if [ -n "$(env_val CARTER_OMP_GITHUB_PRIVATE_KEY_FILE)" ]; then
+  chmod 0400 "$(env_val CARTER_OMP_GITHUB_PRIVATE_KEY_FILE)" 2>/dev/null || echo "[warn] could not chmod 0400 the key"
+fi
+
+if ! env_set CARTER_OMP_GIT_AUTHOR_EMAIL; then
+  echo ""
+  echo "  CARTER_OMP_GIT_AUTHOR_EMAIL — commit author on bot-pushed branches (display only; proves nothing about authorization)."
+  echo "  Default: carter-omp[bot]@users.noreply.github.com — press Enter to accept."
+  read -r -p "  Commit author email: " EMAIL </dev/tty
+  set_kv CARTER_OMP_GIT_AUTHOR_EMAIL "${EMAIL:-carter-omp[bot]@users.noreply.github.com}"
+fi
+
+# --- 6. trigger policy (safe defaults, explained) -------------------------------
+step "6. Trigger policy — what may start the bot"
+echo "Defaults are production-safe (explicit invocation only). Each variable is"
+echo "explained in docs/triggers.md. Press Enter to accept each default."
+ask_default() { # ask_default KEY DEFAULT WHY
+  local key="$1" default="$2" why="$3" cur val
+  cur="$(env_val "$key")"
+  if [ -n "$cur" ]; then skip "$key=$cur"; return 0; fi
+  echo ""
+  echo "  $key (default: $default) — $why"
+  read -r -p "  Value [$default]: " val </dev/tty
+  set_kv "$key" "${val:-$default}"
+}
+ask_default CARTER_OMP_TRIGGER_MODE strict "strict = only your label/mention runs; legacy = old ambient behavior (tests only)."
+ask_default CARTER_OMP_TRIGGER_LABEL carter-omp "Label name that acts as the one-shot button. The bot consumes it on accept."
+ask_default CARTER_OMP_LABEL_TRIGGERS true "Master switch for label triggers. false disables even yours."
+ask_default CARTER_OMP_MENTION_TRIGGERS true "Master switch for @mention triggers. false disables even yours."
+ask_default CARTER_OMP_AUTO_ISSUE_TRIAGE false "true = every opened issue auto-runs (ambient; startup refuses it in strict mode)."
+ask_default CARTER_OMP_AUTO_PR_REVIEW false "true = every opened PR auto-reviews (ambient; refused in strict)."
+ask_default CARTER_OMP_AUTO_COMMENT_FOLLOWUPS false "true = any comment resumes the session (ambient; refused in strict)."
+ask_default CARTER_OMP_REVIEWER_BOTS "" "Bot logins whose comments authorize without a mention. Empty = reviews are context only."
+ask_default CARTER_OMP_RELEASE_SENTINEL_ENABLED false "true = CI completions self-start release repair (dangerous opt-in)."
+ask_default CARTER_OMP_QUESTION_AUTOCLOSE_ENABLED false "Keeps question-autoclose machinery available (never starts a model run)."
+
+# --- 7. models -----------------------------------------------------------------
+step "7. Models"
+if command -v omp >/dev/null 2>&1; then
+  if [ -f ~/.omp/agent/models.container.yml ]; then
+    skip "model catalog present (~/.omp/agent/models.container.yml)"
+  else
+    uv run carter-omp init-models || echo "[warn] init-models skipped; set CARTER_OMP_MODEL manually"
+  fi
 else
   echo "[warn] omp not found; skipping init-models (set CARTER_OMP_MODEL manually)"
 fi
+if ! env_set CARTER_OMP_MODEL; then
+  echo ""
+  echo "  CARTER_OMP_MODEL — single selector or comma pool (random pick per task), e.g. opencode-go/muse-spark-1.3-contributor,openrouter/qwen/qwen3.7-flash."
+  read -r -p "  Model pool: " POOL </dev/tty
+  [ -n "$POOL" ] && set_kv CARTER_OMP_MODEL "$POOL" || todo "CARTER_OMP_MODEL empty — set it before starting"
+fi
+if ! env_set CARTER_OMP_THINKING; then
+  set_kv CARTER_OMP_THINKING high && pass "thinking=high (default)"
+fi
 
-# --- 7. start + doctor -----------------------------------------------------------
-step "7. Start and validate"
-docker compose up -d --build
-docker compose exec carter-omp carter-omp doctor
-pass "doctor green — bot is live"
+# --- 8. start + report -----------------------------------------------------------
+step "8. Start and report"
+if docker compose up -d --build 2>&1 | tail -1; then
+  pass "containers up"
+else
+  todo "compose failed — fix the error above, then re-run with --resume"
+  exit 1
+fi
+echo ""
+echo "--- doctor ---"
+if docker compose exec carter-omp carter-omp doctor; then
+  pass "doctor green — bot is live"
+else
+  echo ""
+  todo "doctor reported failures (listed above). Fix .env values, then: ./scripts/setup-wizard.sh --resume"
+  exit 1
+fi
 
 cat <<EOF
 
@@ -198,4 +297,5 @@ Done. Next (docs/setup.md step 8):
   2. Open an issue → expect silence (no trigger, no compute).
   3. Label it carter-omp → expect triage → PR.
 Webhook URL (for reference): https://$DOMAIN/webhook/github
+Re-check anything any time: ./scripts/setup-wizard.sh --resume
 EOF

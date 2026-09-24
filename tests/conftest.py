@@ -121,6 +121,17 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]:
     monkeypatch.setenv("GITHUB_TOKEN", "")
     monkeypatch.delenv("CARTER_OMP_PROVIDER", raising=False)
     monkeypatch.setenv("CARTER_OMP_REPLAY_TOKEN", "")
+    # Owner scope must not leak from a developer .env into tests (same
+    # defense as GITHUB_TOKEN above): setenv("") shadows the file value.
+    # setenv("") shadows any developer .env (delenv would fall back to it);
+    # _blank_app_disables + str-optional App fields make "" safe here.
+    for _key in (
+        "CARTER_OMP_REPO_OWNERS",
+        "CARTER_OMP_GITHUB_APP_ID",
+        "CARTER_OMP_GITHUB_INSTALLATION_ID",
+        "CARTER_OMP_GITHUB_PRIVATE_KEY_FILE",
+    ):
+        monkeypatch.setenv(_key, "")
     reset_settings_cache()
     yield env
     reset_settings_cache()
@@ -142,6 +153,17 @@ def proxy_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]
     monkeypatch.setenv("CARTER_OMP_GH_PROXY_HMAC_KEY", "")
     monkeypatch.delenv("CARTER_OMP_PROVIDER", raising=False)
     monkeypatch.setenv("CARTER_OMP_REPLAY_TOKEN", "")
+    # Shadow every key a developer .env may set that _baseline_env omits,
+    # else pydantic-settings falls back to the on-disk file (see `env`).
+    # setenv("") shadows any developer .env (delenv would fall back to it);
+    # _blank_app_disables + str-optional App fields make "" safe here.
+    for _key in (
+        "CARTER_OMP_REPO_OWNERS",
+        "CARTER_OMP_GITHUB_APP_ID",
+        "CARTER_OMP_GITHUB_INSTALLATION_ID",
+        "CARTER_OMP_GITHUB_PRIVATE_KEY_FILE",
+    ):
+        monkeypatch.setenv(_key, "")
     reset_settings_cache()
     yield baseline
     reset_settings_cache()
