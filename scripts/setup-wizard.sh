@@ -27,9 +27,16 @@ todo() { printf '\033[33m[TODO]\033[0m %s\n' "$*"; }
 step() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 pause() { # pause "WHY" "WHAT-TO-DO"
   printf '\n\033[33m[PASTE NEEDED] %s\033[0m\n%s\n' "$1" "$2"
-  read -r -p "Press Enter when done... " _ </dev/tty
+  printf "%s" "Press Enter when done... "
+  read_tty _
 }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1 ($2)"; exit 1; }; }
+# Portable tty read (macOS bash 3.2 cannot parse `</dev/tty` on an
+# indented line inside a function/if — keep this at column 0).
+read_tty() {
+  eval "$1=\"$(</dev/tty head -n 1)\""
+}
+
 env_val() { grep "^$1=" .env 2>/dev/null | cut -d= -f2-; }
 env_set() { # env_set KEY — true if non-empty
   [ -f .env ] && [ -n "$(env_val "$1")" ]
@@ -101,7 +108,8 @@ fi
 # --- 3. DNS ------------------------------------------------------------------
 step "3. DNS for the webhook subdomain"
 if [ -z "$DOMAIN" ]; then
-  read -r -p "Webhook subdomain (e.g. omp.example.com): " DOMAIN </dev/tty
+  printf "%s" "Webhook subdomain (e.g. omp.example.com): "
+read_tty DOMAIN
 fi
 echo "Your domain's DNS lives wherever your nameservers point (registrar, Cloudflare, Route53...),"
 echo "NOT on this VPS. This VPS only needs a record pointing at it."
@@ -183,7 +191,8 @@ ask_kv() { # ask_kv KEY PROMPT WHY [FETCH_HINT]
   echo "  $key — $why"
   [ -n "$hint" ] && echo "  Find it: $hint"
   local val=""
-  read -r -p "  $prompt: " val </dev/tty
+  printf "%s" "  $prompt: "
+read_tty val
   [ -n "$val" ] && set_kv "$key" "$val" && pass "$key set" || { todo "$key left empty — re-run with --resume"; return 1; }
 }
 
@@ -231,7 +240,8 @@ if ! env_set CARTER_OMP_GIT_AUTHOR_EMAIL; then
   echo ""
   echo "  CARTER_OMP_GIT_AUTHOR_EMAIL — commit author on bot-pushed branches (display only; proves nothing about authorization)."
   echo "  Default: carter-omp[bot]@users.noreply.github.com — press Enter to accept."
-  read -r -p "  Commit author email: " EMAIL </dev/tty
+  printf "%s" "  Commit author email: "
+read_tty EMAIL
   set_kv CARTER_OMP_GIT_AUTHOR_EMAIL "${EMAIL:-carter-omp[bot]@users.noreply.github.com}"
 fi
 
@@ -244,8 +254,10 @@ ask_default() { # ask_default KEY DEFAULT WHY
   cur="$(env_val "$key")"
   if [ -n "$cur" ]; then skip "$key=$cur"; return 0; fi
   echo ""
-  echo "  $key (default: ${default:-(empty)}) — $why"
-  read -r -p "  Value [${default:-(empty)}]: " val </dev/tty>
+  case "$default" in "") disp="(empty)" ;; *) disp="$default" ;; esac
+  echo "  $key (default: $disp) — $why"
+  printf "%s" "  Value [$disp]: "
+read_tty val
   set_kv "$key" "${val:-$default}"
 }
 ask_default CARTER_OMP_TRIGGER_MODE strict "strict = only your label/mention runs; legacy = old ambient behavior (tests only)."
@@ -273,7 +285,8 @@ fi
 if ! env_set CARTER_OMP_MODEL; then
   echo ""
   echo "  CARTER_OMP_MODEL — single selector or comma pool (random pick per task), e.g. opencode-go/muse-spark-1.3-contributor,openrouter/qwen/qwen3.7-flash."
-  read -r -p "  Model pool: " POOL </dev/tty
+  printf "%s" "  Model pool: "
+read_tty POOL
   [ -n "$POOL" ] && set_kv CARTER_OMP_MODEL "$POOL" || todo "CARTER_OMP_MODEL empty — set it before starting"
 fi
 if ! env_set CARTER_OMP_THINKING; then
