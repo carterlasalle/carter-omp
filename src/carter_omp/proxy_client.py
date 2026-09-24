@@ -96,6 +96,7 @@ def _signed_headers(method: str, target: str, body: bytes, key: bytes) -> dict[s
 # ---------- GitHubProxyClient ----------
 
 
+# trace:v1 id=impl.proxy-client-reactions work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 class GitHubProxyClient:
     """HMAC-signed REST client speaking to a `carter_omp.proxy.server` instance.
 
@@ -422,6 +423,14 @@ class GitHubProxyClient:
         )
         items = data.get("items") if isinstance(data, dict) else None
         return tuple(_reaction_from(item) for item in items or ())
+
+    # trace:v1 id=impl.proxy-client-add-reaction work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def add_comment_reaction(self, repo: str, comment_id: int, content: str) -> None:
+        await self._request(
+            "POST",
+            "/gh/v1/add_comment_reaction",
+            json_body={"repo": repo, "comment_id": comment_id, "content": content},
+        )
 
     async def close_issue(self, repo: str, number: int, *, reason: str = "completed") -> None:
         await self._request(

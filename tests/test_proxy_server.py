@@ -1736,3 +1736,25 @@ async def test_proxy_prefers_app_mode_when_configured(tmp_path: Path, monkeypatc
     object.__setattr__(cfg, "github_token", None)
     app = _build_app(cfg)
     assert getattr(app.state, "app_token_provider", None) is None  # lifespan not run in tests
+
+
+async def test_add_comment_reaction(proxy_settings: Settings) -> None:
+    seen: list[dict[str, object]] = []
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        assert req.method == "POST"
+        assert req.url.path == "/repos/octo/widget/issues/comments/99/reactions"
+        seen.append({"body": json.loads(req.content.decode())})
+        return httpx.Response(201, json={})
+
+    app = _build_app(proxy_settings, gh)
+    token = _run_token(repo="octo/widget", issue=1, capabilities={"comment"})
+    body = b'{"repo":"octo/widget","comment_id":99,"content":"eyes"}'
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/add_comment_reaction",
+            content=body,
+            headers=_signed("POST", "/gh/v1/add_comment_reaction", body=body, run_token=token),
+        )
+    assert resp.status_code == 200, resp.text
+    assert seen == [{"body": {"content": "eyes"}}]

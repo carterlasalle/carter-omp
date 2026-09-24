@@ -218,6 +218,7 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
     return None
 
 
+# trace:v1 id=impl.client-reactions work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 class GitHubClient:
     """Async + sync facades over a small slice of the GitHub REST API."""
 
@@ -782,6 +783,15 @@ class GitHubClient:
             params={"content": "-1", "per_page": 100},
         )
         return tuple(_reaction_from_payload(item) for item in (data or []))
+
+    # trace:v1 id=impl.client-add-reaction work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def add_comment_reaction(self, repo: str, comment_id: int, content: str) -> None:
+        """Add a reaction (`eyes`, `+1`, …) to an issue comment. Fire-and-forget ACK."""
+        await self.request(
+            "POST",
+            f"/repos/{repo}/issues/comments/{comment_id}/reactions",
+            json={"content": content},
+        )
 
     async def close_issue(self, repo: str, number: int, *, reason: str = "completed") -> None:
         """Close an issue with `state_reason` (`completed`/`not_planned`/`reopened`)."""

@@ -28,6 +28,7 @@ from carter_omp.github_client import (
 )
 
 
+# trace:v1 id=impl.backend-reactions work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 class GitHubBackend(Protocol):
     """Methods every caller in carter-omp uses against GitHub."""
 
@@ -115,6 +116,8 @@ class GitHubBackend(Protocol):
     async def add_assignees(self, repo: str, number: int, assignees: list[str]) -> None: ...
 
     async def list_comment_reactions(self, repo: str, comment_id: int) -> tuple[ReactionInfo, ...]: ...
+    # trace:v1 id=impl.backend-add-reaction work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def add_comment_reaction(self, repo: str, comment_id: int, content: str) -> None: ...
 
     async def close_issue(self, repo: str, number: int, *, reason: str = "completed") -> None: ...
 
