@@ -33,8 +33,16 @@ for i in $(seq 1 "$max_slots"); do
     user="omp-$i"
     slot_group="omp-$i"
     slot_id=$((2000 + i))
-    /usr/sbin/groupadd -f -g "$slot_id" "$slot_group"
-    id -u "$user" >/dev/null 2>&1 || /usr/sbin/useradd -u "$slot_id" -g "$slot_group" -G omp -M -N -s /usr/sbin/nologin "$user"
+    # Idempotent: skip creation when the exact gid/uid already exists (e.g.
+    # container restart reusing /etc from a previous boot). Without this,
+    # groupadd rewrites gshadow every boot and any shadow hiccup becomes a
+    # crash loop under `set -e`.
+    if ! getent group "$slot_group" >/dev/null 2>&1; then
+        /usr/sbin/groupadd -g "$slot_id" "$slot_group"
+    fi
+    if ! id -u "$user" >/dev/null 2>&1; then
+        /usr/sbin/useradd -u "$slot_id" -g "$slot_group" -G omp -M -N -s /usr/sbin/nologin "$user"
+    fi
     /usr/sbin/usermod -g "$slot_group" -a -G omp "$user"
 done
 
