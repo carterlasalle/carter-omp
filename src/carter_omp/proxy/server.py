@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -178,12 +178,13 @@ def _optional_str_list(value: Any, field: str) -> list[str] | None:
     return list(value)
 
 
-def _require_review_comments(value: Any) -> list[dict[str, Any]]:
+# trace:v1 id=impl.proxy-review-comments work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _require_review_comments(value: Any) -> list[Mapping[str, Any]]:
     if value is None:
         return []
     if not isinstance(value, list):
         raise HTTPException(400, "missing/invalid 'comments'")
-    comments: list[dict[str, Any]] = []
+    comments: list[Mapping[str, Any]] = []
     for idx, item in enumerate(value):
         if not isinstance(item, dict):
             raise HTTPException(400, f"comments[{idx}] must be an object")
@@ -461,9 +462,11 @@ def _origin_remote_auth(
         raise
 
 
+# trace:v1 id=impl.proxy-app work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def create_proxy_app(settings: Settings) -> FastAPI:
     """Build the github-proxy FastAPI app bound to `settings`."""
 
+    # trace:v1 id=impl.proxy-lifespan work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from carter_omp.app_auth import AppTokenProvider
@@ -482,13 +485,15 @@ def create_proxy_app(settings: Settings) -> FastAPI:
                 if installation is not None:
                     token = provider.token_unscoped(installation_id=installation)
                     probe = GitHubClient(token)
-                    login = await probe.get_authenticated_login()
+                    # Installation tokens cannot call GET /user (user-only
+                    # endpoint → 403). Probe an installation-token endpoint.
+                    repos = await probe.request("GET", "/installation/repositories")
                     log.info(
-                        "github-proxy app identity",
+                        "github-proxy app auth ready",
                         extra={
                             "app_id": settings.github_app_id,
                             "installation_id": installation,
-                            "bot_login": login,
+                            "repository_count": repos.get("total_count", 0),
                         },
                     )
             except Exception as exc:
@@ -572,10 +577,16 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         return {"status": "ok"}
 
     # ---- reads ----
+    # trace:v1 id=impl.proxy-auth-login work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @app.get("/gh/v1/authenticated_login")
     async def authenticated_login(request: Request) -> dict[str, str]:
         await _authenticate(request)
+        cfg: Settings = request.app.state.settings
         github: GitHubClient = request.app.state.github
+        # App installation tokens cannot call GET /user; fall back to the
+        # configured bot login instead of 403ing.
+        if cfg.github_app_id is not None:
+            return {"login": cfg.bot_login}
         try:
             login = await github.get_authenticated_login()
         except GitHubError as exc:
