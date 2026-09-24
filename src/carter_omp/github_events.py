@@ -366,18 +366,27 @@ def authorize_event(
     allowed_repo_ids: frozenset[int] | None,
     installation_id: int | None,
     bot_login: str,
+    allowed_repo_owners: frozenset[str] | None = None,
 ) -> AuthorizationDecision:
     """Decide whether this exact webhook event is an authorized trigger.
 
     Never consults mutable issue state, associations, or display names — only
     the signed payload's `sender.id`, `repository.id`, `installation.id`,
     and the trigger itself (label name + labeled action, or exact mention).
+    Owner scope (`allowed_repo_owners`) additionally admits repos owned by a
+    configured login without listing IDs; the owner comes from the signed
+    payload's `repository.full_name`.
     """
     repo_id = _repository_id(payload)
     if repo_id is None:
         return AuthorizationDecision(authorized=False, reason="repo_not_authorized")
     if allowed_repo_ids is not None and repo_id not in allowed_repo_ids:
-        return AuthorizationDecision(authorized=False, reason="repo_not_authorized")
+        owner: str | None = None
+        if allowed_repo_owners:
+            full = _repo_full_name(payload)
+            owner = full.split("/")[0].lower() if full and "/" in full else None
+        if owner not in (allowed_repo_owners or frozenset()):
+            return AuthorizationDecision(authorized=False, reason="repo_not_authorized")
     if installation_id is not None:
         got_installation = _installation_id(payload)
         if got_installation is None or got_installation != installation_id:
@@ -893,6 +902,7 @@ def route(
     release_commit_prefix: str = "chore: bump version to ",
     policy: TriggerPolicy | None = None,
     allowed_repo_ids: frozenset[int] | None = None,
+    allowed_repo_owners: frozenset[str] | None = None,
     installation_id: int | None = None,
     delivery_id: str = "",
 ) -> RouteDecision:
@@ -925,7 +935,9 @@ def route(
 
     repo = _repo_full_name(payload)
     if repo is None or repo.lower() not in allowlist:
-        return RouteDecision("skip", None, repo, None, "repo not on allowlist")
+        owner = repo.split("/")[0].lower() if repo and "/" in repo else None
+        if owner not in (allowed_repo_owners or frozenset()):
+            return RouteDecision("skip", None, repo, None, "repo not on allowlist")
 
     action = str(payload.get("action") or "")
 
@@ -945,7 +957,6 @@ def route(
             if resolved:
                 key = resolved
         return RouteDecision("queue", "cleanup_workspace", repo, key, reason)
-
     authz = authorize_event(
         event_type,
         payload,
@@ -953,6 +964,7 @@ def route(
         allowed_repo_ids=allowed_repo_ids,
         installation_id=installation_id,
         bot_login=bot_login,
+        allowed_repo_owners=allowed_repo_owners,
     )
     if not authz.authorized:
         key: str | None = None

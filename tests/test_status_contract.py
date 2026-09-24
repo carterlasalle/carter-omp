@@ -25,6 +25,31 @@ _FIXED_TS = "2024-01-01T00:00:00+00:00"
 _UPDATE_ENV = "CARTER_OMP_UPDATE_STATUS_CONTRACT"
 
 
+class _PausedPool:
+    """No-op pool: keeps TestClient lifespan from racing the test's claims."""
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self, *, drain_timeout: float = 25.0, kill_timeout: float = 5.0) -> None:
+        pass
+
+    def wake(self) -> None:
+        pass
+
+    async def cancel_event(self, delivery_id: str) -> bool:
+        return False
+
+    async def inflight_snapshot(self) -> list[str]:
+        return []
+
+
+def _create_app(settings: Settings | None = None):  # type: ignore[no-untyped-def]
+    from carter_omp.server import create_app as _create
+
+    return _create(settings, pool_factory=lambda *args, **kwargs: _PausedPool())
+
+
 def _normalize_for_fixture(value: Any) -> Any:
     if isinstance(value, dict):
         normalized: dict[str, Any] = {}
@@ -42,7 +67,7 @@ def _normalize_for_fixture(value: Any) -> Any:
 
 
 def test_status_contract(settings: Settings) -> None:
-    app = create_app(settings)
+    app = _create_app(settings)
     with TestClient(app) as client:
         # Seed AFTER startup:
         db = get_database(settings.sqlite_path)
@@ -248,7 +273,7 @@ def test_cancel_happy_path(env, monkeypatch: pytest.MonkeyPatch) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()
     cfg.ensure_paths()
-    app = create_app(cfg)
+    app = _create_app(cfg)
     with TestClient(app) as client:
         db = get_database(cfg.sqlite_path)
         db.record_event(
@@ -281,7 +306,7 @@ def test_cancel_errors_and_gating(env, monkeypatch: pytest.MonkeyPatch) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()
     cfg.ensure_paths()
-    app = create_app(cfg)
+    app = _create_app(cfg)
     with TestClient(app) as client:
         db = get_database(cfg.sqlite_path)
         db.record_event(
@@ -346,7 +371,7 @@ def test_retry_state_transition(env, monkeypatch: pytest.MonkeyPatch) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()
     cfg.ensure_paths()
-    app = create_app(cfg)
+    app = _create_app(cfg)
     with TestClient(app) as client:
         db = get_database(cfg.sqlite_path)
         db.record_event(

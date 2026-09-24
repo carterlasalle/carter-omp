@@ -379,3 +379,37 @@ def test_status_label_variants_never_trigger() -> None:
         )
         assert not d.should_queue, name
         assert d.reason == "wrong_label", name
+
+
+def test_owner_scope_admits_unlisted_repo_id() -> None:
+    """CARTER_OMP_REPO_OWNERS covers past/present/future repos by owner login."""
+    d = _route(
+        "issues",
+        {
+            "action": "labeled",
+            "label": {"name": "carter-omp"},
+            "issue": {"number": 9},
+            "repository": {"id": 555000111, "full_name": "carterlasalle/brand-new-repo"},
+            "sender": _sender("carterlasalle", OPERATOR_ID),
+        },
+        allowed_repo_owners=frozenset({"carterlasalle"}),
+    )
+    assert d.should_queue
+    assert d.trigger is not None
+    assert d.trigger.actor_id == OPERATOR_ID
+
+
+def test_owner_scope_rejects_other_owners() -> None:
+    d = _route(
+        "issues",
+        {
+            "action": "labeled",
+            "label": {"name": "carter-omp"},
+            "issue": {"number": 9},
+            "repository": {"id": 555000112, "full_name": "mallory/evil-fork"},
+            "sender": _sender("carterlasalle", OPERATOR_ID),
+        },
+        allowed_repo_owners=frozenset({"carterlasalle"}),
+    )
+    assert not d.should_queue
+    assert d.reason == "repo not on allowlist"

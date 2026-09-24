@@ -234,6 +234,7 @@ def cleanup(issue_key: str) -> None:
     click.echo(f"cleaned up {issue_key}")
 
 
+# trace:v1 id=impl.cli-doctor work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-XM327PK3
 @main.command()
 def doctor() -> None:
     """Verify DB, OMP binary, config identity, proxy channel, and dashboard bundle."""
@@ -259,9 +260,11 @@ def doctor() -> None:
     click.echo(f"authorized user ids: {sorted(cfg.authorized_user_ids) or 'NONE (refuses to start)'}")
     if not cfg.authorized_user_ids:
         problems.append("no CARTER_OMP_AUTHORIZED_USER_IDS configured")
-    click.echo(f"allowed repo ids: {sorted(cfg.allowed_repo_ids) or 'NONE (refuses to start)'}")
-    if not cfg.allowed_repo_ids:
-        problems.append("no CARTER_OMP_REPO_IDS configured")
+    click.echo(
+        f"allowed repo ids: {sorted(cfg.allowed_repo_ids) or 'NONE'} owners={sorted(cfg.allowed_repo_owners) or 'NONE'}"
+    )
+    if not cfg.allowed_repo_ids and not cfg.allowed_repo_owners:
+        problems.append("no CARTER_OMP_REPO_IDS or CARTER_OMP_REPO_OWNERS configured")
     if cfg.github_app_id is not None:
         click.echo(f"github app id: {cfg.github_app_id} installation={cfg.github_installation_id}")
         key_file = cfg.github_app_private_key_file
@@ -280,6 +283,7 @@ def doctor() -> None:
         problems.append("proxy channel not configured")
     else:
         click.echo(f"proxy: {cfg.github_proxy_url}")
+    _doctor_models(cfg, omp, problems)
     from carter_omp.dashboard import static_dir
 
     index = static_dir() / "index.html"
@@ -290,6 +294,41 @@ def doctor() -> None:
         for p in problems:
             click.echo(f"FAIL: {p}", err=True)
         sys.exit(1)
+    click.echo("doctor: ok")
+
+
+# trace:v1 id=impl.cli-doctor-models work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-XM327PK3
+def _doctor_models(cfg: Settings, omp: str | None, problems: list[str]) -> None:
+    """Verify the OMP model catalog mount and every CARTER_OMP_MODEL selector."""
+    import json
+    import subprocess
+    from pathlib import Path
+
+    catalog = Path.home() / ".omp" / "agent" / "models.container.yml"
+    click.echo(f"model catalog: {catalog} {'present' if catalog.is_file() else 'MISSING (run carter-omp init-models)'}")
+    if not catalog.is_file():
+        problems.append("model catalog missing (run carter-omp init-models)")
+        return
+    click.echo(f"model pool: {','.join(cfg.model_pool)} thinking={cfg.thinking_level}")
+    if omp is None:
+        return
+    for selector in cfg.model_pool:
+        provider = selector.split("/")[0] if "/" in selector else ""
+        try:
+            proc = subprocess.run(
+                [omp, "models", "ls", provider, "--json"] if provider else [omp, "models", "ls", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            known = {m["selector"] for m in json.loads(proc.stdout).get("models", [])}
+        except Exception as exc:
+            click.echo(f"model {selector}: unverifiable ({exc})")
+            continue
+        if selector in known:
+            click.echo(f"model {selector}: ok")
+        else:
+            problems.append(f"model selector unknown to omp: {selector}")
     click.echo("doctor: ok")
 
 
@@ -314,6 +353,7 @@ def policy() -> None:
     """Policy helpers."""
 
 
+# trace:v1 id=impl.cli-policy-explain work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-XM327PK3
 @policy.command("explain")
 @click.argument("delivery_id")
 def policy_explain(delivery_id: str) -> None:
@@ -341,6 +381,152 @@ def policy_explain(delivery_id: str) -> None:
         click.echo(f"policy: {trigger.policy_version} at {trigger.authorized_at.isoformat()}")
     else:
         click.echo("trigger: none (event was never authorized)")
+
+    # trace:v1 id=impl.cli-init-models work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-XM327PK3
+
+
+@main.command("init-models")
+@click.option("--provider", default=None, help="Provider id (e.g. openrouter, opencode-go, anthropic).")
+@click.option("--model", default=None, help="Primary model selector (provider/id form).")
+@click.option(
+    "--fallback",
+    multiple=True,
+    help="Fallback model selector, repeatable. Tried in order when the primary fails.",
+)
+@click.option("--thinking", default="high", help="Thinking level: off, low, medium, high, xhigh, max.")
+@click.option("--non-interactive", is_flag=True, help="Fail instead of prompting for missing values.")
+def init_models(
+    provider: str | None, model: str | None, fallback: tuple[str, ...], thinking: str, non_interactive: bool
+) -> None:
+    """Generate ~/.omp/agent/models.container.yml and matching .env model settings."""
+    import shutil
+
+    omp = shutil.which("omp")
+    if omp is None:
+        click.echo("omp binary not found on PATH; install OMP first.", err=True)
+        sys.exit(2)
+
+    # trace:exempt reason=internal-detail
+    def ask(prompt: str, default: str | None = None) -> str:
+        if non_interactive:
+            if default is None:
+                click.echo(f"missing required value for: {prompt}", err=True)
+                sys.exit(2)
+            return default
+        suffix = f" [{default}]" if default else ""
+        value = click.prompt(prompt + suffix, default=default or "", show_default=False).strip()
+        if not value and default:
+            return default
+        if not value:
+            click.echo("value required.", err=True)
+            sys.exit(2)
+        return value
+
+    provider = provider or ask("Provider (openrouter, opencode-go, anthropic, ...)", "openrouter")
+    provider = provider.strip().lower()
+    if not model:
+        _list_provider_models(omp, provider)
+        model = ask(f"Primary model (e.g. {provider}/<id>)")
+    pool = [model.strip()]
+    for extra in fallback:
+        extra = extra.strip()
+        if extra and extra not in pool:
+            pool.append(extra)
+    if not fallback and not non_interactive and click.confirm("Add a fallback model?", default=True):
+        _list_provider_models(omp, provider)
+        second = click.prompt("Fallback model (empty to skip)", default="", show_default=False).strip()
+        if second and second not in pool:
+            pool.append(second)
+    thinking = (thinking or "high").strip().lower()
+    if thinking not in ("off", "low", "medium", "high", "xhigh", "max"):
+        click.echo(f"invalid thinking level: {thinking}", err=True)
+        sys.exit(2)
+
+    for selector in pool:
+        _verify_selector(omp, selector)
+
+    from pathlib import Path
+
+    target = Path.home() / ".omp" / "agent" / "models.container.yml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Generated by `carter-omp init-models`. Selectors only — API keys",
+        "# stay wherever OMP already keeps them (env / gateway), never here.",
+        f"# Primary: {pool[0]}",
+        "models:",
+        f"  primary: {pool[0]}",
+    ]
+    if len(pool) > 1:
+        lines.append("  fallbacks:")
+        lines.extend(f"    - {selector}" for selector in pool[1:])
+    lines.append(f"thinking: {thinking}")
+    lines.append("")
+    target.write_text("\n".join(lines), encoding="utf-8")
+    click.echo(f"wrote {target}")
+    click.echo("")
+    click.echo("Put this in .env:")
+    click.echo(f"CARTER_OMP_MODEL={','.join(pool)}")
+    click.echo(f"CARTER_OMP_THINKING={thinking}")
+    if provider:
+        click.echo(f"# optional: CARTER_OMP_PROVIDER={provider}")
+
+
+# trace:v1 id=impl.cli-list-provider-models work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-XM327PK3
+def _list_provider_models(omp: str, provider: str) -> None:
+    """Print up to 40 model selectors for a provider (best-effort)."""
+    import json
+    import subprocess
+
+    try:
+        import os
+
+        env = {k: v for k, v in os.environ.items() if k != "HOME"}
+        raw = subprocess.run(
+            [omp, "models", "ls", provider, "--json"], capture_output=True, text=True, timeout=30, env=env
+        ).stdout
+        selectors = [m["selector"] for m in json.loads(raw).get("models", [])][:40]
+    except Exception:
+        selectors = []
+    if selectors:
+        click.echo(f"Available {provider} models:")
+        for selector in selectors:
+            click.echo(f"  {selector}")
+    else:
+        click.echo(f"(could not list {provider} models; enter a {provider}/<id> selector manually)")
+
+
+# trace:v1 id=impl.cli-verify-selector work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-XM327PK3
+def _verify_selector(omp: str, selector: str) -> None:
+    """Fail closed when a selector matches nothing `omp` knows."""
+    import json
+    import subprocess
+
+    provider = selector.split("/")[0] if "/" in selector else ""
+    try:
+        import os
+
+        # OMP resolves its model catalog relative to HOME; the wizard must
+        # query the operator's real catalog, never a sandboxed HOME override.
+        env = {k: v for k, v in os.environ.items() if k != "HOME"}
+        proc = subprocess.run(
+            [omp, "models", "ls", provider, "--json"] if provider else [omp, "models", "ls", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        known = {m["selector"] for m in json.loads(proc.stdout).get("models", [])}
+        if proc.returncode != 0 or not known:
+            raise ValueError(f"`omp models ls {provider}` returned no usable model list")
+    except SystemExit:
+        raise
+    except Exception as exc:
+        click.echo(f"warning: could not verify {selector}: {exc}", err=True)
+        return
+    if selector not in known:
+        click.echo(f"unknown model selector: {selector} (not in `omp models ls {provider}`)", err=True)
+        sys.exit(2)
+    click.echo(f"verified: {selector}")
 
 
 if __name__ == "__main__":

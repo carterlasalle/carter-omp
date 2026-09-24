@@ -1,3 +1,4 @@
+# trace:v1 id=impl.compose-ports work=WORK-CO-Q8Z1HJJJ
 services:
   # ───────────────────────────────────────────────────────────────────────────
   # carter-omp orchestrator
@@ -100,8 +101,11 @@ services:
       - ${HOME}/.omp/agent/models.container.yml:/srv/agent-home-stage/.omp/agent/models.yml:ro
       - ${HOME}/.agent/AGENTS.md:/srv/agent-home-stage/.agent/AGENTS.md:ro
       - ${HOME}/.agent/rules:/srv/agent-home-stage/.agent/rules:ro
+    # Localhost-only: the only ingress is a TLS reverse proxy (see Caddyfile)
+    # that forwards /webhook/* and 404s everything else. Nothing here is
+    # directly reachable from the host network, let alone the internet.
     ports:
-      - "0.0.0.0:6543:8080"
+      - "127.0.0.1:6543:8080"
 
   # ───────────────────────────────────────────────────────────────────────────
   # github-proxy
