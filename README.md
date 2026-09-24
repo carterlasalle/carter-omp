@@ -65,8 +65,13 @@ GitHub is untrusted input. The signed webhook's `sender.id` and `repository.id` 
 git clone https://github.com/carterlasalle/carter-omp
 cd carter-omp
 
+# Fast path (VPS): answers DNS/App questions interactively, automates the rest
+./scripts/setup-wizard.sh --domain omp.example.com --repo-owners carterlasalle
+
+# Manual path:
 uv sync --all-extras
 corepack enable
+export COREPACK_ENABLE_PROJECT_SPEC=1   # honor web/package.json's yarn@4.9.2 pin
 yarn --cwd=web install --immutable
 
 cp .env.example .env
@@ -74,6 +79,8 @@ $EDITOR .env
 openssl rand -hex 32   # CARTER_OMP_GH_PROXY_HMAC_KEY
 openssl rand -hex 32   # GITHUB_WEBHOOK_SECRET
 ```
+
+Full zero-to-working walkthrough (VPS, DNS, Caddy, App form, first run): [Setup](docs/setup.md).
 
 ### Run locally
 <!-- trace:v1 id=doc.readme-run-locally work=WORK-CO-Q8Z1HJJJ -->

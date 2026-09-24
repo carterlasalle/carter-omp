@@ -41,7 +41,10 @@ command -v omp >/dev/null 2>&1 || echo "[warn] omp not on PATH (needed for init-
 uv sync --all-extras
 pass "python env synced"
 corepack enable
-corepack prepare yarn@4.9.2 --activate
+# web/package.json pins yarn@4.9.2 via `packageManager`. This env var makes
+# the corepack shim honor the nearest package.json instead of the global
+# default (4.18 on hosts that installed it first) — no --activate needed.
+export COREPACK_ENABLE_PROJECT_SPEC=1
 if [ "$(yarn --version)" != "4.9.2" ]; then echo "yarn pin failed: $(yarn --version)"; exit 1; fi
 yarn --cwd=web install --immutable
 pass "dashboard deps installed (yarn 4.9.2)"
