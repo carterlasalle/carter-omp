@@ -82,6 +82,7 @@ from carter_omp.natives_cache import compute_key as natives_compute_key
 log = logging.getLogger(__name__)
 
 
+# trace:v1 id=impl.sandbox-Workspace work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 @dataclass(slots=True)
 class Workspace:
     """Resolved per-issue scratch space."""
@@ -95,15 +96,18 @@ class Workspace:
     repo_full_name: str
     issue_number: int | str
 
+    # trace:exempt reason=internal-detail
     @property
     def repro_dir(self) -> Path:
         return self.context_dir / "repro"
 
+    # trace:exempt reason=internal-detail
     @property
     def workspace_key(self) -> str:
         return workspace_key(self.repo_full_name, self.issue_number)
 
 
+# trace:v1 id=impl.sandbox--slug work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _slug(text: str, *, length: int = 40) -> str:
     cleaned = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     if not cleaned:
@@ -111,16 +115,20 @@ def _slug(text: str, *, length: int = 40) -> str:
     return cleaned[:length]
 
 
+# trace:v1 id=impl.sandbox-short-hex work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _short_hex(seed: str | None = None) -> str:
     if seed:
-        return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:8]
+        # Non-security branch-slug hash (deterministic, not a credential).
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
     return secrets.token_hex(4)
 
 
+# trace:v1 id=impl.sandbox-workspace-key work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def workspace_key(repo: str, number: int | str) -> str:
     return f"{repo.replace('/', '__')}__{number}"
 
 
+# trace:v1 id=impl.sandbox--safe-directory-env work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _safe_directory_env(repo_dir: Path) -> dict[str, str]:
     """Return a Git config env overlay whitelisting ``repo_dir`` as safe."""
     return {
@@ -130,6 +138,7 @@ def _safe_directory_env(repo_dir: Path) -> dict[str, str]:
     }
 
 
+# trace:v1 id=impl.sandbox--git-env-for-repo work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _git_env_for_repo(repo_dir: Path) -> dict[str, str]:
     env = os.environ.copy()
     env.update(_safe_directory_env(repo_dir))
@@ -137,6 +146,7 @@ def _git_env_for_repo(repo_dir: Path) -> dict[str, str]:
     return env
 
 
+# trace:v1 id=impl.sandbox-make-branch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def make_branch(*, issue_number: int, title: str, seed: str | None = None) -> str:
     return f"carter-omp/{_short_hex(seed or f'{issue_number}-{title}')}/{_slug(title or f'issue-{issue_number}')}"
 
@@ -144,6 +154,7 @@ def make_branch(*, issue_number: int, title: str, seed: str | None = None) -> st
 _BRANCH_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
+# trace:v1 id=impl.sandbox-validate-branch-slug work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def validate_branch_slug(slug: object) -> str:
     """Return ``slug`` if it is a valid kebab-case branch slug, else raise.
 
@@ -157,6 +168,7 @@ def validate_branch_slug(slug: object) -> str:
     return slug
 
 
+# trace:v1 id=impl.sandbox-rename-workspace-branch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def rename_workspace_branch(
     workspace: Workspace,
     new_slug: str,
@@ -219,6 +231,7 @@ def rename_workspace_branch(
 # ---------- GitTransport (transport abstraction over clone/fetch/push) ----------
 
 
+# trace:v1 id=impl.sandbox-GitTransport work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 class GitTransport(Protocol):
     """Pluggable remote-facing git operations.
 
@@ -227,22 +240,27 @@ class GitTransport(Protocol):
     - `carter_omp.proxy_client.ProxyGitTransport`: forwards over HMAC RPC.
     """
 
+    # trace:exempt reason=internal-detail
     def clone_pool(self, *, repo: str, clone_url: str, default_branch: str, target: Path) -> None:
         """Fresh clone into `target`. `target` must not exist (or be empty)."""
         ...
 
+    # trace:exempt reason=internal-detail
     def fetch_pool(self, *, repo: str, pool_dir: Path) -> None:
         """`git fetch --prune origin` against the shared pool clone."""
         ...
 
+    # trace:exempt reason=internal-detail
     def fetch_base_ref(self, *, repo: str, pool_dir: Path, ref: str) -> None:
         """Best-effort `git fetch origin <ref>` to ensure the base branch is local."""
         ...
 
+    # trace:exempt reason=internal-detail
     def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None:
         """Fetch `refs/pull/<n>/head` into FETCH_HEAD for detached PR review checkouts."""
         ...
 
+    # trace:exempt reason=internal-detail
     def push_branch(
         self,
         *,
@@ -256,6 +274,7 @@ class GitTransport(Protocol):
         """Push `branch` to origin. MUST refuse if HEAD has drifted from `expected_head`."""
         ...
 
+    # trace:exempt reason=internal-detail
     def push_release(
         self,
         *,
@@ -271,6 +290,7 @@ class GitTransport(Protocol):
         ...
 
 
+# trace:v1 id=impl.sandbox-LocalGitTransport work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 class LocalGitTransport:
     """Default GitTransport: run git in-process with ephemeral PAT injection.
 
@@ -281,25 +301,31 @@ class LocalGitTransport:
 
     __slots__ = ("_token",)
 
+    # trace:exempt reason=internal-detail
     def __init__(self, token: str | None) -> None:
         self._token = token
 
+    # trace:exempt reason=internal-detail
     def clone_pool(self, *, repo: str, clone_url: str, default_branch: str, target: Path) -> None:
         del repo  # unused; URL identifies the remote
         git_clone(target, clone_url=clone_url, default_branch=default_branch, token=self._token)
 
+    # trace:exempt reason=internal-detail
     def fetch_pool(self, *, repo: str, pool_dir: Path) -> None:
         del repo
         git_fetch_prune(pool_dir, token=self._token)
 
+    # trace:exempt reason=internal-detail
     def fetch_base_ref(self, *, repo: str, pool_dir: Path, ref: str) -> None:
         del repo
         git_fetch_ref(pool_dir, ref, token=self._token)
 
+    # trace:exempt reason=internal-detail
     def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None:
         del repo
         git_fetch_pr_head(pool_dir, pr_number, token=self._token)
 
+    # trace:exempt reason=internal-detail
     def push_branch(
         self,
         *,
@@ -313,6 +339,7 @@ class LocalGitTransport:
         del repo, workspace_key
         return git_push(repo_dir, branch=branch, expected_head=expected_head, token=self._token, slot_uid=slot_uid)
 
+    # trace:exempt reason=internal-detail
     def push_release(
         self,
         *,
@@ -341,6 +368,7 @@ class LocalGitTransport:
 _DEFAULT_SANDBOX_SUBPROCESS_TIMEOUT = 120.0
 
 
+# trace:v1 id=impl.sandbox--safe-run work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _safe_run(
     cmd: list[str],
     *,
@@ -370,6 +398,7 @@ def _safe_run(
     return proc
 
 
+# trace:v1 id=impl.sandbox--run work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _run(
     cmd: list[str],
     *,
@@ -393,6 +422,7 @@ def _run(
     return proc
 
 
+# trace:v1 id=impl.sandbox--worktree-add work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _worktree_add(add_cmd: list[str], *, pool: Path, repo_dir: Path) -> None:
     """Run `git worktree add`, cleaning partial state on failure.
 
@@ -420,10 +450,12 @@ def _worktree_add(add_cmd: list[str], *, pool: Path, repo_dir: Path) -> None:
 _SHARED_OMP_GID = 2000
 
 
+# trace:v1 id=impl.sandbox--slot-permissions-active work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _slot_permissions_active(slot_uid: int | None) -> bool:
     return slot_uid is not None and platform.system() == "Linux" and os.geteuid() == 0
 
 
+# trace:v1 id=impl.sandbox--slot-pids work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _slot_pids(slot_uid: int, proc_root: Path = Path("/proc")) -> tuple[int, ...]:
     """Return non-zombie process ids owned by the slot UID.
 
@@ -466,6 +498,7 @@ def _slot_pids(slot_uid: int, proc_root: Path = Path("/proc")) -> tuple[int, ...
     return tuple(pids)
 
 
+# trace:v1 id=impl.sandbox--reap-slot work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _reap_slot(slot_uid: int | None) -> None:
     """Kill any processes still running as a slot UID.
 
@@ -484,6 +517,7 @@ def _reap_slot(slot_uid: int | None) -> None:
             log.warning("failed to kill slot user %s process %s: %s", slot_uid, pid, exc)
 
 
+# trace:v1 id=impl.sandbox--prepare-slot-tmpdir work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _prepare_slot_tmpdir(workspace: Workspace, slot_uid: int | None) -> Path:
     """Return the per-workspace tmpdir path, idempotently provisioning it.
 
@@ -509,6 +543,7 @@ def _prepare_slot_tmpdir(workspace: Workspace, slot_uid: int | None) -> Path:
     return tmpdir
 
 
+# trace:v1 id=impl.sandbox--slot-subprocess-kwargs work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _slot_subprocess_kwargs(slot_uid: int | None) -> dict[str, Any]:
     """Return subprocess identity kwargs for commands that should run as a slot.
 
@@ -523,6 +558,7 @@ def _slot_subprocess_kwargs(slot_uid: int | None) -> dict[str, Any]:
     return {"user": slot_uid, "group": slot_uid, "extra_groups": [_SHARED_OMP_GID], "umask": 0o002}
 
 
+# trace:v1 id=impl.sandbox--prepare-slot-runtime-env work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _prepare_slot_runtime_env(workspace: Workspace, slot_uid: int | None) -> dict[str, str]:
     """Compute the env overlay (TMPDIR + XDG_*) for slot-side subprocesses.
 
@@ -560,6 +596,7 @@ def _prepare_slot_runtime_env(workspace: Workspace, slot_uid: int | None) -> dic
     }
 
 
+# trace:v1 id=impl.sandbox--provision-runtime-dirs work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _provision_runtime_dirs(ws_root: Path) -> None:
     """Create the runtime dirs that ``_chown_workspace`` will hand to the slot.
 
@@ -589,6 +626,7 @@ def _provision_runtime_dirs(ws_root: Path) -> None:
     (xdg_root / "cache" / "bun-install").mkdir(parents=True, exist_ok=True)
 
 
+# trace:v1 id=impl.sandbox--grant-group-bits work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _grant_group_bits(path: Path, *, gid: int, bits: int) -> None:
     try:
         st = path.lstat()
@@ -600,6 +638,7 @@ def _grant_group_bits(path: Path, *, gid: int, bits: int) -> None:
     path.chmod(stat.S_IMODE(st.st_mode) | bits)
 
 
+# trace:v1 id=impl.sandbox--grant-tree work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _grant_tree(path: Path, *, gid: int, files_group_writable: bool) -> None:
     if not path.exists():
         return
@@ -617,6 +656,7 @@ def _grant_tree(path: Path, *, gid: int, files_group_writable: bool) -> None:
             _grant_group_bits(root_path / filename, gid=gid, bits=file_bits)
 
 
+# trace:v1 id=impl.sandbox--resolve-worktree-git-dirs work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _resolve_worktree_git_dirs(repo_dir: Path) -> tuple[Path, Path] | None:
     marker = repo_dir / ".git"
     if marker.is_dir():
@@ -642,6 +682,7 @@ def _resolve_worktree_git_dirs(repo_dir: Path) -> tuple[Path, Path] | None:
     return git_dir, common_dir
 
 
+# trace:v1 id=impl.sandbox--share-git-metadata-with-slots work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _share_git_metadata_with_slots(repo_dir: Path, slot_uid: int | None) -> None:
     """Keep shared Git metadata writable by whichever slot gets the retry.
 
@@ -670,6 +711,7 @@ def _share_git_metadata_with_slots(repo_dir: Path, slot_uid: int | None) -> None
         _grant_tree(common_dir / rel, gid=gid, files_group_writable=True)
 
 
+# trace:v1 id=impl.sandbox--chown-workspace work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _chown_workspace(ws_root: Path, slot_uid: int | None) -> None:
     """Hand the workspace tree to the identity that will run repo-local git.
 
@@ -716,6 +758,7 @@ _TRASH_PREFIX = ".trash-"
 _NODE_MODULES_SCAN_DEPTH = 4
 
 
+# trace:v1 id=impl.sandbox--find-node-modules work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _find_node_modules(repo_dir: Path, *, max_depth: int = _NODE_MODULES_SCAN_DEPTH) -> list[Path]:
     """Locate `node_modules` dirs in a checkout without descending into them.
 
@@ -738,6 +781,7 @@ def _find_node_modules(repo_dir: Path, *, max_depth: int = _NODE_MODULES_SCAN_DE
     return found
 
 
+# trace:v1 id=impl.sandbox--stage-workspace-trash work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _stage_workspace_trash(ws_root: Path) -> tuple[Path, ...]:
     """Rename reclaimable cache dirs into `.trash-*` staging dirs.
 
@@ -779,6 +823,7 @@ def _stage_workspace_trash(ws_root: Path) -> tuple[Path, ...]:
     return tuple(staged)
 
 
+# trace:v1 id=impl.sandbox--purge-trash work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _purge_trash(staged: Iterable[Path]) -> None:
     for path in staged:
         shutil.rmtree(path, ignore_errors=True)
@@ -787,6 +832,7 @@ def _purge_trash(staged: Iterable[Path]) -> None:
 # ---------- SandboxManager ----------
 
 
+# trace:v1 id=impl.sandbox-SandboxManager work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 class SandboxManager:
     """Manages a shared clone pool and per-issue worktrees.
 
@@ -794,6 +840,7 @@ class SandboxManager:
     (worktree add/remove, identity config, directory layout) is purely local.
     """
 
+    # trace:exempt reason=internal-detail
     def __init__(
         self,
         root: Path,
@@ -810,6 +857,7 @@ class SandboxManager:
         self._repo_locks: dict[str, threading.RLock] = {}
         self._repo_locks_guard = threading.Lock()
 
+    # trace:exempt reason=internal-detail
     def _repo_lock(self, repo: str) -> threading.RLock:
         with self._repo_locks_guard:
             lock = self._repo_locks.get(repo)
@@ -819,9 +867,11 @@ class SandboxManager:
             return lock
 
     # ---- pool ----
+    # trace:exempt reason=internal-detail
     def pool_path(self, repo: str) -> Path:
         return self.pool / repo.replace("/", "__")
 
+    # trace:exempt reason=internal-detail
     def ensure_clone(
         self,
         *,
@@ -850,6 +900,7 @@ class SandboxManager:
         )
         return target
 
+    # trace:exempt reason=internal-detail
     @staticmethod
     def _reset_origin_url(repo_dir: Path, clone_url: str) -> None:
         """`git remote set-url origin <clone_url>` if origin exists and differs.
@@ -872,9 +923,11 @@ class SandboxManager:
         _safe_run(["git", "remote", "set-url", "origin", clone_url], cwd=repo_dir)
 
     # ---- per-issue workspace ----
+    # trace:exempt reason=internal-detail
     def workspace_root(self, repo: str, number: int | str) -> Path:
         return self.root / workspace_key(repo, number)
 
+    # trace:exempt reason=internal-detail
     def ensure_workspace(
         self,
         *,
@@ -1022,6 +1075,7 @@ class SandboxManager:
             self._populate_natives_cache(workspace, slot_uid=slot_uid)
             return workspace
 
+    # trace:exempt reason=internal-detail
     def ensure_release_workspace(
         self,
         *,
@@ -1100,6 +1154,7 @@ class SandboxManager:
             self._populate_natives_cache(workspace, slot_uid=slot_uid)
             return workspace
 
+    # trace:exempt reason=internal-detail
     def _populate_natives_cache(self, workspace: Workspace, *, slot_uid: int | None = None) -> None:
         """Try to hardlink cached pi-natives artifacts into the worktree.
 
@@ -1154,6 +1209,7 @@ class SandboxManager:
             },
         )
 
+    # trace:exempt reason=internal-detail
     @staticmethod
     def _chown_natives_for_slot(native_dir: Path, hit: CacheHit, *, slot_uid: int) -> None:
         """Hand the populated native dir to the slot WITHOUT touching the
@@ -1182,6 +1238,7 @@ class SandboxManager:
                     extra={"file": str(child), "err": str(exc)},
                 )
 
+    # trace:exempt reason=internal-detail
     def remove_workspace(self, *, repo: str, number: int | str) -> None:
         with self._repo_lock(repo):
             ws_root = self.workspace_root(repo, number)
@@ -1221,6 +1278,7 @@ class SandboxManager:
             if ws_root.exists():
                 shutil.rmtree(ws_root, ignore_errors=True)
 
+    # trace:exempt reason=internal-detail
     def reclaim_workspace_caches(self, *, repo: str, number: int | str) -> bool:
         """Strip re-creatable dependency caches from an idle workspace.
 
@@ -1241,6 +1299,7 @@ class SandboxManager:
         _purge_trash(staged)
         return bool(staged)
 
+    # trace:exempt reason=internal-detail
     def reclaim_all_caches(self) -> int:
         """Sweep dependency caches from every workspace under ``root``.
 
