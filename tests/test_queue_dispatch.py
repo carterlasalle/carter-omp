@@ -69,7 +69,7 @@ def _issue_row(action: str, *, delivery: str = "is1") -> EventRow:
     )
 
 
-@pytest.mark.parametrize("action", ["opened", "reopened"])
+@pytest.mark.parametrize("action", ["opened", "reopened", "labeled"])
 @pytest.mark.asyncio
 async def test_dispatch_routes_issue_triage_actions_to_triage_issue(
     settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch, action: str

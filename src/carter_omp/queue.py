@@ -63,6 +63,7 @@ async def _cancel_issue_runs(pool: WorkerPool, target: str, except_delivery: str
                 await pool.cancel_event(delivery_id)
 
 
+# trace:v1 id=impl.queue-pool work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
 class WorkerPool:
     """Long-lived dispatcher: drains queued events into per-task coroutines."""
 
@@ -414,6 +415,7 @@ class WorkerPool:
         else:
             self.db.mark_event(row.delivery_id, "done")
 
+    # trace:v1 id=impl.queue-dispatch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
     async def _dispatch(self, row: EventRow, *, slot_uid: int | None = None) -> None:
         event = row.event_type
         action = str(row.payload.get("action") or "")
@@ -428,7 +430,7 @@ class WorkerPool:
                 "recovered": row.attempts >= 2,
             },
         )
-        if event == "issues" and action in ("opened", "reopened"):
+        if event == "issues" and action in ("opened", "reopened", "labeled"):
             await tasks.triage_issue(
                 settings=self.settings,
                 db=self.db,
