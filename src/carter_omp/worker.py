@@ -125,6 +125,7 @@ def _resolve_pragma_overrides(
     thinking_override = pragmas.resolve_thinking_level(thinking_value) if thinking_value else None
     return model_override, thinking_override
 
+
 _SCRUBBED_ENV_KEYS: tuple[str, ...] = (
     # Secrets that MUST NOT reach the agent subprocess; an agent with the
     # `bash` tool could otherwise `printenv` them out of carter-omp's env.
