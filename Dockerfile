@@ -103,7 +103,7 @@ RUN mkdir -p /srv/agent-home/.agent /srv/agent-home/.omp/agent \
 COPY entrypoint.sh /usr/local/bin/carter-omp-entrypoint
 RUN chmod +x /usr/local/bin/carter-omp-entrypoint
 
-RUN useradd -u 10000 -M -N -s /usr/sbin/nologin carter-omp \
+RUN useradd -u 10000 -m -U -s /usr/sbin/nologin carter-omp \
     && mkdir -p /data/workspaces /data/logs \
     && chown -R carter-omp:carter-omp /app /data
 
