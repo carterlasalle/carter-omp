@@ -176,8 +176,8 @@ volumes:
 
 secrets:
   # GitHub App private key (0400, visible only to github-proxy).
-  # Provide via `printf '%s' "$KEY" | docker secret create github-app-pem -`
-  # or a local file (dev only): uncomment the `file:` line below.
+  # Default: read the .pem straight from the path in
+  # CARTER_OMP_GITHUB_PRIVATE_KEY_FILE (the wizard sets + chmods it).
+  # Swarm alternative: `external: true` + `docker secret create github-app-pem -`.
   github-app-pem:
-    external: true
-    # file: ./github-app.pem
+    file: ${CARTER_OMP_GITHUB_PRIVATE_KEY_FILE:?CARTER_OMP_GITHUB_PRIVATE_KEY_FILE must be set in .env}
