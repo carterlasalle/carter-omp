@@ -93,7 +93,7 @@ COPY --from=web-builder /work/web/dist/ ./src/carter_omp/static/
 
 RUN pip install --no-cache-dir uv \
     && uv sync --frozen --no-dev \
-    && uv pip install --no-deps .
+    && uv pip install --system --no-deps .
 
 # Host agent config is mounted read-only under /srv/agent-home-stage with
 # host-controlled permissions (see compose.yaml). The entrypoint copies it
