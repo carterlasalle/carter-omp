@@ -109,36 +109,78 @@ selector, writes `~/.omp/agent/models.container.yml` (mounted into the
 container), and prints the `CARTER_OMP_MODEL` pool to paste into `.env`.
 API keys stay wherever OMP already keeps them.
 
-## 6. VPS ingress (public webhook, private everything else)
+## 6. VPS: from bare Ubuntu to TLS ingress
 
 <!-- trace:v1 id=doc.setup-ingress work=WORK-CO-Q8Z1HJJJ -->
 
-`compose.yaml` publishes the orchestrator on `127.0.0.1:6543` only — nothing
-is directly reachable, even from the host network. The sole ingress is a TLS
-reverse proxy that forwards `/webhook/*` and 404s the rest:
+Do this on the VPS over SSH. Assumes Ubuntu 22.04/24.04, a domain you control
+(example `omp.example.com` below), and ports 80/443 reachable.
 
-1. Point DNS at the VPS (e.g. `omp.example.com`).
-2. Install Caddy (`https://caddyserver.com/docs/install`).
-3. Copy the repo `Caddyfile` to `/etc/caddy/Caddyfile`, replacing
-   `omp.example.com` with your domain (or set `DOMAIN` when running Caddy).
-4. `systemctl reload caddy` (or `caddy reload`).
-5. Verify: `curl https://<domain>/healthz` must 404; GitHub webhook
-   deliveries to `https://<domain>/webhook/github` must 202.
-6. Use `https://<domain>/webhook/github` as the App's Webhook URL.
-
-Without Caddy (or equivalent), GitHub cannot reach the webhook — it requires
-HTTPS and the container does not terminate TLS itself.
-
-<!-- trace:v1 id=doc.setup-start work=WORK-CO-Q8Z1HJJJ -->
+### 6a. Base packages
 
 ```bash
-docker compose up -d --build
-docker compose exec carter-omp carter-omp doctor
+sudo apt update && sudo apt install -y git curl openssl ufw
+# Docker: https://docs.docker.com/engine/install/ubuntu/
+# uv: curl -LsSf https://astral.sh/uv/install.sh | sh
+# gh: https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+# Node 22 via your preferred method (for corepack/yarn on the host)
 ```
 
-`doctor` verifies the DB, OMP binary, trigger mode, every identity mapping,
-the proxy channel, the model catalog + selectors, and the dashboard bundle —
-and refuses (non-zero exit) on any mismatch. Do not proceed with failures.
+### 6b. Firewall
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 80,443/tcp
+sudo ufw enable
+```
+
+Leave port 6543 **closed** — `compose.yaml` publishes the orchestrator on
+`127.0.0.1:6543` only, so nothing is directly reachable even from the host
+network. Caddy (same host) is the sole ingress.
+
+### 6c. DNS
+
+At your registrar, add an `A` record: `omp.example.com` → the VPS public IP.
+Verify: `dig +short omp.example.com` returns the IP before continuing.
+
+### 6d. Clone and install (on the VPS)
+
+```bash
+git clone https://github.com/carterlasalle/carter-omp
+cd carter-omp
+
+uv sync --all-extras
+corepack enable
+corepack prepare yarn@4.9.2 --activate   # repo pins 4.9.2; other versions refuse --immutable
+yarn --cwd=web install --immutable
+
+cp .env.example .env
+```
+
+Work through steps 2–5 of this guide (App form, IDs, `.env`, `init-models`)
+on the VPS — secrets are generated there with `openssl rand -hex 32` and
+never leave the machine except into the GitHub App form.
+
+### 6e. Caddy (TLS + webhook-only ingress)
+
+```bash
+# Install: https://caddyserver.com/docs/install (apt repo + apt install caddy)
+sudo cp Caddyfile /etc/caddy/Caddyfile
+sudo sed -i 's/omp\.example\.com/omp.YOURDOMAIN.com/' /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+The shipped `Caddyfile` gets a Let's Encrypt cert automatically, forwards
+ONLY `/webhook/*` to `127.0.0.1:6543`, and 404s everything else (dashboard,
+`/healthz`, `/events`, `/replay`). Verify:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://omp.YOURDOMAIN.com/healthz   # expect 404
+```
+
+Use `https://omp.YOURDOMAIN.com/webhook/github` as the App's Webhook URL.
+Without Caddy (or equivalent), GitHub cannot reach the webhook — it requires
+HTTPS and the container does not terminate TLS itself.
 
 ## 7. Start and validate
 
