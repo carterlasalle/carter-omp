@@ -1,0 +1,27 @@
+# trace:exempt reason=deploy-packaging-no-runtime-behavior
+# Caddy reverse proxy for carter-omp on a VPS.
+#
+# Usage:
+#   1. Point DNS at the VPS (e.g. omp.example.com).
+#   2. Install Caddy (https://caddyserver.com/docs/install).
+#   3. Copy this file to /etc/caddy/Caddyfile, replacing {$DOMAIN} below
+#      (or set the DOMAIN env var when running `caddy run`).
+#   4. `systemctl reload caddy` (or `caddy reload`).
+#
+# What it does: terminates TLS (automatic Let's Encrypt), forwards ONLY the
+# GitHub webhook path to the orchestrator, and 404s everything else
+# (dashboard, /healthz, /readyz, /events, /replay, management API).
+# compose.yaml publishes the orchestrator on 127.0.0.1:6543, so Caddy on the
+# same host is the sole ingress — nothing is directly reachable.
+
+{$DOMAIN:omp.example.com} {
+	# GitHub webhooks only.
+	handle /webhook/* {
+		reverse_proxy 127.0.0.1:6543
+	}
+
+	# Everything else: not public.
+	handle {
+		respond "Not found" 404
+	}
+}

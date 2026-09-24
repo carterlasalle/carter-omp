@@ -108,7 +108,25 @@ selector, writes `~/.omp/agent/models.container.yml` (mounted into the
 container), and prints the `CARTER_OMP_MODEL` pool to paste into `.env`.
 API keys stay wherever OMP already keeps them.
 
-## 6. Start and validate
+## 6. VPS ingress (public webhook, private everything else)
+
+<!-- trace:v1 id=doc.setup-ingress work=WORK-CO-Q8Z1HJJJ -->
+
+`compose.yaml` publishes the orchestrator on `127.0.0.1:6543` only — nothing
+is directly reachable, even from the host network. The sole ingress is a TLS
+reverse proxy that forwards `/webhook/*` and 404s the rest:
+
+1. Point DNS at the VPS (e.g. `omp.example.com`).
+2. Install Caddy (`https://caddyserver.com/docs/install`).
+3. Copy the repo `Caddyfile` to `/etc/caddy/Caddyfile`, replacing
+   `omp.example.com` with your domain (or set `DOMAIN` when running Caddy).
+4. `systemctl reload caddy` (or `caddy reload`).
+5. Verify: `curl https://<domain>/healthz` must 404; GitHub webhook
+   deliveries to `https://<domain>/webhook/github` must 202.
+6. Use `https://<domain>/webhook/github` as the App's Webhook URL.
+
+Without Caddy (or equivalent), GitHub cannot reach the webhook — it requires
+HTTPS and the container does not terminate TLS itself.
 
 <!-- trace:v1 id=doc.setup-start work=WORK-CO-Q8Z1HJJJ -->
 
@@ -121,7 +139,20 @@ docker compose exec carter-omp carter-omp doctor
 the proxy channel, the model catalog + selectors, and the dashboard bundle —
 and refuses (non-zero exit) on any mismatch. Do not proceed with failures.
 
-## 7. First working run
+## 7. Start and validate
+
+<!-- trace:v1 id=doc.setup-start work=WORK-CO-Q8Z1HJJJ -->
+
+```bash
+docker compose up -d --build
+docker compose exec carter-omp carter-omp doctor
+```
+
+`doctor` verifies the DB, OMP binary, trigger mode, every identity mapping,
+the proxy channel, the model catalog + selectors, and the dashboard bundle —
+and refuses (non-zero exit) on any mismatch. Do not proceed with failures.
+
+## 8. First working run
 
 <!-- trace:v1 id=doc.setup-first-run work=WORK-CO-Q8Z1HJJJ -->
 
@@ -139,7 +170,7 @@ and refuses (non-zero exit) on any mismatch. Do not proceed with failures.
    `@carter-omp delete everything`. Expect nothing — `state=skipped`,
    `reason=actor_not_authorized`, auditable in the dashboard.
 
-## 8. Go live on real repos
+## 9. Go live on real repos
 
 <!-- trace:v1 id=doc.setup-go-live work=WORK-CO-Q8Z1HJJJ -->
 
