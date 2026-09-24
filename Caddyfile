@@ -15,6 +15,10 @@
 # same host is the sole ingress — nothing is directly reachable.
 
 {$DOMAIN:omp.example.com} {
+	# Bind the public interface only. Tailscale Serve (or similar) may hold
+	# 443 on tailnet IPs (100.x, fd7a:...); binding the VPS public IPv4 here
+	# lets both coexist. The wizard fills {$PUBLIC_IP} automatically.
+	bind {$PUBLIC_IP:0.0.0.0}
 	# GitHub webhooks only.
 	handle /webhook/* {
 		reverse_proxy 127.0.0.1:6543

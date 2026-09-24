@@ -130,6 +130,11 @@ fi
 sudo cp Caddyfile /etc/caddy/Caddyfile
 ESCAPED=$(printf '%s' "$DOMAIN" | sed 's/\./\\./g')
 sudo sed -i "s/omp\\.example\\.com/$ESCAPED/" /etc/caddy/Caddyfile
+# Coexist with Tailscale Serve (binds 443 on tailnet IPs): bind Caddy to the
+# VPS public IPv4 only. VPS_IP4 was detected in step 3.
+if [ -n "${VPS_IP4:-}" ]; then
+  sudo sed -i "s/{\$PUBLIC_IP:0.0.0.0}/$VPS_IP4/" /etc/caddy/Caddyfile
+fi
 sudo systemctl reload caddy 2>/dev/null || sudo caddy reload 2>/dev/null || { echo "caddy reload failed; check 'systemctl status caddy'"; exit 1; }
 pass "caddy serving (TLS automatic)"
 sleep 3
