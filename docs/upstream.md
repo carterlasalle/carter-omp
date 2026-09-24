@@ -26,4 +26,12 @@ carter-omp is extracted from the `python/robomp` implementation in the
 
 ## Later upstream commits cherry-picked or manually incorporated
 
-None yet. Record them here with commit hash, date, and what changed.
+- `6647b0bf145cbc409a4d37d7911e52e1d660ad84` (2026-09-24; reviewed
+  2026-09-24): `chore: branding` — `oh-my-pi` → `omp` rename in
+  `python/robomp/.env.example`, `AGENTS.md`, `README.md`. Only change to the
+  extracted paths since extraction `3d3ec7e`; reviewed, not ported —
+  intentional divergence (pinned prebuilt OMP binary, no monorepo mount,
+  Carter naming). Upstream HEAD for `python/robomp` + `python/omp-rpc`.
+- Issue #3's other 19 listed commits all predate extraction `3d3ec7e` and are
+  already incorporated (review-anchor validation, 5xx retry, `blocker` todo
+  field, reopened handling).
