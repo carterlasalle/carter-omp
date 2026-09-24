@@ -567,6 +567,7 @@ class _ProxyEnvLoader(BaseSettings):
     github_app_id: str | None = Field(None, alias="CARTER_OMP_GITHUB_APP_ID")
     github_app_private_key_file: Path | None = Field(None, alias="CARTER_OMP_GITHUB_PRIVATE_KEY_FILE")
     github_installation_id: int | None = Field(None, alias="CARTER_OMP_GITHUB_INSTALLATION_ID")
+    repo_allowlist_raw: str = Field("", alias="CARTER_OMP_REPO_ALLOWLIST")
     github_proxy_hmac_key: SecretStr = Field(..., alias="CARTER_OMP_GH_PROXY_HMAC_KEY")
     github_proxy_bind_host: str = Field("0.0.0.0", alias="CARTER_OMP_GH_PROXY_BIND_HOST")
     github_proxy_bind_port: int = Field(8081, alias="CARTER_OMP_GH_PROXY_BIND_PORT")
@@ -574,7 +575,6 @@ class _ProxyEnvLoader(BaseSettings):
     log_dir: Path = Field(Path("./data/logs"), alias="CARTER_OMP_LOG_DIR")
     github_proxy_max_body_bytes: int = Field(1 << 20, alias="CARTER_OMP_GH_PROXY_MAX_BODY_BYTES")
     github_proxy_git_timeout_seconds: float = Field(60.0, alias="CARTER_OMP_GH_PROXY_GIT_TIMEOUT_SECONDS")
-
     @field_validator("github_proxy_hmac_key", mode="before")
     @classmethod
     def _reject_blank(cls, value: object) -> object:
@@ -622,6 +622,7 @@ def load_proxy_settings() -> Settings:
         github_app_id=loader.github_app_id,
         github_app_private_key_file=loader.github_app_private_key_file,
         github_installation_id=loader.github_installation_id,
+        repo_allowlist_raw=loader.repo_allowlist_raw,
         github_webhook_secret=SecretStr(""),
         bot_login="github-proxy",
         git_author_email="github-proxy@invalid",
