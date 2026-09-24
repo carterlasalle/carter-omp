@@ -45,7 +45,17 @@ corepack enable
 # the corepack shim honor the nearest package.json instead of the global
 # default (4.18 on hosts that installed it first) — no --activate needed.
 export COREPACK_ENABLE_PROJECT_SPEC=1
-if [ "$(yarn --version)" != "4.9.2" ]; then echo "yarn pin failed: $(yarn --version)"; exit 1; fi
+if [ "$(yarn --version)" != "4.9.2" ]; then
+  YARN_BIN="$(command -v yarn)"
+  if [ "$YARN_BIN" != "" ] && ! head -c 200 "$YARN_BIN" 2>/dev/null | grep -q "corepack"; then
+    echo "yarn pin failed: $(yarn --version) from standalone binary at $YARN_BIN"
+    echo "This is NOT a corepack shim, so the 4.9.2 pin cannot apply."
+    echo "Fix: rm $YARN_BIN && hash -r   (then re-run this script)"
+    echo "If it comes back, remove its source (pipx uninstall yarn, npm uninstall -g yarn, ...)."
+    exit 1
+  fi
+  echo "yarn pin failed: $(yarn --version)"; exit 1
+fi
 yarn --cwd=web install --immutable
 pass "dashboard deps installed (yarn 4.9.2)"
 
