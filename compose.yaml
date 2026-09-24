@@ -20,8 +20,18 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    # `cap_drop: ALL` alone breaks the entrypoint: shadow-utils needs
+    # CHOWN/FOWNER/DAC_OVERRIDE to rewrite /etc/{passwd,group,shadow,gshadow},
+    # and the orchestrator needs SETUID/SETGID to demote slot subprocesses
+    # plus CHOWN to hand workspaces to slot UIDs. This is the minimal set.
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
     environment:
       # --- github-proxy channel ---
       # The orchestrator NEVER holds GITHUB_TOKEN; it talks to the sibling
@@ -116,13 +126,19 @@ services:
   # ───────────────────────────────────────────────────────────────────────────
   github-proxy:
     image: carter-omp:dev
-    container_name: carter-omp-gh-proxy
-    hostname: carter-omp-gh-proxy
-    restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    # Same reasoning as the orchestrator block above: the proxy runs the
+    # same entrypoint (slot user/group creation + /data chown) before
+    # demoting to its proxy role.
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
     command: ["python", "-m", "carter_omp.proxy", "serve"]
     environment:
       # Credential: lives ONLY here (GitHub App preferred, PAT legacy).
