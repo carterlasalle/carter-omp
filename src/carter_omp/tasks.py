@@ -113,31 +113,6 @@ def _trigger_from_payload(payload: Mapping[str, Any]) -> object | None:
         return None
 
 
-# trace:v1 id=impl.tasks-pickup-ack work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-async def _ack_trigger_pickup(
-    github: GitHubBackend,
-    payload: Mapping[str, Any],
-    delivery_id: str,
-) -> None:
-    """Eyes-react to the triggering comment so the reporter sees pickup.
-
-    Best-effort UX only: failures are swallowed (reactions are never the
-    security boundary — admission already happened). Only mention triggers
-    carry a comment id; label triggers have no comment to react to.
-    """
-    comment = payload.get("comment") or {}
-    comment_id = comment.get("id")
-    if not isinstance(comment_id, int) or isinstance(comment_id, bool):
-        return
-    repo = payload.get("repository") or {}
-    full_name = repo.get("full_name")
-    if not isinstance(full_name, str) or not full_name:
-        return
-    try:
-        await github.add_comment_reaction(full_name, comment_id, "eyes")
-    except Exception as exc:
-        log.debug("pickup ack failed", extra={"delivery": delivery_id, "err": str(exc)[:120]})
-
 async def _fetch_thread(
     github: GitHubBackend,
     repo: str,
@@ -689,7 +664,6 @@ async def handle_comment(
     directive = _directive_from_payload(payload)
     comment = _comment_from_payload(payload)
     clone_url = repo.clone_url
-    await _ack_trigger_pickup(github, payload, delivery_id)
     if existing is None:
         if directive is None:
             log.info("skip: comment on unknown issue", extra={"key": key})
@@ -943,7 +917,6 @@ async def handle_pr_conversation(
     repo_full = str(repo_payload.get("full_name") or "")
     issue_payload = payload.get("issue") or {}
     pr_number = issue_payload.get("number")
-    await _ack_trigger_pickup(github, payload, delivery_id)
     if not repo_full or not isinstance(pr_number, int):
         log.info("skip: pr-conversation missing repo/number")
         return

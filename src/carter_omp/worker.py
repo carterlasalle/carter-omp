@@ -513,6 +513,28 @@ def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
         object.__setattr__(bindings, "git_transport", inputs.git_transport.with_run_token(token))
 
 
+# trace:v1 id=impl.worker-pickup-ack work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+async def _ack_pickup_reaction(inputs: TaskInputs, bindings: ToolBindings) -> None:
+    """Eyes-react to the triggering comment through the run-token channel.
+
+    Runs after `_attach_run_token`, so `bindings.github` already carries the
+    per-run token the proxy's `add_comment_reaction` endpoint requires.
+    Best-effort UX: failures are swallowed — admission already happened.
+    """
+    from carter_omp.github_events import TriggerContext
+
+    trigger = inputs.trigger
+    if not isinstance(trigger, TriggerContext):
+        return
+    if trigger.trigger_kind != "mention" or trigger.trigger_object_id is None:
+        return
+    try:
+        await bindings.github.add_comment_reaction(
+            trigger.repository_full_name, trigger.trigger_object_id, "eyes"
+        )
+    except Exception as exc:
+        log.debug("pickup ack failed", extra={"delivery": inputs.delivery_id, "err": str(exc)[:120]})
+
 def _build_prompt(
     task_kind: str,
     inputs: TaskInputs,
@@ -903,6 +925,7 @@ async def run_task(
         release=release_binding,
     )
     _attach_run_token(inputs, bindings)
+    await _ack_pickup_reaction(inputs, bindings)
     resuming = _has_prior_session(inputs.workspace.session_dir)
     prompt = _build_prompt(
         task_kind,
