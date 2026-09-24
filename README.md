@@ -92,7 +92,7 @@ uv run carter-omp --help
 2. Install it on **Only select repositories**.
 3. Resolve Carter's immutable user ID (`gh api users/carterlasalle --jq '{id, login, type}'`) and fill `CARTER_OMP_AUTHORIZED_USER_IDS`.
 4. Fill repo IDs (`CARTER_OMP_REPO_IDS`).
-5. Configure the model gateway (`CARTER_OMP_MODEL`, provider credentials).
+5. Pick models: `carter-omp init-models` (interactive picker for provider, primary, fallbacks) then put its `CARTER_OMP_MODEL` pool in `.env`. API keys stay where OMP keeps them.
 6. Start: `docker compose up -d --build`
 7. Validate: `docker compose exec carter-omp carter-omp doctor`
 8. Add the `carter-omp` label to selected repos.
