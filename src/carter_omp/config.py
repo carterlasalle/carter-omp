@@ -568,6 +568,7 @@ class _ProxyEnvLoader(BaseSettings):
     github_app_private_key_file: Path | None = Field(None, alias="CARTER_OMP_GITHUB_PRIVATE_KEY_FILE")
     github_installation_id: int | None = Field(None, alias="CARTER_OMP_GITHUB_INSTALLATION_ID")
     repo_allowlist_raw: str = Field("", alias="CARTER_OMP_REPO_ALLOWLIST")
+    allowed_repo_owners_raw: str = Field("", alias="CARTER_OMP_REPO_OWNERS")
     github_proxy_hmac_key: SecretStr = Field(..., alias="CARTER_OMP_GH_PROXY_HMAC_KEY")
     github_proxy_bind_host: str = Field("0.0.0.0", alias="CARTER_OMP_GH_PROXY_BIND_HOST")
     github_proxy_bind_port: int = Field(8081, alias="CARTER_OMP_GH_PROXY_BIND_PORT")
@@ -607,6 +608,7 @@ class _ProxyEnvLoader(BaseSettings):
         return self
 
 
+# trace:v1 id=impl.config-proxy-settings work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def load_proxy_settings() -> Settings:
     """Build a `Settings` instance suitable for the github-proxy process.
 
@@ -623,6 +625,7 @@ def load_proxy_settings() -> Settings:
         github_app_private_key_file=loader.github_app_private_key_file,
         github_installation_id=loader.github_installation_id,
         repo_allowlist_raw=loader.repo_allowlist_raw,
+        allowed_repo_owners_raw=loader.allowed_repo_owners_raw,
         github_webhook_secret=SecretStr(""),
         bot_login="github-proxy",
         git_author_email="github-proxy@invalid",

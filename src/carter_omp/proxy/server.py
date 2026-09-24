@@ -295,10 +295,11 @@ def _validate_repo_name(repo: str) -> None:
         raise HTTPException(400, f"invalid repo {repo!r}")
 
 
+# trace:v1 id=impl.proxy-enforce-scope work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _enforce_repo_scope(cfg: Settings, repo: str) -> None:
-    """Reject repos outside the proxy's own allowlist (never trust the caller)."""
+    """Reject repos outside the proxy's own scope (never trust the caller)."""
     _validate_repo_name(repo)
-    if repo.lower() not in cfg.repo_allowlist:
+    if not cfg.allows(repo):
         raise HTTPException(403, "repo not in proxy allowlist")
 
 
