@@ -30,6 +30,7 @@ cd carter-omp
 
 uv sync --all-extras
 corepack enable
+corepack prepare yarn@4.9.2 --activate   # repo pins 4.9.2; other versions refuse --immutable
 yarn --cwd=web install --immutable
 
 cp .env.example .env
