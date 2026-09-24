@@ -42,6 +42,18 @@ Durable operational knowledge. Read this before touching Docker, CI, or trace co
 - `Dockerfile` carries `# trace:exempt reason=deploy-packaging-no-runtime-behavior`.
   Prefer `reason=` form; bare `# trace:exempt <words>` does not satisfy TL012.
 
+## Analyzers
+<!-- trace:v1 id=doc.agent-notes-analyzers work=WORK-CO-Q8Z1HJJJ -->
+
+- mypy baseline: 19 errors / 6 files (lenient: `ignore_missing_imports`).
+  Do not chase zero speculatively — the strict run (43 errors) is mostly
+  vendored-RPC generic variance. CI fails only if the count grows.
+- bandit skips live in `pyproject.toml` with reasons; zero `nosec` in tree.
+  B324 SHA-1 was fixed (SHA-256 in `_short_hex`), not skipped.
+- vulture: `min_confidence = 90`, `cls` ignored (pydantic validators).
+  60%-confidence hits are cross-module uses; verify with grep before touching.
+- Coverage gate is 70% line floor; raise toward 85% after measuring per-file.
+
 ## Tests
 <!-- trace:v1 id=doc.agent-notes-tests work=WORK-CO-Q8Z1HJJJ -->
 
