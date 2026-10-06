@@ -38,7 +38,7 @@ jobs:
           # spanning weeks of a monorepo returns no file list (and the old
           # version swallowed that with `|| true`, so the watch went green and
           # did nothing). Path-scoped commits are bounded and reliable.
-          RECENT="$(gh api "repos/$UPSTREAM/commits?path=python/robomp&sha=main&per_page=30" --jq '.[] | "\(.sha) \(.commit.message | split("\n")[0])"')
+          RECENT="$(gh api "repos/$UPSTREAM/commits?path=python/robomp&sha=main&per_page=30" --jq '.[] | "\(.sha) \(.commit.message | split("\n")[0])"')"
           RECENT_IPC="$(gh api "repos/$UPSTREAM/commits?path=python/omp-rpc&sha=main&per_page=30" --jq '.[] | "\(.sha) \(.commit.message | split("\n")[0])"')"
           NEW=""
           while read -r sha subject; do
