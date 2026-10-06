@@ -874,10 +874,33 @@ def _run_rpc_blocking(
             # trace:v1 id=impl.worker-on-message-end work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
             def _on_message_end(event: Any) -> None:
                 message = getattr(event, "message", None)
-                if isinstance(message, Mapping) and message.get("role") == "assistant":
-                    stats.add_usage(message.get("usage"))
+                if not isinstance(message, Mapping) or message.get("role") != "assistant":
+                    return
+                stats.add_usage(message.get("usage"))
+                # Ground truth for the footer: omp silently switches providers
+                # when the configured one fails, so the answering model comes
+                # from the message, not from our own pick.
+                stats.note_answered_model(message.get("provider"), message.get("model"))
+
+            def _on_fallback_applied(event: Any) -> None:
+                from_model = getattr(event, "from_model", None)
+                to_model = getattr(event, "to_model", None)
+                log.warning(
+                    "model fallback applied",
+                    extra={"issue": bindings.issue_key, "task": task_kind, "from": from_model, "to": to_model},
+                )
+                if isinstance(to_model, str) and to_model:
+                    stats.fallback_model = to_model
+
+            def _on_fallback_succeeded(event: Any) -> None:
+                log.info(
+                    "model fallback succeeded",
+                    extra={"issue": bindings.issue_key, "task": task_kind, "model": getattr(event, "model", None)},
+                )
 
             client.on_message_end(_on_message_end)
+            client.on_retry_fallback_applied(_on_fallback_applied)
+            client.on_retry_fallback_succeeded(_on_fallback_succeeded)
 
             phases = persona.seed_phases(task_kind)
             if phases:

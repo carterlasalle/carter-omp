@@ -48,6 +48,12 @@ class _FakeRpcClient:
     def on_message_end(self, _cb) -> None:
         pass
 
+    def on_retry_fallback_applied(self, _cb) -> None:
+        pass
+
+    def on_retry_fallback_succeeded(self, _cb) -> None:
+        pass
+
     def stop(self) -> None:
         self.stop_calls += 1
 

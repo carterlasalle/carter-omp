@@ -87,6 +87,15 @@ def _format_duration(seconds: float) -> str:
     return f"{total // 3600}h{(total % 3600) // 60:02d}m"
 
 
+# trace:v1 id=impl.host-tools-format-tokens work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _format_tokens(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
+
+
 # trace:v1 id=impl.host-tools-run-stats work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 @dataclass(slots=True)
 class RunStats:
@@ -100,29 +109,90 @@ class RunStats:
 
     model: str
     started_monotonic: float
+    # Set when omp switched providers mid-run (or when a message names a model
+    # other than the configured one): the footer then names both, so a reader
+    # never mistakes the configured model for the one that answered.
+    fallback_model: str | None = None
     cost_usd: float = 0.0
+    cost_cache_usd: float = 0.0
+    # `input` is the uncached bucket (a cache miss); `cacheRead`/`cacheWrite`
+    # are the cached buckets — omp reports them separately per message.
+    miss_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     # trace:v1 id=impl.run-stats-elapsed work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def elapsed_seconds(self) -> float:
         return max(0.0, time.monotonic() - self.started_monotonic)
 
+    @staticmethod
+    def _number(value: Any) -> float | None:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        return None
+
+    # trace:v1 id=impl.run-stats-answered work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def note_answered_model(self, provider: str | None, model: str | None) -> None:
+        """Record which model actually answered a message.
+
+        Ground truth beats configuration: omp switches providers when the
+        configured one fails, and a footer naming only the configured model
+        would then be wrong about who wrote the message.
+        """
+        if not model:
+            return
+        selector = f"{provider}/{model}" if provider else model
+        if selector != self.model and self.fallback_model is None:
+            self.fallback_model = selector
+
     # trace:v1 id=impl.run-stats-add-usage work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def add_usage(self, usage: Mapping[str, Any] | None) -> None:
-        """Accumulate one assistant message's usage (USD)."""
+        """Accumulate one assistant message's tokens + spend (USD)."""
         if not isinstance(usage, Mapping):
             return
+        for key, attr in (
+            ("input", "miss_tokens"),
+            ("output", "output_tokens"),
+            ("cacheRead", "cache_read_tokens"),
+            ("cacheWrite", "cache_write_tokens"),
+        ):
+            amount = self._number(usage.get(key))
+            if amount:
+                setattr(self, attr, getattr(self, attr) + int(amount))
         cost = usage.get("cost")
-        if isinstance(cost, Mapping):
-            total = cost.get("total")
-            if isinstance(total, (int, float)) and not isinstance(total, bool):
-                self.cost_usd += float(total)
+        if not isinstance(cost, Mapping):
+            return
+        total = self._number(cost.get("total"))
+        if total:
+            self.cost_usd += total
+        cached = self._number(cost.get("cacheRead"))
+        if cached:
+            self.cost_cache_usd += cached
 
     # trace:v1 id=impl.run-stats-footer work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def footer(self) -> str:
-        """Markdown footer: model, wall clock, spend."""
+        """Markdown footer: model (with fallback), wall clock, spend, usage."""
         cost = f"${self.cost_usd:.4f}" if self.cost_usd < 1 else f"${self.cost_usd:.2f}"
-        parts = [f"`{self.model}`", _format_duration(self.elapsed_seconds()), cost]
-        return "\n\n---\n<sub>" + " · ".join(parts) + "</sub>"
+        model = f"`{self.model}`"
+        if self.fallback_model and self.fallback_model != self.model:
+            model += f" → `{self.fallback_model}`"
+        headline = [model, _format_duration(self.elapsed_seconds()), cost]
+        usage: list[str] = []
+        if self.miss_tokens:
+            usage.append(f"miss {_format_tokens(self.miss_tokens)}")
+        if self.output_tokens:
+            usage.append(f"out {_format_tokens(self.output_tokens)}")
+        if self.cache_read_tokens or self.cache_write_tokens:
+            usage.append(
+                f"cache r {_format_tokens(self.cache_read_tokens)} w {_format_tokens(self.cache_write_tokens)}"
+            )
+        if self.cost_cache_usd:
+            usage.append(f"cache ${self.cost_cache_usd:.4f}")
+        lines = ["<sub>" + " · ".join(headline) + "</sub>"]
+        if usage:
+            lines.append("<sub>" + " · ".join(usage) + "</sub>")
+        return "\n\n---\n" + "\n".join(lines)
 
 
 # trace:v1 id=impl.host-tools-abort-controller work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP

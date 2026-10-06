@@ -5118,3 +5118,50 @@ def test_gh_post_comment_appends_run_stats_footer(db: Database, tmp_path: Path) 
     assert body.startswith("Looking into this.")
     assert body.rstrip().endswith("</sub>")
     assert "`opencode-go/muse-spark`" in body
+
+
+def test_format_tokens_boundaries() -> None:
+    assert host_tools._format_tokens(842) == "842"
+    assert host_tools._format_tokens(62_100) == "62.1k"
+    assert host_tools._format_tokens(1_100_000) == "1.1M"
+
+
+def test_run_stats_footer_reports_tokens_cache_and_fallback() -> None:
+    """The footer must say who actually answered (omp switches providers on
+    its own), and break spend down by cache bucket."""
+    stats = host_tools.RunStats(model="opencode-go/muse-spark", started_monotonic=time.monotonic())
+    stats.add_usage(
+        {
+            "input": 62_100,
+            "output": 14_300,
+            "cacheRead": 1_100_000,
+            "cacheWrite": 84_000,
+            "cost": {"total": 0.1832, "cacheRead": 0.0041},
+        }
+    )
+    stats.note_answered_model("openrouter", "deepseek/deepseek-v4.1-flash")
+
+    footer = stats.footer()
+
+    assert "`opencode-go/muse-spark` → `openrouter/deepseek/deepseek-v4.1-flash`" in footer
+    assert "$0.1832" in footer
+    assert "miss 62.1k" in footer
+    assert "out 14.3k" in footer
+    assert "cache r 1.1M w 84.0k" in footer
+    assert "cache $0.0041" in footer
+
+
+def test_run_stats_answered_model_ignores_the_configured_one() -> None:
+    stats = host_tools.RunStats(model="opencode-go/muse-spark-1.3-contributor", started_monotonic=time.monotonic())
+
+    # The configured model answering is not a fallback.
+    stats.note_answered_model("opencode-go", "muse-spark-1.3-contributor")
+    assert stats.fallback_model is None
+
+    stats.note_answered_model("openrouter", "deepseek/deepseek-v4.1-flash")
+    assert stats.fallback_model == "openrouter/deepseek/deepseek-v4.1-flash"
+
+    # Junk and repeats never overwrite the first observation.
+    stats.note_answered_model(None, None)
+    stats.note_answered_model("openrouter", "other/model")
+    assert stats.fallback_model == "openrouter/deepseek/deepseek-v4.1-flash"
