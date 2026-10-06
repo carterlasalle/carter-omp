@@ -110,6 +110,7 @@ class CachedToken:
     expires_at: float
 
 
+# trace:v1 id=impl.app-token-provider work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 class AppTokenProvider:
     """Mints and caches per-repository GitHub App installation tokens.
 
@@ -118,6 +119,7 @@ class AppTokenProvider:
     and only into the proxy's in-memory ``GitHubClient`` instances.
     """
 
+    # trace:v1 id=impl.app-token-provider-init work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     def __init__(
         self,
         *,
@@ -130,6 +132,46 @@ class AppTokenProvider:
         self._transport = transport
         self._lock = threading.RLock()
         self._cache: dict[str, CachedToken] = {}
+        self._installations: dict[str, int] = {}
+
+    # trace:v1 id=impl.app-auth-installation-for-repo work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def installation_for_repo(self, repo: str) -> int:
+        """Resolve the App installation that owns ``repo`` (cached per repo).
+
+        One deployment serves several accounts/orgs and each App installation
+        has its own id, so the id has to come from the repo rather than from
+        static config. Without this, every repo outside the configured
+        installation is unreachable (the mint 404s).
+        """
+        key = repo.lower()
+        with self._lock:
+            cached = self._installations.get(key)
+        if cached is not None:
+            return cached
+        jwt = mint_app_jwt(app_id=self._app_id, private_key_pem=self._key_pem)
+        with httpx.Client(
+            base_url="https://api.github.com",
+            headers={
+                "Authorization": f"Bearer {jwt}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "carter_omp/0.1",
+            },
+            transport=self._transport,
+            timeout=httpx.Timeout(30.0, connect=10.0),
+        ) as client:
+            resp = client.get(f"/repos/{repo}/installation")
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"GitHub App installation lookup failed for {repo}: {resp.status_code} {resp.text[:200]}"
+            )
+        data = resp.json()
+        installation_id = data.get("id")
+        if not isinstance(installation_id, int):
+            raise RuntimeError(f"GitHub App installation lookup returned no id for {repo}")
+        with self._lock:
+            self._installations[key] = installation_id
+        return installation_id
 
     def _request_token(self, *, installation_id: int, repositories: list[str] | None) -> tuple[str, float]:
         jwt = mint_app_jwt(app_id=self._app_id, private_key_pem=self._key_pem)

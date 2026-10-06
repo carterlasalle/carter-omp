@@ -76,7 +76,37 @@ class Settings(BaseSettings):
     # without listing IDs. The App-install list stays the real boundary:
     # only repos where the App is actually installed can deliver webhooks.
     allowed_repo_owners_raw: str = Field("", alias="CARTER_OMP_REPO_OWNERS")
-    github_installation_id: int | None = Field(None, alias="CARTER_OMP_GITHUB_INSTALLATION_ID")
+    # Comma-separated installation ids — one per account/org the App is
+    # installed on. A deployment can serve several orgs; each has its own
+    # installation id, and webhooks from any of them must be admissible.
+    github_installation_ids_raw: str = Field("", alias="CARTER_OMP_GITHUB_INSTALLATION_ID")
+
+    # trace:v1 id=impl.config-installation-ids work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    @property
+    def github_installation_ids(self) -> frozenset[int]:
+        """Every installation id this deployment serves (comma-separated)."""
+        ids: set[int] = set()
+        for piece in self.github_installation_ids_raw.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            try:
+                ids.add(int(piece))
+            except ValueError:
+                continue
+        return frozenset(ids)
+
+    # trace:v1 id=impl.config-single-installation-id work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    @property
+    def github_installation_id(self) -> int | None:
+        """One installation id, for callers that need a single anchor.
+
+        Used for the proxy's startup identity probe and `doctor`; per-repo
+        work resolves the installation from the repo instead (see
+        `app_auth.AppTokenProvider.installation_for_repo`).
+        """
+        ids = self.github_installation_ids
+        return min(ids) if ids else None
 
     @property
     def authorized_user_ids(self) -> frozenset[int]:
@@ -331,7 +361,7 @@ class Settings(BaseSettings):
         return value
 
     # trace:exempt reason=internal-detail
-    @field_validator("github_app_id", "github_installation_id", "github_app_private_key_file", mode="before")
+    @field_validator("github_app_id", "github_app_private_key_file", mode="before")
     @classmethod
     def _blank_app_disables(cls, value: object) -> object:
         """Treat empty App-key strings as unset (test .env shadowing; see conftest)."""
@@ -581,7 +611,7 @@ class _ProxyEnvLoader(BaseSettings):
     github_token: SecretStr | None = Field(None, alias="GITHUB_TOKEN")
     github_app_id: str | None = Field(None, alias="CARTER_OMP_GITHUB_APP_ID")
     github_app_private_key_file: Path | None = Field(None, alias="CARTER_OMP_GITHUB_PRIVATE_KEY_FILE")
-    github_installation_id: int | None = Field(None, alias="CARTER_OMP_GITHUB_INSTALLATION_ID")
+    github_installation_ids_raw: str = Field("", alias="CARTER_OMP_GITHUB_INSTALLATION_ID")
     repo_allowlist_raw: str = Field("", alias="CARTER_OMP_REPO_ALLOWLIST")
     allowed_repo_owners_raw: str = Field("", alias="CARTER_OMP_REPO_OWNERS")
     github_proxy_hmac_key: SecretStr = Field(..., alias="CARTER_OMP_GH_PROXY_HMAC_KEY")
@@ -639,7 +669,7 @@ def load_proxy_settings() -> Settings:
         github_token=loader.github_token,
         github_app_id=loader.github_app_id,
         github_app_private_key_file=loader.github_app_private_key_file,
-        github_installation_id=loader.github_installation_id,
+        github_installation_ids_raw=loader.github_installation_ids_raw,
         repo_allowlist_raw=loader.repo_allowlist_raw,
         allowed_repo_owners_raw=loader.allowed_repo_owners_raw,
         github_webhook_secret=SecretStr(""),

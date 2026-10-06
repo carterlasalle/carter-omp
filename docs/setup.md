@@ -233,6 +233,32 @@ and refuses (non-zero exit) on any mismatch. Do not proceed with failures.
    each repo ID and restart.
 3. Re-run `doctor` after every identity change.
 
+## 10. Adding another account or organization
+
+The same deployment serves as many accounts/orgs as the App is installed on —
+nothing is per-org except the three values below. No re-setup, no rebuild.
+
+1. **Install the App on the new org** (App settings → Install App → the org →
+   *Only select repositories*). This is the real boundary: a repo where the App
+   is not installed can never deliver a webhook.
+2. **Add the org login to `CARTER_OMP_REPO_OWNERS`** (comma-separated):
+   `CARTER_OMP_REPO_OWNERS=carterlasalle,neworg`. Every repo the org owns —
+   present and future — is then in scope for triggers, the search index, and
+   the dashboard picker.
+3. **Append the org's installation id** to `CARTER_OMP_GITHUB_INSTALLATION_ID`
+   (also comma-separated: `<id1>,<id2>`). Read it with
+   `gh api /repos/<org>/<repo>/installation --jq .id` (or from the install
+   URL's `/installations/<id>` segment). The orchestrator admits webhooks only
+   from installations listed here; per-repo tokens are resolved from the repo
+   itself, so the proxy needs no other change.
+4. **Restart:** `docker compose up -d` (env-only change — no rebuild needed).
+5. **Label the repos you want to trigger.** `carter-omp` must exist as a label
+   in each repo you intend to label-trigger; create it once per repo (the bot
+   never applies its own trigger label). Mentions and assigning the bot need no
+   label.
+6. Re-run `docker compose exec carter-omp carter-omp doctor` — it prints the
+   allowlist, owners, and both model selectors.
+
 ## Reference
 
 <!-- trace:v1 id=doc.setup-reference work=WORK-CO-Q8Z1HJJJ -->

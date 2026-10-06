@@ -245,3 +245,17 @@ def test_fallback_model_csv_parsing(monkeypatch: pytest.MonkeyPatch, env: dict[s
     monkeypatch.delenv("CARTER_OMP_FALLBACK_MODEL")
     reset_settings_cache()
     assert Settings().fallback_models == ()  # type: ignore[call-arg]
+
+
+def test_installation_ids_csv_parsing(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    """One deployment serves several accounts/orgs: the env var is a list, and
+    `github_installation_id` stays a single anchor for the startup probe."""
+    monkeypatch.setenv("CARTER_OMP_GITHUB_INSTALLATION_ID", " 111 ,222, ,333 ")
+    reset_settings_cache()
+    cfg = Settings()  # type: ignore[call-arg]
+    assert cfg.github_installation_ids == frozenset({111, 222, 333})
+    assert cfg.github_installation_id == 111
+
+    monkeypatch.setenv("CARTER_OMP_GITHUB_INSTALLATION_ID", "")
+    reset_settings_cache()
+    assert Settings().github_installation_ids == frozenset()  # type: ignore[call-arg]

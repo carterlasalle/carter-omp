@@ -368,7 +368,7 @@ def authorize_event(
     *,
     policy: TriggerPolicy,
     allowed_repo_ids: frozenset[int] | None,
-    installation_id: int | None,
+    installation_ids: frozenset[int] | None,
     bot_login: str,
     allowed_repo_owners: frozenset[str] | None = None,
 ) -> AuthorizationDecision:
@@ -379,7 +379,9 @@ def authorize_event(
     and the trigger itself (label name + labeled action, or exact mention).
     Owner scope (`allowed_repo_owners`) additionally admits repos owned by a
     configured login without listing IDs; the owner comes from the signed
-    payload's `repository.full_name`.
+    payload's `repository.full_name`. `installation_ids` is the set of App
+    installations this deployment serves (one per account/org), so a second
+    organization is admitted without re-registering the first.
     """
     repo_id = _repository_id(payload)
     if repo_id is None:
@@ -391,9 +393,9 @@ def authorize_event(
             owner = full.split("/")[0].lower() if full and "/" in full else None
         if owner not in (allowed_repo_owners or frozenset()):
             return AuthorizationDecision(authorized=False, reason="repo_not_authorized")
-    if installation_id is not None:
+    if installation_ids:
         got_installation = _installation_id(payload)
-        if got_installation is None or got_installation != installation_id:
+        if got_installation is None or got_installation not in installation_ids:
             return AuthorizationDecision(authorized=False, reason="installation_not_authorized")
 
     actor = _sender_actor(payload)
@@ -929,7 +931,7 @@ def route(
     policy: TriggerPolicy | None = None,
     allowed_repo_ids: frozenset[int] | None = None,
     allowed_repo_owners: frozenset[str] | None = None,
-    installation_id: int | None = None,
+    installation_ids: frozenset[int] | None = None,
     delivery_id: str = "",
 ) -> RouteDecision:
     """Decide whether and how to handle a webhook event.
@@ -991,7 +993,7 @@ def route(
         payload,
         policy=effective_policy,
         allowed_repo_ids=allowed_repo_ids,
-        installation_id=installation_id,
+        installation_ids=installation_ids,
         bot_login=bot_login,
         allowed_repo_owners=allowed_repo_owners,
     )

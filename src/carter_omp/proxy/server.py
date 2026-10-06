@@ -231,12 +231,33 @@ def _resolve_token(cfg: Settings) -> str:
     return cfg.github_token.get_secret_value()
 
 
+# trace:v1 id=impl.proxy-installation-for work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _installation_for(provider: Any, cfg: Settings, repo: str) -> int:
+    """Installation id serving `repo`, resolved from the repo itself.
+
+    A deployment can serve several orgs, each with its own App installation;
+    the configured id(s) are only a fallback for when the lookup fails.
+    """
+    try:
+        return int(provider.installation_for_repo(repo))
+    except Exception as exc:
+        fallback = cfg.github_installation_id
+        if fallback is None:
+            raise
+        log.warning(
+            "installation lookup failed; using the configured id",
+            extra={"repo": repo, "err": str(exc)[:160]},
+        )
+        return fallback
+
+
+# trace:v1 id=impl.proxy-resolve-git-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def _resolve_git_token(cfg: Settings, repo: str) -> str:
     """Token for authenticated git operations, preferring the App provider."""
     provider = getattr(cfg, "_app_token_provider", None)
-    if provider is not None and cfg.github_installation_id is not None:
+    if provider is not None:
         try:
-            return provider.token_for_repo(installation_id=cfg.github_installation_id, repo=repo)
+            return provider.token_for_repo(installation_id=_installation_for(provider, cfg, repo), repo=repo)
         except Exception as exc:
             log.warning("app token for git failed, PAT fallback", extra={"repo": repo, "err": str(exc)[:200]})
     return _resolve_token(cfg)
@@ -254,11 +275,36 @@ def _scoped_client(request: Request, repo: str) -> GitHubClient:
 
     cfg: Settings = request.app.state.settings
     provider: AppTokenProvider | None = getattr(request.app.state, "app_token_provider", None)
-    if provider is None or cfg.github_installation_id is None:
+    if provider is None:
         return request.app.state.github
-    token = provider.token_for_repo(installation_id=cfg.github_installation_id, repo=repo)
+    token = provider.token_for_repo(installation_id=_installation_for(provider, cfg, repo), repo=repo)
     transport = getattr(request.app.state.github, "_transport", None)
     return GitHubClient(token, transport=transport)
+
+
+# trace:v1 id=impl.proxy-shared-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _shared_token(settings: Settings, provider: Any) -> str:
+    """Token for the proxy's shared (unscoped) client.
+
+    App mode: the configured installation id when set, else the installation
+    serving the first allowlisted repo (a deployment may configure no id at
+    all). PAT mode: the static token.
+    """
+    if provider is not None:
+        installation = settings.github_installation_id
+        if installation is None:
+            for repo in sorted(settings.repo_allowlist):
+                try:
+                    installation = int(provider.installation_for_repo(repo))
+                    break
+                except Exception as exc:
+                    log.warning(
+                        "installation lookup for the shared client failed",
+                        extra={"repo": repo, "err": str(exc)[:160]},
+                    )
+        if installation is not None:
+            return provider.token_unscoped(installation_id=installation)
+    return _resolve_token(settings)
 
 
 def _resolve_hmac_key(cfg: Settings) -> bytes:
@@ -504,10 +550,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         # per-request scoped client refreshes it later); PAT mode uses the
         # static token. No GITHUB_TOKEN is required in App mode.
         provider = getattr(settings, "_app_token_provider", None)
-        if provider is not None and settings.github_installation_id is not None:
-            app.state.github = GitHubClient(provider.token_unscoped(installation_id=settings.github_installation_id))
-        else:
-            app.state.github = GitHubClient(_resolve_token(settings))
+        app.state.github = GitHubClient(_shared_token(settings, provider))
         app.state.settings = settings
         yield
 

@@ -1210,9 +1210,7 @@ def test_record_agent_abort_marks_the_delivery_failed(
     assert "401" in str(recorded["error"])
 
 
-def test_record_agent_abort_is_a_noop_without_an_abort(
-    tmp_path: Path, settings: Settings
-) -> None:
+def test_record_agent_abort_is_a_noop_without_an_abort(tmp_path: Path, settings: Settings) -> None:
     calls: list[object] = []
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
     inputs.db = SimpleNamespace(mark_event=lambda *a, **k: calls.append((a, k)))  # type: ignore[assignment]

@@ -348,6 +348,7 @@ def auth() -> None:
     """Authorization helpers."""
 
 
+# trace:v1 id=impl.cli-auth-check work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 @auth.command("check")
 def auth_check() -> None:
     """Print the configured immutable authorization identity."""
@@ -356,7 +357,7 @@ def auth_check() -> None:
     click.echo(f"authorized logins (readability only): {sorted(cfg.authorized_logins)}")
     click.echo(f"allowed repo ids: {sorted(cfg.allowed_repo_ids)}")
     click.echo(f"allowed repo names (readability only): {sorted(cfg.allowed_repo_names)}")
-    click.echo(f"installation id: {cfg.github_installation_id}")
+    click.echo(f"installation ids: {sorted(cfg.github_installation_ids) or 'NONE'}")
 
 
 @main.group()

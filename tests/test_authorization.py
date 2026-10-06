@@ -168,9 +168,42 @@ def test_wrong_installation_skips() -> None:
         }
     )
     payload["installation"] = {"id": 1}
-    d = route("issues", payload, allowlist=ALLOWLIST, bot_login=BOT, policy=POLICY, installation_id=INSTALLATION_ID)
+    d = route(
+        "issues",
+        payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        policy=POLICY,
+        installation_ids=frozenset({INSTALLATION_ID}),
+    )
     assert not d.should_queue
     assert d.reason == "installation_not_authorized"
+
+
+def test_second_installation_of_the_same_app_is_admitted() -> None:
+    """A deployment serves several accounts/orgs; each App installation has its
+    own id, so every configured id must be admissible — otherwise a second org
+    can never trigger anything."""
+    other_installation = INSTALLATION_ID + 1
+    payload = _base(
+        {
+            "action": "labeled",
+            "label": {"name": "carter-omp"},
+            "issue": {"number": 4},
+            "sender": _sender("carterlasalle", OPERATOR_ID),
+        }
+    )
+    payload["installation"] = {"id": other_installation}
+    d = route(
+        "issues",
+        payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        policy=POLICY,
+        installation_ids=frozenset({INSTALLATION_ID, other_installation}),
+    )
+    assert d.should_queue
+    assert d.trigger is not None and d.trigger.installation_id == other_installation
 
 
 def test_issue_opened_never_queues() -> None:

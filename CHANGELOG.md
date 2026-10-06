@@ -13,6 +13,14 @@ versions are `Unreleased` until the first tagged release.
 
 ### Added
 
+- Multi-organization support: `CARTER_OMP_GITHUB_INSTALLATION_ID` takes a
+  comma-separated list of installation ids and `CARTER_OMP_REPO_OWNERS` already
+  took a list of owners, so one deployment serves several accounts/orgs. The
+  proxy resolves each repo's installation from the repo
+  (`AppTokenProvider.installation_for_repo`) instead of assuming a single
+  configured one, and the issue index + dashboard picker now follow owner scope
+  instead of the exact allowlist.
+
 - Initial extraction of `carter-omp` from `can1357/oh-my-pi` `python/robomp`
   (see `docs/upstream.md`).
 - Explicit-trigger authorization model: strict label/mention triggers keyed on
