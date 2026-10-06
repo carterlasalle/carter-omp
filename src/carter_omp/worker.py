@@ -519,6 +519,22 @@ def _has_prior_session(session_dir: Path) -> bool:
         return False
 
 
+# trace:v1 id=impl.worker-run-token-ttl work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _run_token_ttl(settings: Settings) -> int:
+    """Seconds a per-run proxy token must stay valid.
+
+    The token is minted once per run and used by every mutation in it, so it
+    has to outlive the whole task budget — not one round-trip. An expired
+    token 401s every push/comment/PR for the rest of the run, which is how a
+    run can end with the work committed and nothing published.
+    """
+    return int(
+        max(settings.task_timeout_seconds, settings.release_task_timeout_seconds)
+        + settings.task_timeout_hard_grace_seconds
+        + 300.0
+    )
+
+
 # trace:v1 id=impl.worker-attach-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
     """Mint a per-run proxy token and scope the GitHub client to it.
@@ -547,6 +563,7 @@ def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
         workspace=None,
         branch=inputs.workspace.branch,
         capabilities=frozenset(c.value for c in trigger.capabilities),
+        ttl_seconds=_run_token_ttl(inputs.settings),
     )
     if isinstance(inputs.github, GitHubProxyClient):
         object.__setattr__(bindings, "github", inputs.github.with_run_token(token))

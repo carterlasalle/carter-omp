@@ -1124,3 +1124,64 @@ async def test_run_rpc_omits_config_without_fallback(
     )
 
     assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ()
+
+
+def test_run_token_ttl_outlives_the_task_budget(settings: Settings) -> None:
+    """One token covers a whole run: a 10-minute TTL expired mid-run and every
+    later mutation 401'd, leaving work committed but unpublished."""
+    cfg = settings.model_copy(
+        update={
+            "task_timeout_seconds": 2400.0,
+            "release_task_timeout_seconds": 3600.0,
+            "task_timeout_hard_grace_seconds": 60.0,
+        }
+    )
+
+    ttl = worker._run_token_ttl(cfg)
+
+    assert ttl > 3600.0  # the longest task budget the run can be given
+    assert ttl >= int(3600.0 + 60.0)
+
+
+def test_attach_run_token_mints_with_the_run_budget(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+
+    from carter_omp import run_token as run_token_module
+    from carter_omp.capabilities import Capability
+    from carter_omp.github_events import TriggerContext
+
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    inputs.trigger = TriggerContext(
+        run_id="run-1",
+        delivery_id="d1",
+        repository_id=1,
+        repository_full_name="acme/widgets",
+        installation_id=2,
+        actor_id=3,
+        actor_login="carterlasalle",
+        actor_type="User",
+        event_type="issues",
+        action="labeled",
+        trigger_kind="label",
+        trigger_object_id=None,
+        trigger_value="carter-omp",
+        issue_number=1,
+        pull_request_number=None,
+        capabilities=frozenset({Capability.COMMENT}),
+        policy_version="v1",
+        authorized_at=datetime(2026, 10, 6, tzinfo=UTC),
+    )
+    seen: dict[str, object] = {}
+
+    def _fake_mint(**kwargs: object) -> str:
+        seen.update(kwargs)
+        return "token"
+
+    monkeypatch.setattr(run_token_module, "mint_run_token", _fake_mint)
+
+    worker._attach_run_token(inputs, bindings)
+
+    assert seen["ttl_seconds"] == worker._run_token_ttl(settings)
+    assert seen["issue"] == 1

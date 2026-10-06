@@ -24,11 +24,12 @@ log = logging.getLogger(__name__)
 _CONTROL_COMMANDS = ("status", "stop", "review", "resume", "release-fix")
 
 
+# trace:v1 id=impl.queue-control-command work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _control_command(body: str | None) -> str | None:
     """Return the control command in an authorized directive body, if any."""
     if not isinstance(body, str):
         return None
-    first = body.strip().split("\n", 1)[0].strip().lower()
+    first = body.strip().split("\n", 1)[0].strip().lower().rstrip("?!.,:;")
     return first if first in _CONTROL_COMMANDS else None
 
 

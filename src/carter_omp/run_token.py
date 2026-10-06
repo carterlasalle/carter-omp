@@ -19,7 +19,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-# Run tokens live minutes, not hours: enough for one tool call round-trip.
+# Default TTL for callers with no run budget to size against. The
+# orchestrator passes the task budget instead (see worker._run_token_ttl):
+# one token covers a whole run, so a short TTL expires mid-run and every
+# later mutation 401s.
 RUN_TOKEN_TTL_SECONDS = 600
 
 

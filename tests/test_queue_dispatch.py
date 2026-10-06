@@ -159,3 +159,10 @@ def test_control_stop_marks_done_without_dispatch(tmp_path, settings) -> None:
     assert _control_command("stop") == "stop"
     assert _control_command("status") == "status"
     assert _control_command("fix the bug") is None
+    # People type `@carter-omp status?` — trailing punctuation must not turn a
+    # deterministic DB answer into a full model run.
+    assert _control_command("status?") == "status"
+    assert _control_command("STOP!") == "stop"
+    # Only a bare command line counts: prose that merely starts with a command
+    # word stays a normal follow-up (a model run), not a canned DB answer.
+    assert _control_command("status: what's the state?") is None
