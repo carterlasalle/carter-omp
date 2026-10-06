@@ -8,7 +8,13 @@ import httpx
 import pytest
 
 from carter_omp import app_auth
-from carter_omp.cli import _app_slug, _installation_for_owner, _merge_csv_env, _upsert_env_file
+from carter_omp.cli import (
+    _app_slug,
+    _installation_for_owner,
+    _merge_csv_env,
+    _read_env_file,
+    _upsert_env_file,
+)
 
 
 def test_merge_csv_env_is_order_stable_and_idempotent() -> None:
@@ -72,3 +78,10 @@ def test_installation_for_owner_prefers_org_then_user(monkeypatch: pytest.Monkey
 def test_app_slug_reads_the_app_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_auth, "mint_app_jwt", lambda **_k: "jwt")
     assert _app_slug(app_id="1", private_key_pem="pem", transport=_install_transport({"/app": 0})) == "carter-omp"
+
+
+def test_read_env_file_ignores_comments_and_blank_lines(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("# c\n\nA=1\nB = 2 \n", encoding="utf-8")
+    assert _read_env_file(env) == {"A": "1", "B": "2"}
+    assert _read_env_file(tmp_path / "missing.env") == {}

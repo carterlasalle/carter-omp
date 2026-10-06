@@ -598,6 +598,21 @@ def _merge_csv_env(value: str, additions: Iterable[str]) -> str:
     return ",".join(items)
 
 
+# trace:v1 id=impl.cli-read-env-file work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _read_env_file(path: Path) -> dict[str, str]:
+    """Current `KEY=value` pairs in an env file (comments/blank lines ignored)."""
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        values[key.strip()] = value.strip()
+    return values
+
+
 # trace:v1 id=impl.cli-upsert-env-file work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def _upsert_env_file(path: Path, updates: Mapping[str, str]) -> list[str]:
     """Set `KEY=value` lines in an env file, preserving comments and order.
@@ -700,8 +715,10 @@ def add_org(owner: str, env_file: str, dry_run: bool) -> None:
         "CARTER_OMP_REPO_OWNERS": _merge_csv_env(cfg.allowed_repo_owners_raw, [owner]),
         "CARTER_OMP_GITHUB_INSTALLATION_ID": _merge_csv_env(cfg.github_installation_ids_raw, [str(installation_id)]),
     }
+    current = _read_env_file(path)
     if dry_run:
-        changed = list(updates)
+        # Report only what would actually change, so a re-run reads as a no-op.
+        changed = [key for key, value in updates.items() if current.get(key) != value]
     else:
         changed = _upsert_env_file(path, updates)
     click.echo(f"installation id: {installation_id}")
