@@ -30,6 +30,16 @@ versions are `Unreleased` until the first tagged release.
   provider degrades to the chain (e.g. OpenRouter) instead of failing the run.
 - Pickup acknowledgement: the bot reacts 👀 to the triggering comment, or to
   the issue itself for label triggers, through the per-run capability token.
+- Triggers carry the whole comment thread inline by default: label/assign runs
+  (`triage_issue`) and mention runs (`handle_comment`) now embed the issue body
+  and every comment chronologically instead of relying on the agent to call
+  `fetch_issue_thread`. Mention runs drop the comment that triggered them (it is
+  quoted separately); PR runs already inlined their thread.
+- Assignment trigger: an authorized sender assigning **the bot itself**
+  (`issues.assigned` / `pull_request.assigned`) queues the same work a label
+  would. Gated like the label — authorized `sender.id`, installation, repo
+  scope — and off-switchable with `CARTER_OMP_ASSIGN_TRIGGERS`. Assigning a
+  human never triggers, and neither does `unassigned`.
 
 ### Fixed
 

@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     trigger_label: str = Field("carter-omp", alias="CARTER_OMP_TRIGGER_LABEL")
     label_triggers: bool = Field(True, alias="CARTER_OMP_LABEL_TRIGGERS")
     mention_triggers: bool = Field(True, alias="CARTER_OMP_MENTION_TRIGGERS")
+    # Assigning the bot itself is an explicit trigger, same gate as a label
+    # (authorized sender + installation + repo scope).
+    assign_triggers: bool = Field(True, alias="CARTER_OMP_ASSIGN_TRIGGERS")
     auto_issue_triage: bool = Field(False, alias="CARTER_OMP_AUTO_ISSUE_TRIAGE")
     auto_pr_review: bool = Field(False, alias="CARTER_OMP_AUTO_PR_REVIEW")
     auto_comment_followups: bool = Field(False, alias="CARTER_OMP_AUTO_COMMENT_FOLLOWUPS")
@@ -125,6 +128,7 @@ class Settings(BaseSettings):
             piece.strip().lstrip("@").lower() for piece in self.allowed_repo_owners_raw.split(",") if piece.strip()
         )
 
+    # trace:v1 id=impl.trigger-policy work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
     @property
     def trigger_policy(self) -> TriggerPolicy:
         """First-class trigger policy derived from the flat env fields."""
@@ -137,6 +141,7 @@ class Settings(BaseSettings):
             label_triggers=self.label_triggers,
             trigger_label=self.trigger_label,
             mention_triggers=self.mention_triggers,
+            assign_triggers=self.assign_triggers,
             auto_issue_triage=self.auto_issue_triage,
             auto_pr_review=self.auto_pr_review,
             auto_followup_comments=self.auto_comment_followups,

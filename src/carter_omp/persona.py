@@ -180,8 +180,17 @@ def followup_release(*, repo: RepoInfo, release: ReleaseTaskContext, workspace: 
     )
 
 
-def kickoff(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace) -> str:
-    return render(_load("kickoff_issue.md"), {"repo": repo, "issue": issue, "workspace": workspace})
+# trace:v1 id=impl.persona-kickoff work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+def kickoff(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace, thread: tuple = ()) -> str:
+    """Kickoff for a fresh (label-triggered) triage.
+
+    Carries every existing comment inline: the reporter's follow-ups are
+    usually where the real repro steps live.
+    """
+    return render(
+        _load("kickoff_issue.md"),
+        {"repo": repo, "issue": issue, "workspace": workspace, "thread": _render_thread(thread)},
+    )
 
 
 def kickoff_pr_review(*, repo: RepoInfo, pr: PullRequestInfo, workspace: Workspace) -> str:

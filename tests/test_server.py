@@ -2637,6 +2637,12 @@ class _StubGithubForTriage:
             raise self._closing_prs
         return self._closing_prs
 
+    async def list_comments(self, repo: str, number: int) -> list[object]:
+        """Empty thread: these tests cover the closing-PR guard and workspace
+        lifecycle, not prompt content."""
+        del repo, number
+        return []
+
 
 async def test_triage_issue_skips_when_a_closing_pr_already_exists(
     settings: Settings, tmp_path: Path, stub_run_task, monkeypatch

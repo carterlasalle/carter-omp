@@ -571,7 +571,7 @@ async def _ack_pickup_reaction(inputs: TaskInputs, bindings: ToolBindings) -> No
     try:
         if trigger.trigger_kind == "mention" and trigger.trigger_object_id is not None:
             await bindings.github.add_comment_reaction(trigger.repository_full_name, trigger.trigger_object_id, "eyes")
-        elif trigger.trigger_kind == "label":
+        elif trigger.trigger_kind in ("label", "assign"):
             number = trigger.issue_number or trigger.pull_request_number
             if number is None:
                 return
@@ -580,6 +580,7 @@ async def _ack_pickup_reaction(inputs: TaskInputs, bindings: ToolBindings) -> No
         log.debug("pickup ack failed", extra={"delivery": inputs.delivery_id, "err": str(exc)[:120]})
 
 
+# trace:v1 id=impl.worker-build-prompt work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
 def _build_prompt(
     task_kind: str,
     inputs: TaskInputs,
@@ -607,7 +608,7 @@ def _build_prompt(
                 workspace=inputs.workspace,
                 directive=directive,
             )
-        return persona.kickoff(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace)
+        return persona.kickoff(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace, thread=thread)
     if task_kind == "review_pr":
         assert inputs.issue is not None
         assert pr is not None

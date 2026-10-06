@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 
 Decision = Literal["queue", "skip"]
 
-TriggerKind = Literal["label", "mention", "manual_cli"]
+TriggerKind = Literal["label", "mention", "assign", "manual_cli"]
 
 REPLAYABLE_SKIP_REASONS: frozenset[str] = frozenset()
 
@@ -156,6 +156,7 @@ class RouteDecision:
         return self.decision == "queue"
 
 
+# trace:v1 id=impl.trigger-policy-dataclass work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
 @dataclass(slots=True, frozen=True)
 class TriggerPolicy:
     mode: Literal["strict", "legacy"] = "strict"
@@ -163,6 +164,9 @@ class TriggerPolicy:
     label_triggers: bool = True
     trigger_label: str = "carter-omp"
     mention_triggers: bool = True
+    # Assigning the bot itself is an explicit trigger ("work on this").
+    # Only the configured bot login counts; assigning a human never does.
+    assign_triggers: bool = True
     auto_issue_triage: bool = False
     auto_pr_review: bool = False
     auto_followup_comments: bool = False
@@ -421,6 +425,23 @@ def authorize_event(
             actor=actor,
         )
 
+    if event_type in ("issues", "pull_request") and action == "assigned":
+        if not policy.assign_triggers:
+            return AuthorizationDecision(authorized=False, reason="assign_trigger_disabled", actor=actor)
+        assignee = payload.get("assignee")
+        assignee_login = assignee.get("login") if isinstance(assignee, Mapping) else None
+        if not _login_matches_bot(assignee_login, bot_login):
+            return AuthorizationDecision(authorized=False, reason="assignee_not_bot", actor=actor)
+        if actor.id not in policy.authorized_user_ids:
+            return AuthorizationDecision(authorized=False, reason="actor_not_authorized", actor=actor)
+        return AuthorizationDecision(
+            authorized=True,
+            reason="authorized_assign_trigger",
+            trigger_kind="assign",
+            trigger_value=str(assignee_login),
+            actor=actor,
+        )
+
     if event_type in ("issue_comment", "pull_request_review_comment") and action == "created":
         comment = payload.get("comment")
         body = comment.get("body") if isinstance(comment, Mapping) else None
@@ -449,6 +470,7 @@ def authorize_event(
     return AuthorizationDecision(authorized=False, reason="explicit_trigger_required", actor=actor)
 
 
+# trace:v1 id=impl.classify-trigger work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
 def classify_trigger(
     event_type: str,
     payload: Mapping[str, Any],
@@ -459,6 +481,10 @@ def classify_trigger(
         label = payload.get("label")
         label_name = label.get("name") if isinstance(label, Mapping) else None
         return f"label:{label_name}" if isinstance(label_name, str) else "label:?"
+    if event_type in ("issues", "pull_request") and action == "assigned":
+        assignee = payload.get("assignee")
+        login = assignee.get("login") if isinstance(assignee, Mapping) else None
+        return f"assign:{login}" if isinstance(login, str) else "assign:?"
     if event_type in ("issue_comment", "pull_request_review_comment"):
         return "mention" if action == "created" else f"{event_type}.{action}"
     return f"{event_type}.{action}"
@@ -606,7 +632,7 @@ def route_authorized_event(
             authz=decision,
         )
 
-    if event_type == "issues" and action == "labeled":
+    if event_type == "issues" and action in ("labeled", "assigned"):
         issue = payload.get("issue") or {}
         if "pull_request" in issue:
             return RouteDecision("skip", None, repo, None, "issue is a pull request")
@@ -614,21 +640,21 @@ def route_authorized_event(
         if not isinstance(number, int):
             return RouteDecision("skip", None, repo, None, "issue missing number")
         key = issue_key(repo, number)
-        return _queue("triage_issue", key, "issues.labeled", issue_number=number)
+        return _queue("triage_issue", key, f"issues.{action}", issue_number=number)
 
-    if event_type == "pull_request" and action == "labeled":
+    if event_type == "pull_request" and action in ("labeled", "assigned"):
         pr = payload.get("pull_request") or {}
         number = pr.get("number")
         if not isinstance(number, int):
             return RouteDecision("skip", None, repo, None, "PR missing number")
         if _login_matches_bot(str((pr.get("user") or {}).get("login") or ""), bot_login):
             key = _resolve_pr_key(number)
-            return _queue("handle_pr_conversation", key, "pull_request.labeled", pull_request_number=number)
+            return _queue("handle_pr_conversation", key, f"pull_request.{action}", pull_request_number=number)
         key = issue_key(repo, number)
         review_probe = _pr_review_pr(pr, repo, action, bot_login)
         if review_probe.decision == "skip":
             return review_probe
-        return _queue("review_pr", key, "pull_request.labeled", pull_request_number=number)
+        return _queue("review_pr", key, f"pull_request.{action}", pull_request_number=number)
 
     if event_type == "issue_comment" and action == "created":
         comment = payload.get("comment") or {}

@@ -113,14 +113,21 @@ def _trigger_from_payload(payload: Mapping[str, Any]) -> object | None:
         return None
 
 
+# trace:v1 id=impl.thread-fetch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
 async def _fetch_thread(
     github: GitHubBackend,
     repo: str,
     number: int,
     *,
     is_pr: bool,
+    include_body: bool = True,
+    exclude_comment_id: int | None = None,
 ) -> tuple[ThreadMessage, ...]:
     """Pull the full conversation thread (body + comments + reviews) for `number`.
+
+    `include_body=False` is for prompts that already print the body verbatim
+    (the triage kickoff), and `exclude_comment_id` drops the comment the run
+    was triggered by when the prompt quotes it separately.
 
     Best-effort: any sub-fetch that fails is logged + dropped so a stale
     review-comments endpoint doesn't block the directive from running.
@@ -129,23 +136,26 @@ async def _fetch_thread(
 
     # 1. The issue / PR body itself. Use get_issue (issues endpoint also
     #    returns PRs in GitHub's data model).
-    try:
-        item = await github.get_issue(repo, number)
-        if item.body and item.body.strip():
-            messages.append(
-                ThreadMessage(
-                    kind="pr_body" if is_pr else "issue_body",
-                    author=item.author or "",
-                    body=item.body,
-                    created_at="",  # not exposed by IssueInfo
+    if include_body:
+        try:
+            item = await github.get_issue(repo, number)
+            if item.body and item.body.strip():
+                messages.append(
+                    ThreadMessage(
+                        kind="pr_body" if is_pr else "issue_body",
+                        author=item.author or "",
+                        body=item.body,
+                        created_at="",  # not exposed by IssueInfo
+                    )
                 )
-            )
-    except GitHubError as exc:
-        log.warning("thread body fetch failed", extra={"repo": repo, "n": number, "err": str(exc)})
+        except GitHubError as exc:
+            log.warning("thread body fetch failed", extra={"repo": repo, "n": number, "err": str(exc)})
 
     # 2. Conversation comments (issue OR PR conversation).
     try:
         for c in await github.list_comments(repo, number):
+            if exclude_comment_id is not None and c.id == exclude_comment_id:
+                continue
             messages.append(
                 ThreadMessage(
                     kind="comment",
@@ -482,6 +492,7 @@ async def handle_release_ci(
     log.info("release conclusion ignored", extra={"key": key, "conclusion": conclusion})
 
 
+# trace:v1 id=impl.tasks-triage-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
 async def triage_issue(
     *,
     settings: Settings,
@@ -563,7 +574,10 @@ async def triage_issue(
         natives_cache=sandbox.natives_cache,
         trigger=_trigger_from_payload(payload),
     )
-    await run_task(task_kind="triage_issue", inputs=inputs)
+    # Label triggers carry the whole comment thread by default; the kickoff
+    # template already prints the body, so only comments are inlined.
+    thread = await _fetch_thread(github, repo.full_name, issue.number, is_pr=False, include_body=False)
+    await run_task(task_kind="triage_issue", inputs=inputs, thread=thread)
 
 
 async def review_pr(
@@ -761,7 +775,16 @@ async def handle_comment(
             trigger=_trigger_from_payload(payload),
         )
         directive = await _attach_thread(github, directive, repo.full_name, issue.number, is_pr=False)
-        await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive)
+        # Mention triggers get the whole thread too, minus this
+        # comment (the prompt quotes it separately).
+        thread = await _fetch_thread(
+            github,
+            repo.full_name,
+            issue.number,
+            is_pr=False,
+            exclude_comment_id=comment.id,
+        )
+        await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive, thread=thread)
         return
 
     workspace = await _run_workspace_op(
@@ -791,7 +814,16 @@ async def handle_comment(
         trigger=_trigger_from_payload(payload),
     )
     directive = await _attach_thread(github, directive, repo.full_name, issue.number, is_pr=False)
-    await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive)
+    # Mention triggers get the whole thread too, minus this
+    # comment (the prompt quotes it separately).
+    thread = await _fetch_thread(
+        github,
+        repo.full_name,
+        issue.number,
+        is_pr=False,
+        exclude_comment_id=comment.id,
+    )
+    await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive, thread=thread)
 
 
 async def handle_review(
