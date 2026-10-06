@@ -77,6 +77,54 @@ _PRE_PR_TEST_TIMEOUT_SECONDS = 3600.0
 _DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
+# trace:v1 id=impl.host-tools-format-duration work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _format_duration(seconds: float) -> str:
+    total = int(max(0.0, seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m{total % 60:02d}s"
+    return f"{total // 3600}h{(total % 3600) // 60:02d}m"
+
+
+# trace:v1 id=impl.host-tools-run-stats work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+@dataclass(slots=True)
+class RunStats:
+    """Per-run telemetry appended to the bot's GitHub messages.
+
+    The worker fills this in (model + monotonic start at launch, spend
+    accumulated from `message_end` usage events); `gh_post_comment` and
+    `gh_open_pr` render it as a footer so a reader can see which model wrote
+    the message, how long the run had been going, and what it had cost.
+    """
+
+    model: str
+    started_monotonic: float
+    cost_usd: float = 0.0
+
+    # trace:v1 id=impl.run-stats-elapsed work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def elapsed_seconds(self) -> float:
+        return max(0.0, time.monotonic() - self.started_monotonic)
+
+    # trace:v1 id=impl.run-stats-add-usage work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def add_usage(self, usage: Mapping[str, Any] | None) -> None:
+        """Accumulate one assistant message's usage (USD)."""
+        if not isinstance(usage, Mapping):
+            return
+        cost = usage.get("cost")
+        if isinstance(cost, Mapping):
+            total = cost.get("total")
+            if isinstance(total, (int, float)) and not isinstance(total, bool):
+                self.cost_usd += float(total)
+
+    # trace:v1 id=impl.run-stats-footer work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def footer(self) -> str:
+        """Markdown footer: model, wall clock, spend."""
+        cost = f"${self.cost_usd:.4f}" if self.cost_usd < 1 else f"${self.cost_usd:.2f}"
+        parts = [f"`{self.model}`", _format_duration(self.elapsed_seconds()), cost]
+        return "\n\n---\n<sub>" + " · ".join(parts) + "</sub>"
+
+
 # trace:v1 id=impl.host-tools-abort-controller work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 @dataclass(slots=True)
 class AbortController:
@@ -119,6 +167,7 @@ class ReleaseToolContext:
     default_branch: str
 
 
+# trace:v1 id=impl.host-tools-bindings work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 @dataclass(slots=True, frozen=True)
 class ToolBindings:
     """Per-task closure that the host tools capture."""
@@ -164,6 +213,8 @@ class ToolBindings:
     # without a live RpcClient.
     abort: AbortController | None = None
     release: ReleaseToolContext | None = None
+    # Per-run telemetry for the message footer; None outside a real run.
+    stats: RunStats | None = None
 
     @property
     def issue_key(self) -> str:
@@ -732,7 +783,9 @@ def _schedule_autoclose(bindings: ToolBindings, *, comment_id: int, hours: float
 
 
 # ---------- gh_post_comment ----------
+# trace:v1 id=impl.host-tools-post-comment work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
+    # trace:v1 id=impl.host-tools-post-comment-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         bindings.require(Capability.COMMENT, "gh_post_comment", args)
         body = args.get("body")
@@ -748,6 +801,8 @@ def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
         body_to_post = body
         if schedule_close is not None:
             body_to_post = f"{body.rstrip()}\n\n{persona.question_autoclose_suffix(schedule_close)}"
+        if bindings.stats is not None:
+            body_to_post = f"{body_to_post.rstrip()}{bindings.stats.footer()}"
         try:
             comment = _run_coro(
                 bindings.loop,
@@ -1327,7 +1382,9 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 # ---------- gh_open_pr ----------
+# trace:v1 id=impl.host-tools-open-pr work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
+    # trace:v1 id=impl.host-tools-open-pr-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         bindings.require(Capability.OPEN_PR, "gh_open_pr", args)
         if bindings.review_mode:
@@ -1356,6 +1413,9 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
                 "GitHub auto-closes the issue when the PR merges. Put it at the end of the "
                 "Verification section per the template."
             )
+        if bindings.stats is not None:
+            # Same footer as comments: which model, how long, what it cost.
+            body = f"{body.rstrip()}{bindings.stats.footer()}"
         _run_pre_publish_bun_fix(bindings, args, tool_name="gh_open_pr", stage="open PR")
         _run_pre_publish_bun_check(bindings, args, tool_name="gh_open_pr", stage="open PR")
         # Last and slowest: the suite runs against the tree that is actually

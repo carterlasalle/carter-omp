@@ -19,6 +19,8 @@ import logging
 import os
 import shutil
 import threading
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -750,6 +752,12 @@ def _run_rpc_blocking(
     host_tools.ensure_workspace_dependencies(bindings)
     resuming = _has_prior_session(bindings.workspace.session_dir)
     extra_args: tuple[str, ...] = ("--continue",) if resuming else ()
+    # Repo-provided extension/hook code (`<repo>/.omp/hooks/pre|post/*.ts`) is
+    # discovered from the workspace and executed in-process by omp. Our runs
+    # need none of it — every GitHub side effect goes through host tools — and
+    # a PR could otherwise run arbitrary code inside the agent, so keep ambient
+    # discovery off.
+    extra_args += ("--no-extensions",)
     overlay = _write_fallback_chains(settings)
     if overlay is not None:
         extra_args += ("--config", str(overlay))
@@ -805,6 +813,13 @@ def _run_rpc_blocking(
             bot_login=inputs.settings.bot_login,
         )
 
+    # Telemetry for the GitHub message footer: which model ran, how long it has
+    # been going, and what it has cost so far (accumulated from the
+    # `message_end` usage events below), so any comment or PR body can report
+    # all three.
+    stats = host_tools.RunStats(model=chosen_model, started_monotonic=time.monotonic())
+    object.__setattr__(bindings, "stats", stats)
+
     with RpcClient(
         executable=settings.omp_command,
         cwd=bindings.workspace.repo_dir,
@@ -855,6 +870,14 @@ def _run_rpc_blocking(
             client.install_headless_ui()
             client.on_tool_execution_end(_on_tool_end)
             client.on_message_update(_on_msg)
+
+            # trace:v1 id=impl.worker-on-message-end work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+            def _on_message_end(event: Any) -> None:
+                message = getattr(event, "message", None)
+                if isinstance(message, Mapping) and message.get("role") == "assistant":
+                    stats.add_usage(message.get("usage"))
+
+            client.on_message_end(_on_message_end)
 
             phases = persona.seed_phases(task_kind)
             if phases:

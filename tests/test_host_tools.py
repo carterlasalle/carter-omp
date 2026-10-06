@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -5060,3 +5061,60 @@ def test_ensure_workspace_dependencies_installs_for_npm_repo_and_cleans_lockfile
 
     assert captured == [("bun", "install", "--ignore-scripts")]
     assert not (repo_dir / "bun.lock").exists()
+
+
+def test_format_duration_boundaries() -> None:
+    assert host_tools._format_duration(0) == "0s"
+    assert host_tools._format_duration(42.9) == "42s"
+    assert host_tools._format_duration(252) == "4m12s"
+    assert host_tools._format_duration(3900) == "1h05m"
+
+
+def test_run_stats_footer_reports_model_duration_and_cost() -> None:
+    """Readers of a bot message can see which model wrote it, how long the run
+    had been going, and what it had spent."""
+    stats = host_tools.RunStats(model="opencode-go/muse-spark", started_monotonic=time.monotonic() - 30)
+
+    footer = stats.footer()
+
+    assert footer.startswith("\n\n---\n<sub>")
+    assert "`opencode-go/muse-spark`" in footer
+    assert ("30s" in footer) or ("31s" in footer)
+    assert "$0.0000" in footer
+
+
+def test_run_stats_accumulates_usage_and_ignores_junk() -> None:
+    stats = host_tools.RunStats(model="m", started_monotonic=time.monotonic())
+    stats.add_usage({"cost": {"total": 0.0312}, "input": 10, "output": 5})
+    stats.add_usage({"cost": {"total": 0.0025}})
+    assert stats.cost_usd == pytest.approx(0.0337)
+    assert "$0.0337" in stats.footer()
+
+    for junk in (None, {}, {"cost": "nope"}, {"cost": {"total": True}}, {"cost": {"total": None}}):
+        stats.add_usage(junk)
+    assert stats.cost_usd == pytest.approx(0.0337)
+
+
+def test_gh_post_comment_appends_run_stats_footer(db: Database, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": 999, "user": {"login": "b"}, "body": "hi", "created_at": "t"})
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    object.__setattr__(
+        bindings,
+        "stats",
+        host_tools.RunStats(model="opencode-go/muse-spark", started_monotonic=time.monotonic()),
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_comment")
+        tool.execute({"body": "Looking into this."}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    body = captured["body"]["body"]
+    assert body.startswith("Looking into this.")
+    assert body.rstrip().endswith("</sub>")
+    assert "`opencode-go/muse-spark`" in body
