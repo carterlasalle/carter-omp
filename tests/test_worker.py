@@ -1219,3 +1219,16 @@ def test_record_agent_abort_is_a_noop_without_an_abort(tmp_path: Path, settings:
     worker._record_agent_abort(inputs, bindings)
 
     assert calls == []
+
+
+def test_agent_env_disables_husky(tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repo lifecycle scripts must not rewrite SHARED git metadata: husky's
+    `prepare` runs `git config core.hooksPath`, which rewrote the pool's
+    `.git/config` as the invoking slot's uid:gid and locked other slots out."""
+    monkeypatch.setattr(worker, "_AGENT_HOME_STAGE", tmp_path / "missing-stage")
+    monkeypatch.setattr(worker, "_AGENT_HOME", tmp_path / "agent-home")
+
+    env = worker._build_extra_env(settings)
+
+    assert env["HUSKY"] == "0"
+    assert env["HUSKY_SKIP_INSTALL"] == "1"

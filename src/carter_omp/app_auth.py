@@ -104,6 +104,34 @@ def mint_app_jwt(*, app_id: str, private_key_pem: str, now: float | None = None)
     return f"{header}.{payload}.{_b64url(signature)}"
 
 
+# trace:v1 id=impl.app-auth-get work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def app_get(
+    path: str,
+    *,
+    app_id: str,
+    private_key_pem: str,
+    transport: httpx.BaseTransport | None = None,
+) -> httpx.Response:
+    """GET a GitHub API path authenticated as the App itself (JWT).
+
+    Used for App-scoped reads (`/app`, `/repos/{owner}/{repo}/installation`,
+    `/orgs/{org}/installation`) that an installation token cannot perform.
+    """
+    jwt = mint_app_jwt(app_id=app_id, private_key_pem=private_key_pem)
+    with httpx.Client(
+        base_url="https://api.github.com",
+        headers={
+            "Authorization": f"Bearer {jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "carter_omp/0.1",
+        },
+        transport=transport,
+        timeout=httpx.Timeout(30.0, connect=10.0),
+    ) as client:
+        return client.get(path)
+
+
 @dataclass
 class CachedToken:
     token: str
@@ -148,19 +176,12 @@ class AppTokenProvider:
             cached = self._installations.get(key)
         if cached is not None:
             return cached
-        jwt = mint_app_jwt(app_id=self._app_id, private_key_pem=self._key_pem)
-        with httpx.Client(
-            base_url="https://api.github.com",
-            headers={
-                "Authorization": f"Bearer {jwt}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "carter_omp/0.1",
-            },
+        resp = app_get(
+            f"/repos/{repo}/installation",
+            app_id=self._app_id,
+            private_key_pem=self._key_pem,
             transport=self._transport,
-            timeout=httpx.Timeout(30.0, connect=10.0),
-        ) as client:
-            resp = client.get(f"/repos/{repo}/installation")
+        )
         if resp.status_code >= 400:
             raise RuntimeError(
                 f"GitHub App installation lookup failed for {repo}: {resp.status_code} {resp.text[:200]}"

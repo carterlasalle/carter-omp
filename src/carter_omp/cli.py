@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from collections.abc import Iterable, Mapping
+from pathlib import Path
 
 import click
 import uvicorn
@@ -574,3 +576,141 @@ def _verify_selector(omp: str, selector: str) -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ---- another account/org ------------------------------------------------
+
+
+# trace:v1 id=impl.cli-merge-csv-env work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _merge_csv_env(value: str, additions: Iterable[str]) -> str:
+    """Merge comma-separated additions into an existing env value.
+
+    Order-stable and case-insensitively deduped, so re-running an onboarding
+    command is a no-op instead of growing the list.
+    """
+    items = [piece.strip() for piece in value.split(",") if piece.strip()]
+    seen = {item.lower() for item in items}
+    for addition in additions:
+        piece = str(addition).strip()
+        if piece and piece.lower() not in seen:
+            items.append(piece)
+            seen.add(piece.lower())
+    return ",".join(items)
+
+
+# trace:v1 id=impl.cli-upsert-env-file work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _upsert_env_file(path: Path, updates: Mapping[str, str]) -> list[str]:
+    """Set `KEY=value` lines in an env file, preserving comments and order.
+
+    Returns the keys actually changed. Missing keys are appended.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    remaining = dict(updates)
+    changed: list[str] = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in remaining and remaining[key] != stripped.split("=", 1)[1].strip():
+            lines[index] = f"{key}={remaining.pop(key)}"
+            changed.append(key)
+        elif key in remaining:
+            remaining.pop(key)
+    for key, value in remaining.items():
+        lines.append(f"{key}={value}")
+        changed.append(key)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return changed
+
+
+# trace:v1 id=impl.cli-app-slug work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _app_slug(*, app_id: str, private_key_pem: str, transport: object | None = None) -> str | None:
+    """The App's public slug, for building the one-click install URL."""
+    from carter_omp.app_auth import app_get
+
+    try:
+        resp = app_get("/app", app_id=app_id, private_key_pem=private_key_pem, transport=transport)  # type: ignore[arg-type]
+    except Exception:
+        return None
+    if resp.status_code >= 400:
+        return None
+    slug = resp.json().get("slug")
+    return str(slug) if isinstance(slug, str) and slug else None
+
+
+# trace:v1 id=impl.cli-installation-for-owner work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _installation_for_owner(
+    owner: str, *, app_id: str, private_key_pem: str, transport: object | None = None
+) -> int | None:
+    """Installation id for an org or user account, or None when not installed."""
+    from carter_omp.app_auth import app_get
+
+    for path in (f"/orgs/{owner}/installation", f"/users/{owner}/installation"):
+        try:
+            resp = app_get(path, app_id=app_id, private_key_pem=private_key_pem, transport=transport)  # type: ignore[arg-type]
+        except Exception:
+            continue
+        if resp.status_code == 200:
+            installation_id = resp.json().get("id")
+            if isinstance(installation_id, int):
+                return installation_id
+    return None
+
+
+# trace:v1 id=impl.cli-add-org work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+@main.command("add-org")
+@click.argument("owner")
+@click.option("--env-file", default=".env", show_default=True, help="Env file to update.")
+@click.option("--dry-run", is_flag=True, help="Print the change without writing it.")
+def add_org(owner: str, env_file: str, dry_run: bool) -> None:
+    """Authorize every repo of another account/org (OWNER = login).
+
+    Adds OWNER to CARTER_OMP_REPO_OWNERS and its App installation id to
+    CARTER_OMP_GITHUB_INSTALLATION_ID, then tells you the restart command.
+    Install the App on the account first — the command prints the link.
+    """
+    cfg = _settings_or_die()
+    if cfg.github_app_id is None or cfg.github_app_private_key_file is None:
+        click.echo("add-org needs CARTER_OMP_GITHUB_APP_ID + CARTER_OMP_GITHUB_PRIVATE_KEY_FILE.", err=True)
+        sys.exit(2)
+    try:
+        pem = Path(cfg.github_app_private_key_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        click.echo(f"cannot read the App private key: {exc}", err=True)
+        sys.exit(2)
+
+    owner = owner.strip().lstrip("@").lower()
+    slug = _app_slug(app_id=cfg.github_app_id, private_key_pem=pem)
+    install_url = (
+        f"https://github.com/apps/{slug}/installations/new"
+        if slug
+        else "(App slug unknown — use Settings → Install App)"
+    )
+    installation_id = _installation_for_owner(owner, app_id=cfg.github_app_id, private_key_pem=pem)
+
+    if installation_id is None:
+        click.echo(f"The App is not installed on '{owner}' yet.")
+        click.echo(f"1. Install it: {install_url}")
+        click.echo(f"2. Re-run: carter-omp add-org {owner}")
+        sys.exit(1)
+
+    path = Path(env_file)
+    updates = {
+        "CARTER_OMP_REPO_OWNERS": _merge_csv_env(cfg.allowed_repo_owners_raw, [owner]),
+        "CARTER_OMP_GITHUB_INSTALLATION_ID": _merge_csv_env(cfg.github_installation_ids_raw, [str(installation_id)]),
+    }
+    if dry_run:
+        changed = list(updates)
+    else:
+        changed = _upsert_env_file(path, updates)
+    click.echo(f"installation id: {installation_id}")
+    click.echo(f"install link: {install_url}")
+    for key in changed:
+        click.echo(f"{'would set' if dry_run else 'set'} {key}={updates[key]}")
+    if not changed:
+        click.echo(f"{owner} is already authorized — nothing to change.")
+    click.echo("")
+    click.echo("Apply it (env only, no rebuild):")
+    click.echo("  docker compose up -d")
+    click.echo("  docker compose exec carter-omp carter-omp doctor")

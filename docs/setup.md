@@ -235,35 +235,46 @@ and refuses (non-zero exit) on any mismatch. Do not proceed with failures.
 
 ## 10. Adding another account or organization
 
-The same deployment serves as many accounts/orgs as the App is installed on —
-nothing is per-org except the three values below. No re-setup, no rebuild.
+One command, plus one click in the browser:
 
-1. **Install the App on the new org** (App settings → Install App → the org →
-   *Only select repositories*). This is the real boundary: a repo where the App
-   is not installed can never deliver a webhook.
-2. **Add the org login to `CARTER_OMP_REPO_OWNERS`** (comma-separated):
-   `CARTER_OMP_REPO_OWNERS=carterlasalle,neworg`. Every repo the org owns —
-   present and future — is then in scope for triggers, the search index, and
-   the dashboard picker.
-3. **Append the org's installation id** to `CARTER_OMP_GITHUB_INSTALLATION_ID`
-   (also comma-separated: `<id1>,<id2>`). Read it with
-   `gh api /repos/<org>/<repo>/installation --jq .id` (or from the install
-   URL's `/installations/<id>` segment). The orchestrator admits webhooks only
-   from installations listed here; per-repo tokens are resolved from the repo
-   itself, so the proxy needs no other change.
-4. **Restart:** `docker compose up -d` (env-only change — no rebuild needed).
-5. **Label the repos you want to trigger.** `carter-omp` must exist as a label
-   in each repo you intend to label-trigger; create it once per repo (the bot
-   never applies its own trigger label). Mentions and assigning the bot need no
-   label.
-6. **Humans are deployment-wide too.** Only IDs in
-   `CARTER_OMP_AUTHORIZED_USER_IDS` can trigger (label/mention/assign). If the
-   new org has other maintainers who should be able to, add their immutable
-   user IDs (`gh api users/<login> --jq .id`). `CARTER_OMP_MAINTAINER_LOGINS`
-   is separate: it decides whose directive may authorize *implementation*
-   (opening a PR).
-7. Re-run `docker compose exec carter-omp carter-omp doctor` — it prints the
-   allowlist, owners, installation ids, and both model selectors.
+```bash
+carter-omp add-org <org-or-user>     # resolves the installation id, edits .env
+docker compose up -d                 # env-only change — no rebuild
+```
+
+`add-org` prints the App's install link first; if the App is not installed on
+that account yet it stops there, so the loop is: **click install → re-run
+`add-org` → restart.**
+
+What it changes (and what you'd otherwise do by hand):
+
+| Value | Why |
+|---|---|
+| `CARTER_OMP_REPO_OWNERS` += the login | every repo the account owns — present and future — is in scope for triggers, the search index, and the dashboard picker |
+| `CARTER_OMP_GITHUB_INSTALLATION_ID` += its installation id | the orchestrator admits webhooks only from installations listed here; the proxy resolves per-repo tokens from the repo itself, so nothing else changes |
+
+Manual equivalents, if you prefer: install from the App's **Install App**
+button (`https://github.com/settings/apps/<slug>` → *Install App*, then pick the
+account and repos), and read the id from the URL you land on —
+`https://github.com/settings/installations/<id>` — or
+`https://github.com/organizations/<org>/settings/installations/<id>`.
+(`gh api .../installation` does **not** work with a user token; that endpoint
+needs an App JWT, which is what `add-org` mints.)
+
+Three things stay true across accounts:
+
+- **Humans:** only IDs in `CARTER_OMP_AUTHORIZED_USER_IDS` can trigger
+  (label/mention/assign). Add the new account's maintainers if they should be
+  able to. `CARTER_OMP_MAINTAINER_LOGINS` is separate — it decides whose
+  directive may authorize *implementation* (opening a PR).
+- **Labels:** `carter-omp` must exist in each repo you intend to label-trigger
+  (create it once per repo; the bot never applies its own trigger label).
+  Mentions and assigning the bot need no label.
+- **Everything else** — trigger semantics, model + fallback chain, rate limits,
+  capabilities, thread context — is deployment-wide and unchanged.
+
+Finish with `docker compose exec carter-omp carter-omp doctor` (it prints the
+allowlist, owners, installation ids, and both model selectors).
 
 ## Reference
 

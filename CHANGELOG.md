@@ -13,6 +13,12 @@ versions are `Unreleased` until the first tagged release.
 
 ### Added
 
+- `carter-omp add-org <owner>`: onboards another account/org in one step —
+  prints the App's install link, resolves the new installation id (App JWT,
+  `/orgs/<org>/installation` then `/users/<login>/installation`), and appends it
+  to `CARTER_OMP_GITHUB_INSTALLATION_ID` + `CARTER_OMP_REPO_OWNERS` in `.env`.
+  Idempotent, comment-preserving, `--dry-run` supported.
+
 - Multi-organization support: `CARTER_OMP_GITHUB_INSTALLATION_ID` takes a
   comma-separated list of installation ids and `CARTER_OMP_REPO_OWNERS` already
   took a list of owners, so one deployment serves several accounts/orgs. The
@@ -50,6 +56,16 @@ versions are `Unreleased` until the first tagged release.
   human never triggers, and neither does `unassigned`.
 
 ### Fixed
+
+- Shared git pool kept its group across slots again: the containers were
+  missing `CAP_FSETID`, so `chmod 2770` silently dropped the setgid bit (exit 0,
+  no bit) and every slot-created file under `/data/workspaces/_pool` inherited
+  that slot's own group. One slot's `npm ci`/`bun install` running husky's
+  `prepare` (`git config core.hooksPath`) rewrote the pool's `.git/config` as
+  `omp-8:omp-8` and every other slot lost the repo mid-run
+  (`fatal: unable to access '.git/config': Permission denied`). Added `FSETID`
+  to both services and set `HUSKY=0`/`HUSKY_SKIP_INSTALL=1` for the agent, so
+  lifecycle scripts cannot touch shared metadata at all.
 
 - Dependency bootstrap now installs for **any** lockfile bun can read
   (`package-lock.json`/`yarn.lock`/`pnpm-lock.yaml`, not just `bun.lock`), using

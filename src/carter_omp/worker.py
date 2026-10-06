@@ -306,6 +306,13 @@ def _build_extra_env(settings: Settings) -> dict[str, str]:
     # (x-omp-app) so broker-side per-client burn tracking shows `carter_omp`
     # instead of an anonymous gateway client.
     env["OMP_APP_NAME"] = "carter_omp"
+    # Repo lifecycle scripts must not touch SHARED git metadata: husky's
+    # `prepare` runs `git config core.hooksPath`, which rewrites the pool's
+    # `.git/config` as the invoking slot's uid:gid and locks every other slot
+    # out of that repo mid-run (`fatal: unable to access '.git/config'`).
+    # Git hooks are useless in a sandboxed worktree anyway.
+    env["HUSKY"] = "0"
+    env["HUSKY_SKIP_INSTALL"] = "1"
     if _AGENT_HOME.is_dir():
         env["HOME"] = str(_AGENT_HOME)
     return env

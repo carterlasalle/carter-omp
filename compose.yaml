@@ -30,6 +30,11 @@ services:
       - CHOWN
       - DAC_OVERRIDE
       - FOWNER
+      # FSETID: without it `chmod g+s` silently drops the setgid bit (chmod
+      # still exits 0), so the shared pool loses group inheritance and a slot's
+      # rewritten `.git/config` ends up owned by that slot's own group —
+      # locking every other slot out of the repo mid-run.
+      - FSETID
       - KILL
       - SETGID
       - SETUID
@@ -165,6 +170,9 @@ services:
       - CHOWN
       - DAC_OVERRIDE
       - FOWNER
+      # FSETID: same reason as the orchestrator block — setgid must stick on
+      # the shared git pool so cross-slot reads keep working.
+      - FSETID
       - SETGID
       - SETUID
     command: ["python", "-m", "carter_omp.proxy", "serve"]
