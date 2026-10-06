@@ -96,6 +96,7 @@ class _IssueBrowseCacheEntry:
     fetched_at: float
 
 
+# trace:v1 id=impl.issue-browse-cache work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 class _IssueBrowseCache:
     """In-process cache for the dashboard's GitHub issue browser.
 
@@ -137,14 +138,15 @@ class _IssueBrowseCache:
             self._entries[key] = entry
             return entry, False
 
+    # trace:v1 id=impl.issue-browse-cache-apply-webhook work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     async def apply_webhook(
         self,
         *,
         event_type: str,
         payload: Mapping[str, Any],
-        allowlist: frozenset[str],
+        in_scope: Callable[[str], bool],
     ) -> None:
-        mutation = _issue_cache_mutation(event_type, payload, allowlist)
+        mutation = _issue_cache_mutation(event_type, payload, in_scope)
         if mutation is None:
             return
         repo, number, summary = mutation
@@ -203,15 +205,16 @@ def _issue_summary_from_payload(repo: str, issue: Mapping[str, Any]) -> IssueSum
     )
 
 
+# trace:v1 id=impl.issue-cache-mutation work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def _issue_cache_mutation(
     event_type: str,
     payload: Mapping[str, Any],
-    allowlist: frozenset[str],
+    in_scope: Callable[[str], bool],
 ) -> tuple[str, int, IssueSummary | None] | None:
     if event_type not in {"issues", "issue_comment"}:
         return None
     repo = _repo_full_name(payload)
-    if repo is None or repo.lower() not in allowlist:
+    if repo is None or not in_scope(repo):
         return None
     issue = payload.get("issue")
     if not isinstance(issue, Mapping):
@@ -444,13 +447,14 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         await issue_cache.apply_webhook(
             event_type=x_github_event,
             payload=payload,
-            allowlist=cfg.repo_allowlist,
+            in_scope=cfg.allows,
         )
         # Keep the local search index fresh from every delivery that carries an
-        # issue/PR object — including ones the router will skip.
+        # issue/PR object — including ones the router will skip. `cfg.allows`
+        # (not the exact allowlist) so owner-scoped repos get indexed too.
         if x_github_event in ("issues", "issue_comment") or x_github_event.startswith("pull_request"):
             repo_full = str((payload.get("repository") or {}).get("full_name") or "")
-            if repo_full and repo_full in cfg.repo_allowlist:
+            if repo_full and cfg.allows(repo_full):
                 try:
                     issue_index.ingest_webhook_payload(db, repo_full, x_github_event, payload)
                 except Exception:
@@ -474,7 +478,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             policy=cfg.trigger_policy,
             allowed_repo_ids=cfg.allowed_repo_ids or None,
             allowed_repo_owners=cfg.allowed_repo_owners or None,
-            installation_id=cfg.github_installation_id,
+            installation_ids=cfg.github_installation_ids or None,
             delivery_id=x_github_delivery,
         )
 
@@ -634,6 +638,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         if token != cfg.replay_token.get_secret_value():
             raise HTTPException(401, "invalid replay token")
 
+    # trace:v1 id=impl.server-browse-issues work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-XM327PK3
     @app.get("/api/github/issues")
     async def api_github_issues(
         request: Request,
@@ -657,7 +662,12 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         capped = max(1, min(int(limit), 100))
         github: GitHubBackend = bag["github"]
         issue_cache: _IssueBrowseCache = bag["issue_browse_cache"]
-        repos = tuple(sorted(cfg.repo_allowlist))
+        db: Database = bag["db"]
+        # Owner scope has no enumerable repo list here, so browse the explicit
+        # allowlist plus every repo the local index already knows — owner-scoped
+        # repos enter it through webhook ingest. A literal `owner/*` pattern is
+        # not a valid `/repos/{repo}/issues` path; it only produced a 404 row.
+        repos = tuple(sorted(cfg.repo_allowlist | set(db.issue_index_repos())))
         if not repos:
             return {"issues": [], "errors": [], "repos": [], "cache": {"hit": False, "fetched_at": time.time()}}
 
@@ -689,7 +699,6 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         )
         # `processed` is not cached: a freshly-triaged issue must immediately
         # disappear from the "fresh issues" filter on the next dashboard refresh.
-        db: Database = bag["db"]
         processed = frozenset(db.processed_issue_keys(make_issue_key(s.repo, s.number) for s in entry.issues))
         return _issue_browse_payload(entry=entry, cache_hit=cache_hit, processed_keys=processed)
 

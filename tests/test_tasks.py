@@ -9,6 +9,11 @@ from carter_omp import tasks
 from carter_omp.github_client import IssueInfo, RepoInfo
 
 
+async def _no_comments(*_a, **_k):
+    """Empty thread: these tests assert workspace/guard behaviour, not prompts."""
+    return []
+
+
 async def test_triage_issue_keeps_event_loop_live_while_workspace_setup_blocks(db, settings, monkeypatch, tmp_path):
     async def _resolve_repo_and_issue(_github, _payload):
         repo = RepoInfo(
@@ -34,7 +39,7 @@ async def test_triage_issue_keeps_event_loop_live_while_workspace_setup_blocks(d
     async def _no_closing(*a, **k):
         return ()
 
-    github = SimpleNamespace(list_closing_pull_requests=_no_closing)
+    github = SimpleNamespace(list_closing_pull_requests=_no_closing, list_comments=_no_comments)
 
     entered = threading.Event()
     release = threading.Event()
@@ -212,7 +217,7 @@ async def test_triage_issue_reopen_tears_down_finalized_workspace(db, settings, 
     async def _fail_closing(*_a, **_k):
         raise AssertionError("closing-PR guard must not run when a DB row already exists")
 
-    github = SimpleNamespace(list_closing_pull_requests=_fail_closing)
+    github = SimpleNamespace(list_closing_pull_requests=_fail_closing, list_comments=_no_comments)
     sandbox = SimpleNamespace(natives_cache=None, ensure_workspace=_ensure, remove_workspace=_remove)
 
     async def _noop_run_task(**_kwargs):
@@ -235,3 +240,98 @@ async def test_triage_issue_reopen_tears_down_finalized_workspace(db, settings, 
     row = db.get_issue("octo/widget#1")
     assert row is not None
     assert row.state == "reproducing"
+
+
+async def test_fetch_thread_drops_triggering_comment_and_optional_body() -> None:
+    """Mention runs must not see their own trigger comment twice, and the
+    triage kickoff must not duplicate the body it already prints."""
+    from carter_omp.github_client import CommentInfo
+
+    class _FakeGitHub:
+        async def get_issue(self, repo: str, number: int) -> IssueInfo:
+            return IssueInfo(
+                repo=repo,
+                number=number,
+                title="bug",
+                body="body text",
+                state="open",
+                author="alice",
+                labels=(),
+                is_pull_request=False,
+            )
+
+        async def list_comments(self, repo: str, number: int) -> list[CommentInfo]:
+            del repo, number
+            return [
+                CommentInfo(id=1, author="alice", body="first", created_at="2026-10-01T00:00:00Z"),
+                CommentInfo(id=2, author="bob", body="trigger comment", created_at="2026-10-02T00:00:00Z"),
+            ]
+
+    gh = _FakeGitHub()
+    mention = await tasks._fetch_thread(gh, "octo/widget", 1, is_pr=False, exclude_comment_id=2)  # type: ignore[arg-type]
+    assert [m.body for m in mention] == ["body text", "first"]
+
+    triage = await tasks._fetch_thread(  # type: ignore[arg-type]
+        gh, "octo/widget", 1, is_pr=False, include_body=False
+    )
+    assert [m.body for m in triage] == ["first", "trigger comment"]
+    assert all(m.kind == "comment" for m in triage)
+
+
+async def test_triage_issue_inlines_existing_comments(db, settings, monkeypatch, tmp_path) -> None:
+    """Label-triggered triage passes every comment to the prompt runner."""
+    from carter_omp.github_client import CommentInfo
+
+    async def _resolve_repo_and_issue(*_a, **_k):
+        repo = RepoInfo(
+            full_name="octo/widget",
+            default_branch="main",
+            clone_url="https://x/octo/widget.git",
+            private=False,
+        )
+        issue = IssueInfo(
+            repo="octo/widget",
+            number=1,
+            title="bug",
+            body="b",
+            state="open",
+            author="alice",
+            labels=(),
+            is_pull_request=False,
+        )
+        return repo, issue
+
+    monkeypatch.setattr(tasks, "_resolve_repo_and_issue", _resolve_repo_and_issue)
+
+    async def _comments(*_a, **_k):
+        return [CommentInfo(id=7, author="alice", body="here are the repro steps", created_at="2026-10-01T00:00:00Z")]
+
+    class _GitHub:
+        list_closing_pull_requests = staticmethod(_no_comments)
+        list_comments = staticmethod(_comments)
+
+    sandbox = SimpleNamespace(
+        natives_cache=None,
+        ensure_workspace=lambda **_k: SimpleNamespace(branch="carter-omp/x/y", session_dir=str(tmp_path / "s")),
+    )
+    captured: dict[str, object] = {}
+
+    async def _capture_run_task(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(tasks, "run_task", _capture_run_task)
+
+    await tasks.triage_issue(
+        settings=settings,
+        db=db,
+        github=_GitHub(),  # type: ignore[arg-type]
+        sandbox=sandbox,  # type: ignore[arg-type]
+        git_transport=SimpleNamespace(),  # type: ignore[arg-type]
+        payload={},
+        delivery_id="d1",
+    )
+
+    assert captured["task_kind"] == "triage_issue"
+    thread = captured["thread"]
+    assert isinstance(thread, tuple)
+    assert [m.body for m in thread] == ["here are the repro steps"]

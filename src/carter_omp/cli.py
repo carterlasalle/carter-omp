@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from collections.abc import Iterable, Mapping
+from pathlib import Path
 
 import click
 import uvicorn
@@ -192,6 +194,7 @@ def replay(delivery_id: str, wait_timeout: float | None) -> None:
     asyncio.run(_wait())
 
 
+# trace:v1 id=impl.cli-status work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 @main.command()
 def status() -> None:
     """Dump issue and release state."""
@@ -209,11 +212,11 @@ def status() -> None:
         if issue_rows:
             click.echo()
         click.echo("Releases:")
-    for row in release_rows:
-        error = f" error={row.last_error}" if row.last_error else ""
+    for release_row in release_rows:
+        error = f" error={release_row.last_error}" if release_row.last_error else ""
         click.echo(
-            f"{row.key:<40} state={row.state:<12} rounds={row.rounds:<2} "
-            f"sha={row.current_sha[:12]} updated={row.updated_at}{error}"
+            f"{release_row.key:<40} state={release_row.state:<12} rounds={release_row.rounds:<2} "
+            f"sha={release_row.current_sha[:12]} updated={release_row.updated_at}{error}"
         )
 
 
@@ -299,20 +302,30 @@ def doctor() -> None:
 
 # trace:v1 id=impl.cli-doctor-models work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-XM327PK3
 def _doctor_models(cfg: Settings, omp: str | None, problems: list[str]) -> None:
-    """Verify the OMP model catalog mount and every CARTER_OMP_MODEL selector."""
+    """Verify model selectors against the agent's OMP environment.
+
+    The coding agent runs with HOME=/srv/agent-home (see worker), so doctor
+    must inspect that HOME — not the invoking user's.
+    """
     import json
+    import os
     import subprocess
     from pathlib import Path
 
-    catalog = Path.home() / ".omp" / "agent" / "models.container.yml"
-    click.echo(f"model catalog: {catalog} {'present' if catalog.is_file() else 'MISSING (run carter-omp init-models)'}")
+    agent_home = Path("/srv/agent-home")
+    home = agent_home if (agent_home / ".omp").is_dir() else Path.home()
+    catalog = home / ".omp" / "agent" / "models.yml"
+    click.echo(f"model catalog: {catalog} {'present' if catalog.is_file() else 'MISSING'}")
     if not catalog.is_file():
-        problems.append("model catalog missing (run carter-omp init-models)")
-        return
+        click.echo("model catalog: skipped (agent OMP falls back to its own defaults)")
     click.echo(f"model pool: {','.join(cfg.model_pool)} thinking={cfg.thinking_level}")
+    chain = cfg.fallback_models
+    if chain:
+        click.echo(f"fallback chain: {','.join(chain)}")
     if omp is None:
         return
-    for selector in cfg.model_pool:
+    env = dict(os.environ, HOME=str(home))
+    for selector in (*cfg.model_pool, *chain):
         provider = selector.split("/")[0] if "/" in selector else ""
         try:
             proc = subprocess.run(
@@ -320,6 +333,7 @@ def _doctor_models(cfg: Settings, omp: str | None, problems: list[str]) -> None:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=env,
             )
             known = {m["selector"] for m in json.loads(proc.stdout).get("models", [])}
         except Exception as exc:
@@ -328,8 +342,7 @@ def _doctor_models(cfg: Settings, omp: str | None, problems: list[str]) -> None:
         if selector in known:
             click.echo(f"model {selector}: ok")
         else:
-            problems.append(f"model selector unknown to omp: {selector}")
-    click.echo("doctor: ok")
+            problems.append(f"model selector unknown to agent OMP: {selector}")
 
 
 @main.group()
@@ -337,6 +350,7 @@ def auth() -> None:
     """Authorization helpers."""
 
 
+# trace:v1 id=impl.cli-auth-check work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 @auth.command("check")
 def auth_check() -> None:
     """Print the configured immutable authorization identity."""
@@ -345,7 +359,7 @@ def auth_check() -> None:
     click.echo(f"authorized logins (readability only): {sorted(cfg.authorized_logins)}")
     click.echo(f"allowed repo ids: {sorted(cfg.allowed_repo_ids)}")
     click.echo(f"allowed repo names (readability only): {sorted(cfg.allowed_repo_names)}")
-    click.echo(f"installation id: {cfg.github_installation_id}")
+    click.echo(f"installation ids: {sorted(cfg.github_installation_ids) or 'NONE'}")
 
 
 @main.group()
@@ -427,48 +441,79 @@ def init_models(
     if not model:
         _list_provider_models(omp, provider)
         model = ask(f"Primary model (e.g. {provider}/<id>)")
-    pool = [model.strip()]
-    for extra in fallback:
-        extra = extra.strip()
-        if extra and extra not in pool:
-            pool.append(extra)
-    if not fallback and not non_interactive and click.confirm("Add a fallback model?", default=True):
-        _list_provider_models(omp, provider)
+    primary = (model or "").strip()
+    chain = [extra.strip() for extra in fallback if extra.strip()]
+    if not chain and not non_interactive and click.confirm("Add a cross-provider fallback model?", default=True):
+        fb_provider = ask("Fallback provider", "openrouter").strip().lower()
+        _list_provider_models(omp, fb_provider)
         second = click.prompt("Fallback model (empty to skip)", default="", show_default=False).strip()
-        if second and second not in pool:
-            pool.append(second)
+        if second:
+            chain.append(second)
     thinking = (thinking or "high").strip().lower()
     if thinking not in ("off", "low", "medium", "high", "xhigh", "max"):
         click.echo(f"invalid thinking level: {thinking}", err=True)
         sys.exit(2)
 
-    for selector in pool:
+    for selector in (primary, *chain):
         _verify_selector(omp, selector)
-
+    primary_provider = primary.split("/")[0] if "/" in primary else ""
+    if primary_provider and primary_provider != provider:
+        click.echo(
+            f"provider/model mismatch: --provider {provider} but selector {primary}; "
+            "the selector's provider wins (leave --provider unset or match it).",
+            err=True,
+        )
+        sys.exit(2)
     from pathlib import Path
 
+    gateway = ask(
+        "LLM gateway base URL (host-side auth broker; empty to skip)",
+        "http://llm-gateway.internal:4000",
+    ).strip()
+    gateway_token_env = ""
+    if gateway:
+        gateway_token_env = ask(
+            "Gateway bearer token env var (stored as env ref, never the secret)",
+            "CARTER_OMP_LLM_GATEWAY_TOKEN",
+        ).strip()
     target = Path.home() / ".omp" / "agent" / "models.container.yml"
     target.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
-        "# Generated by `carter-omp init-models`. Selectors only — API keys",
-        "# stay wherever OMP already keeps them (env / gateway), never here.",
-        f"# Primary: {pool[0]}",
-        "models:",
-        f"  primary: {pool[0]}",
-    ]
-    if len(pool) > 1:
-        lines.append("  fallbacks:")
-        lines.extend(f"    - {selector}" for selector in pool[1:])
-    lines.append(f"thinking: {thinking}")
+    if gateway:
+        lines = [
+            "# Generated by `carter-omp init-models`. OMP provider override —",
+            "# routes the container through the host-side auth gateway so raw",
+            "# provider credentials never enter the agent container.",
+            "# Model selection lives in .env (CARTER_OMP_MODEL/_FALLBACK_MODEL/_THINKING).",
+            "providers:",
+            f"  {provider}:",
+            f"    baseUrl: {gateway}",
+            "    transport: pi-native",
+            "    auth: oauth",
+        ]
+        if gateway_token_env:
+            lines.append(f"    apiKey: ${{{gateway_token_env}}}")
+    else:
+        lines = [
+            "# Generated by `carter-omp init-models` with no gateway: the",
+            "# container uses its own OMP authentication. Model selection",
+            "# lives in .env (CARTER_OMP_MODEL/_FALLBACK_MODEL/_THINKING).",
+        ]
     lines.append("")
     target.write_text("\n".join(lines), encoding="utf-8")
     click.echo(f"wrote {target}")
     click.echo("")
     click.echo("Put this in .env:")
-    click.echo(f"CARTER_OMP_MODEL={','.join(pool)}")
+    click.echo(f"CARTER_OMP_MODEL={primary}")
+    if chain:
+        click.echo(f"CARTER_OMP_FALLBACK_MODEL={','.join(chain)}")
     click.echo(f"CARTER_OMP_THINKING={thinking}")
-    if provider:
-        click.echo(f"# optional: CARTER_OMP_PROVIDER={provider}")
+    click.echo("# CARTER_OMP_PROVIDER= (leave unset; the selector already names the provider)")
+    for fb in chain:
+        fb_provider = fb.split("/")[0] if "/" in fb else ""
+        if fb_provider:
+            click.echo(f"# {fb_provider.upper().replace('-', '_')}_API_KEY=<credential for the fallback leg>")
+    if gateway_token_env:
+        click.echo(f"# {gateway_token_env}=<gateway bearer> (host-side secret, never committed)")
 
 
 # trace:v1 id=impl.cli-list-provider-models work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-XM327PK3
@@ -531,3 +576,165 @@ def _verify_selector(omp: str, selector: str) -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ---- another account/org ------------------------------------------------
+
+
+# trace:v1 id=impl.cli-merge-csv-env work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _merge_csv_env(value: str, additions: Iterable[str]) -> str:
+    """Merge comma-separated additions into an existing env value.
+
+    Order-stable and case-insensitively deduped, so re-running an onboarding
+    command is a no-op instead of growing the list.
+    """
+    items = [piece.strip() for piece in value.split(",") if piece.strip()]
+    seen = {item.lower() for item in items}
+    for addition in additions:
+        piece = str(addition).strip()
+        if piece and piece.lower() not in seen:
+            items.append(piece)
+            seen.add(piece.lower())
+    return ",".join(items)
+
+
+# trace:v1 id=impl.cli-read-env-file work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _read_env_file(path: Path) -> dict[str, str]:
+    """Current `KEY=value` pairs in an env file (comments/blank lines ignored)."""
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        values[key.strip()] = value.strip()
+    return values
+
+
+# trace:v1 id=impl.cli-upsert-env-file work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _upsert_env_file(path: Path, updates: Mapping[str, str]) -> list[str]:
+    """Set `KEY=value` lines in an env file, preserving comments and order.
+
+    Returns the keys actually changed. Missing keys are appended.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    remaining = dict(updates)
+    changed: list[str] = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in remaining and remaining[key] != stripped.split("=", 1)[1].strip():
+            lines[index] = f"{key}={remaining.pop(key)}"
+            changed.append(key)
+        elif key in remaining:
+            remaining.pop(key)
+    for key, value in remaining.items():
+        lines.append(f"{key}={value}")
+        changed.append(key)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return changed
+
+
+# trace:v1 id=impl.cli-app-get work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _app_get(path: str, *, app_id: str, private_key_pem: str, transport: object | None = None) -> object | None:
+    """`app_auth.app_get` that yields None instead of raising.
+
+    Network hiccups and JWT problems must not turn a "is the App installed
+    here?" question into a traceback — the caller reports the install link
+    instead.
+    """
+    from carter_omp.app_auth import app_get
+
+    try:
+        return app_get(path, app_id=app_id, private_key_pem=private_key_pem, transport=transport)  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
+# trace:v1 id=impl.cli-app-slug work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _app_slug(*, app_id: str, private_key_pem: str, transport: object | None = None) -> str | None:
+    """The App's public slug, for building the one-click install URL."""
+    resp = _app_get("/app", app_id=app_id, private_key_pem=private_key_pem, transport=transport)
+    if resp is None or getattr(resp, "status_code", 500) >= 400:
+        return None
+    slug = resp.json().get("slug")  # type: ignore[attr-defined]
+    return str(slug) if isinstance(slug, str) and slug else None
+
+
+# trace:v1 id=impl.cli-installation-for-owner work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _installation_for_owner(
+    owner: str, *, app_id: str, private_key_pem: str, transport: object | None = None
+) -> int | None:
+    """Installation id for an org or user account, or None when not installed."""
+    for path in (f"/orgs/{owner}/installation", f"/users/{owner}/installation"):
+        resp = _app_get(path, app_id=app_id, private_key_pem=private_key_pem, transport=transport)
+        if resp is None or getattr(resp, "status_code", 500) != 200:
+            continue
+        installation_id = resp.json().get("id")  # type: ignore[attr-defined]
+        if isinstance(installation_id, int):
+            return installation_id
+    return None
+
+
+# trace:v1 id=impl.cli-add-org work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+@main.command("add-org")
+@click.argument("owner")
+@click.option("--env-file", default=".env", show_default=True, help="Env file to update.")
+@click.option("--dry-run", is_flag=True, help="Print the change without writing it.")
+def add_org(owner: str, env_file: str, dry_run: bool) -> None:
+    """Authorize every repo of another account/org (OWNER = login).
+
+    Adds OWNER to CARTER_OMP_REPO_OWNERS and its App installation id to
+    CARTER_OMP_GITHUB_INSTALLATION_ID, then tells you the restart command.
+    Install the App on the account first — the command prints the link.
+    """
+    cfg = _settings_or_die()
+    if cfg.github_app_id is None or cfg.github_app_private_key_file is None:
+        click.echo("add-org needs CARTER_OMP_GITHUB_APP_ID + CARTER_OMP_GITHUB_PRIVATE_KEY_FILE.", err=True)
+        sys.exit(2)
+    try:
+        pem = Path(cfg.github_app_private_key_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        click.echo(f"cannot read the App private key: {exc}", err=True)
+        sys.exit(2)
+
+    owner = owner.strip().lstrip("@").lower()
+    slug = _app_slug(app_id=cfg.github_app_id, private_key_pem=pem)
+    install_url = (
+        f"https://github.com/apps/{slug}/installations/new"
+        if slug
+        else "(App slug unknown — use Settings → Install App)"
+    )
+    installation_id = _installation_for_owner(owner, app_id=cfg.github_app_id, private_key_pem=pem)
+
+    if installation_id is None:
+        click.echo(f"The App is not installed on '{owner}' yet.")
+        click.echo(f"1. Install it: {install_url}")
+        click.echo(f"2. Re-run: carter-omp add-org {owner}")
+        sys.exit(1)
+
+    path = Path(env_file)
+    updates = {
+        "CARTER_OMP_REPO_OWNERS": _merge_csv_env(cfg.allowed_repo_owners_raw, [owner]),
+        "CARTER_OMP_GITHUB_INSTALLATION_ID": _merge_csv_env(cfg.github_installation_ids_raw, [str(installation_id)]),
+    }
+    current = _read_env_file(path)
+    if dry_run:
+        # Report only what would actually change, so a re-run reads as a no-op.
+        changed = [key for key, value in updates.items() if current.get(key) != value]
+    else:
+        changed = _upsert_env_file(path, updates)
+    click.echo(f"installation id: {installation_id}")
+    click.echo(f"install link: {install_url}")
+    for key in changed:
+        click.echo(f"{'would set' if dry_run else 'set'} {key}={updates[key]}")
+    if not changed:
+        click.echo(f"{owner} is already authorized — nothing to change.")
+    click.echo("")
+    click.echo("Apply it (env only, no rebuild):")
+    click.echo("  docker compose up -d")
+    click.echo("  docker compose exec carter-omp carter-omp doctor")

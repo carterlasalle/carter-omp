@@ -155,10 +155,12 @@ class _FakeBackend:
     def __init__(self, pages: dict[int, list[IssueIndexEntry]]) -> None:
         self.pages = pages
         self.calls: list[tuple[str | None, int]] = []
+        self.repos: list[str] = []
 
     async def list_issue_index_entries(
         self, repo: str, *, since: str | None = None, page: int = 1, per_page: int = 100
     ) -> list[IssueIndexEntry]:
+        self.repos.append(repo)
         self.calls.append((since, page))
         return self.pages.get(page, [])
 
@@ -187,3 +189,23 @@ async def test_sync_repo_backfills_pages_and_sets_watermark(db: Database, tmp_pa
     backend.pages = {1: []}
     await sync.sync_repo("octo/widget")
     assert backend.calls and backend.calls[0][0] is not None
+
+
+def test_repos_includes_index_known_repos_beyond_the_allowlist(db: Database) -> None:
+    """Owner scope authorizes repos that are not in `repo_allowlist`; once a
+    webhook has indexed one, reconcile must keep it fresh forever."""
+    db.upsert_issue_index(_entry(1, repo="carterlasalle/personal_website"))
+    sync = IssueIndexSync(settings=_SyncSettings(), db=db, github=_FakeBackend({1: []}))  # type: ignore[arg-type]
+
+    assert sync.repos() == ("carterlasalle/personal_website", "octo/widget")
+
+
+async def test_tick_reconciles_owner_scoped_repos(db: Database) -> None:
+    """`tick()` walks the allowlist AND every repo the index already knows."""
+    db.upsert_issue_index(_entry(1, repo="carterlasalle/personal_website"))
+    backend = _FakeBackend({1: []})
+    sync = IssueIndexSync(settings=_SyncSettings(), db=db, github=backend)  # type: ignore[arg-type]
+
+    await sync.tick()
+
+    assert backend.repos == ["carterlasalle/personal_website", "octo/widget"]

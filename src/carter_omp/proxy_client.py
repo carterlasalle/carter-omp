@@ -96,6 +96,7 @@ def _signed_headers(method: str, target: str, body: bytes, key: bytes) -> dict[s
 # ---------- GitHubProxyClient ----------
 
 
+# trace:v1 id=impl.proxy-client-reactions work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 class GitHubProxyClient:
     """HMAC-signed REST client speaking to a `carter_omp.proxy.server` instance.
 
@@ -423,6 +424,22 @@ class GitHubProxyClient:
         items = data.get("items") if isinstance(data, dict) else None
         return tuple(_reaction_from(item) for item in items or ())
 
+    # trace:v1 id=impl.proxy-client-add-reaction work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def add_comment_reaction(self, repo: str, comment_id: int, content: str) -> None:
+        await self._request(
+            "POST",
+            "/gh/v1/add_comment_reaction",
+            json_body={"repo": repo, "comment_id": comment_id, "content": content},
+        )
+
+    # trace:v1 id=impl.proxy-client-add-issue-reaction work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def add_issue_reaction(self, repo: str, number: int, content: str) -> None:
+        await self._request(
+            "POST",
+            "/gh/v1/add_issue_reaction",
+            json_body={"repo": repo, "number": number, "content": content},
+        )
+
     async def close_issue(self, repo: str, number: int, *, reason: str = "completed") -> None:
         await self._request(
             "POST",
@@ -434,6 +451,7 @@ class GitHubProxyClient:
 # ---------- ProxyGitTransport ----------
 
 
+# trace:v1 id=impl.transport-scope work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 class ProxyGitTransport:
     """Routes clone/fetch/push to github-proxy over the same HMAC channel.
 
@@ -459,6 +477,8 @@ class ProxyGitTransport:
         self._timeout = httpx.Timeout(timeout, connect=10.0)
         self._run_token = run_token
 
+    _TRANSIENT_RETRY_DELAYS = (2.0, 5.0, 15.0)
+
     def _client(self) -> httpx.Client:
         return httpx.Client(
             base_url=self._base_url,
@@ -466,7 +486,16 @@ class ProxyGitTransport:
             timeout=self._timeout,
         )
 
-    _TRANSIENT_RETRY_DELAYS = (2.0, 5.0, 15.0)
+    # trace:v1 id=impl.transport-run-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def with_run_token(self, run_token: str | None) -> ProxyGitTransport:
+        """Return a copy of this transport carrying a per-run authorization token."""
+        return ProxyGitTransport(
+            base_url=self._base_url,
+            hmac_key=self._key,
+            transport=self._transport,
+            timeout=self._timeout.connect or 120.0,
+            run_token=run_token,
+        )
 
     def _post(self, path: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
         body_bytes = json.dumps(body).encode("utf-8")

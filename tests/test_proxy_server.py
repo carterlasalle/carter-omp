@@ -1732,7 +1732,92 @@ async def test_proxy_prefers_app_mode_when_configured(tmp_path: Path, monkeypatc
     cfg = _build_settings(tmp_path)
     object.__setattr__(cfg, "github_app_id", "123")
     object.__setattr__(cfg, "github_app_private_key_file", key_file)
-    object.__setattr__(cfg, "github_installation_id", 9)
+    object.__setattr__(cfg, "github_installation_ids_raw", "9,10")
     object.__setattr__(cfg, "github_token", None)
     app = _build_app(cfg)
     assert getattr(app.state, "app_token_provider", None) is None  # lifespan not run in tests
+
+
+async def test_add_comment_reaction(proxy_settings: Settings) -> None:
+    seen: list[dict[str, object]] = []
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        assert req.method == "POST"
+        assert req.url.path == "/repos/octo/widget/issues/comments/99/reactions"
+        seen.append({"body": json.loads(req.content.decode())})
+        return httpx.Response(201, json={})
+
+    app = _build_app(proxy_settings, gh)
+    token = _run_token(repo="octo/widget", issue=1, capabilities={"comment"})
+    body = b'{"repo":"octo/widget","comment_id":99,"content":"eyes"}'
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/add_comment_reaction",
+            content=body,
+            headers=_signed("POST", "/gh/v1/add_comment_reaction", body=body, run_token=token),
+        )
+    assert resp.status_code == 200, resp.text
+    assert seen == [{"body": {"content": "eyes"}}]
+
+
+async def test_add_issue_reaction(proxy_settings: Settings) -> None:
+    seen: list[dict[str, object]] = []
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        assert req.method == "POST"
+        assert req.url.path == "/repos/octo/widget/issues/7/reactions"
+        seen.append({"body": json.loads(req.content.decode())})
+        return httpx.Response(201, json={})
+
+    app = _build_app(proxy_settings, gh)
+    token = _run_token(repo="octo/widget", issue=7, capabilities={"comment"})
+    body = b'{"repo":"octo/widget","number":7,"content":"eyes"}'
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/add_issue_reaction",
+            content=body,
+            headers=_signed("POST", "/gh/v1/add_issue_reaction", body=body, run_token=token),
+        )
+    assert resp.status_code == 200, resp.text
+    assert seen == [{"body": {"content": "eyes"}}]
+
+
+async def test_app_token_provider_resolves_installation_per_repo() -> None:
+    """A deployment serves several orgs and each App installation has its own
+    id, so the id must come from the repo — static config cannot cover both."""
+    import subprocess
+
+    from carter_omp.app_auth import AppTokenProvider
+
+    key = subprocess.run(["openssl", "genrsa", "2048"], capture_output=True, text=True, check=True).stdout
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req.url.path)
+        if req.url.path == "/repos/otherorg/site/installation":
+            return httpx.Response(200, json={"id": 77})
+        raise AssertionError(req.url.path)
+
+    provider = AppTokenProvider(app_id="123", private_key_pem=key, transport=httpx.MockTransport(handler))
+
+    assert provider.installation_for_repo("otherorg/site") == 77
+    assert provider.installation_for_repo("otherorg/site") == 77  # cached
+    assert seen == ["/repos/otherorg/site/installation"]
+
+
+def test_installation_for_prefers_the_repo_and_falls_back_to_config(proxy_settings: Settings) -> None:
+    from carter_omp.proxy.server import _installation_for
+
+    class _Provider:
+        def __init__(self, value: int | None) -> None:
+            self.value = value
+
+        def installation_for_repo(self, repo: str) -> int:
+            del repo
+            if self.value is None:
+                raise RuntimeError("lookup failed")
+            return self.value
+
+    object.__setattr__(proxy_settings, "github_installation_ids_raw", "42")
+    assert _installation_for(_Provider(7), proxy_settings, "octo/widget") == 7
+    assert _installation_for(_Provider(None), proxy_settings, "octo/widget") == 42

@@ -1,3 +1,4 @@
+# trace:exempt reason=deploy-packaging-no-runtime-behavior
 #!/usr/bin/env bash
 # carter-omp container entrypoint. No per-boot pip installs — everything is baked
 # into the image; we only sanity-check the runtime mount and create state dirs.
@@ -16,21 +17,42 @@ umask 0002
 # as $@ here (after tini --), so $1=python, $2=-m, $3=carter_omp.proxy is the
 # canonical shape; we also accept a single concatenated arg for safety.
 is_proxy_role=0
-if [ "${1:-}" = "python" ] && [ "${2:-}" = "-m" ] && [[ "${3:-}" == carter_omp.proxy* ]]; then
-    is_proxy_role=1
-elif [[ "${1:-}" == *"carter_omp.proxy"* ]]; then
-    is_proxy_role=1
-fi
+case "${3:-} ${1:-}" in
+  carter_omp.proxy*|*"carter_omp.proxy"*) is_proxy_role=1 ;;
+esac
 
-/usr/sbin/groupadd -f -g 2000 omp
+# Slot identities are baked into the image (see Dockerfile); /etc is immutable
+# runtime config here. Validate instead of mutating.
 max_slots="${CARTER_OMP_MAX_CONCURRENCY:-8}"
+baked_slots="${CARTER_OMP_BAKED_SLOT_COUNT:-32}"
+case "$max_slots" in
+    ''|*[!0-9]*)
+        echo "carter-omp: CARTER_OMP_MAX_CONCURRENCY must be a positive integer" >&2
+        exit 1
+        ;;
+esac
+if [ "$max_slots" -lt 1 ] || [ "$max_slots" -gt "$baked_slots" ]; then
+    echo "carter-omp: concurrency $max_slots exceeds $baked_slots baked sandbox slots" >&2
+    exit 1
+fi
+if [ "$(getent group omp | cut -d: -f3)" != "2000" ]; then
+    echo "carter-omp: expected omp group gid 2000" >&2
+    exit 1
+fi
 for i in $(seq 1 "$max_slots"); do
-    user="omp-$i"
-    slot_group="omp-$i"
-    slot_id=$((2000 + i))
-    /usr/sbin/groupadd -f -g "$slot_id" "$slot_group"
-    id -u "$user" >/dev/null 2>&1 || /usr/sbin/useradd -u "$slot_id" -g "$slot_group" -G omp -M -N -s /usr/sbin/nologin "$user"
-    /usr/sbin/usermod -g "$slot_group" -a -G omp "$user"
+    expected=$((2000 + i))
+    if [ "$(id -u "omp-$i" 2>/dev/null)" != "$expected" ]; then
+        echo "carter-omp: omp-$i missing or has wrong uid" >&2
+        exit 1
+    fi
+    if [ "$(id -g "omp-$i" 2>/dev/null)" != "$expected" ]; then
+        echo "carter-omp: omp-$i has wrong primary gid" >&2
+        exit 1
+    fi
+    if ! id -G "omp-$i" | tr ' ' '\n' | grep -qx 2000; then
+        echo "carter-omp: omp-$i is not a member of shared omp group" >&2
+        exit 1
+    fi
 done
 
 if [ "$is_proxy_role" -eq 1 ]; then

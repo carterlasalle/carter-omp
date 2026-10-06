@@ -30,11 +30,12 @@ ARG YARN_VERSION=4.9.2
 # 1) web-builder — Yarn + Vite, builds the SolidJS dashboard bundle.
 ############################
 FROM node:22-slim AS web-builder
+ARG YARN_VERSION
 WORKDIR /work
-RUN corepack enable && corepack prepare yarn@${YARN_VERSION} --activate
+ENV COREPACK_ENABLE_PROJECT_SPEC=1
 COPY web/package.json web/yarn.lock* ./web/
 COPY web/tsconfig.json web/vite.config.ts ./web/
-RUN yarn --cwd=web install --immutable
+RUN corepack enable && yarn --cwd=web install --immutable
 COPY web/ ./web/
 RUN yarn --cwd=web build
 
@@ -47,6 +48,7 @@ ARG OMP_VERSION
 ARG OMP_SHA256_X64
 ARG OMP_SHA256_ARM64
 ARG BUN_VERSION
+ARG YARN_VERSION
 ARG TARGETARCH
 
 # curl + CA certs for the pinned binary downloads below (python-slim
@@ -82,6 +84,20 @@ RUN case "${TARGETARCH:-amd64}" in \
     && rm -rf /tmp/bun.zip /tmp/bun-extract \
     && bun --version
 
+# TraceLayer (`trace`) is deliberately NOT installed. Some repos wire their own
+# agent hooks/instructions to it (`.pi/hooks.json` -> `.pi/trace-hook.sh`), and
+# running a repo-provided gate inside this sandbox would bind our runs to that
+# repo's tooling. Leaving the binary absent is worse than it sounds: the
+# adapter's fallback is `uv run trace`, which hangs ~180s per call resolving
+# dependencies, so runs stall for minutes between tool calls and then abort.
+# A fast-failing shim makes any attempt cheap and explicit instead.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'echo "trace: TraceLayer CLI is not available in this sandbox; TraceLayer gating is skipped. Note it in your summary and continue." >&2' \
+      'exit 1' > /usr/local/bin/trace \
+    && chmod 0755 /usr/local/bin/trace \
+    && /usr/local/bin/trace; test $? -eq 1
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock* ./
@@ -92,6 +108,11 @@ COPY --from=web-builder /work/web/dist/ ./src/carter_omp/static/
 RUN pip install --no-cache-dir uv \
     && uv sync --frozen --no-dev \
     && uv pip install --no-deps .
+# uv sync created /app/.venv holding the deps + project, but the image's
+# default `python` is system python. Point PATH at the venv so runtime
+# `python -m carter_omp` and the `carter-omp` console script resolve there.
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:${PATH}"
 
 # Host agent config is mounted read-only under /srv/agent-home-stage with
 # host-controlled permissions (see compose.yaml). The entrypoint copies it
@@ -103,7 +124,21 @@ RUN mkdir -p /srv/agent-home/.agent /srv/agent-home/.omp/agent \
 COPY entrypoint.sh /usr/local/bin/carter-omp-entrypoint
 RUN chmod +x /usr/local/bin/carter-omp-entrypoint
 
-RUN useradd -u 10000 -m -U -s /usr/sbin/nologin carter-omp \
+ARG OMP_SLOT_COUNT=32
+ENV CARTER_OMP_BAKED_SLOT_COUNT=${OMP_SLOT_COUNT}
+# Slot identities are baked into the image: /etc is immutable runtime config,
+# /data is mutable runtime state. The entrypoint only validates them.
+RUN set -eux; \
+    groupadd --gid 2000 omp; \
+    i=1; \
+    while [ "$i" -le "$OMP_SLOT_COUNT" ]; do \
+        slot_id=$((2000 + i)); \
+        groupadd --gid "$slot_id" "omp-$i"; \
+        useradd --uid "$slot_id" --gid "$slot_id" --groups omp \
+            --no-create-home --no-user-group --shell /usr/sbin/nologin "omp-$i"; \
+        i=$((i + 1)); \
+    done; \
+    useradd -u 10000 -m -U -s /usr/sbin/nologin carter-omp \
     && mkdir -p /data/workspaces /data/logs \
     && chown -R carter-omp:carter-omp /app /data
 

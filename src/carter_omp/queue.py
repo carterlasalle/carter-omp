@@ -12,7 +12,7 @@ from contextlib import suppress
 from carter_omp import tasks
 from carter_omp.cancellation import clear_current_event, set_current_event
 from carter_omp.config import Settings
-from carter_omp.db import Database, EventRow
+from carter_omp.db import INACTIVE_EVENT_STATES, Database, EventRow, IssueState
 from carter_omp.github_backend import GitHubBackend
 from carter_omp.sandbox import GitTransport, SandboxManager, _reap_slot
 from carter_omp.slot_pool import SlotPool
@@ -24,11 +24,12 @@ log = logging.getLogger(__name__)
 _CONTROL_COMMANDS = ("status", "stop", "review", "resume", "release-fix")
 
 
+# trace:v1 id=impl.queue-control-command work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _control_command(body: str | None) -> str | None:
     """Return the control command in an authorized directive body, if any."""
     if not isinstance(body, str):
         return None
-    first = body.strip().split("\n", 1)[0].strip().lower()
+    first = body.strip().split("\n", 1)[0].strip().lower().rstrip("?!.,:;")
     return first if first in _CONTROL_COMMANDS else None
 
 
@@ -63,6 +64,7 @@ async def _cancel_issue_runs(pool: WorkerPool, target: str, except_delivery: str
                 await pool.cancel_event(delivery_id)
 
 
+# trace:v1 id=impl.queue-pool work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
 class WorkerPool:
     """Long-lived dispatcher: drains queued events into per-task coroutines."""
 
@@ -404,6 +406,7 @@ class WorkerPool:
         if reclaimed:
             log.info("workspace caches reclaimed", extra={"key": row.issue_key})
 
+    # trace:v1 id=impl.queue-dispatch-and-mark work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     async def _dispatch_and_mark(self, row: EventRow, *, slot_uid: int | None = None) -> None:
         if _handle_control_command(self, row):
             self.db.mark_event(row.delivery_id, "done")
@@ -411,9 +414,15 @@ class WorkerPool:
         await self._dispatch(row, slot_uid=slot_uid)
         if row.delivery_id in self._cancelled:
             self.db.mark_event(row.delivery_id, "failed", error="cancelled by operator")
-        else:
-            self.db.mark_event(row.delivery_id, "done")
+            return
+        latest = self.db.get_event(row.delivery_id)
+        if latest is not None and latest.state in INACTIVE_EVENT_STATES:
+            # The worker already recorded a terminal outcome (the agent aborted
+            # mid-run with a reason). Do not overwrite diagnosis with success.
+            return
+        self.db.mark_event(row.delivery_id, "done")
 
+    # trace:v1 id=impl.queue-dispatch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
     async def _dispatch(self, row: EventRow, *, slot_uid: int | None = None) -> None:
         event = row.event_type
         action = str(row.payload.get("action") or "")
@@ -428,7 +437,7 @@ class WorkerPool:
                 "recovered": row.attempts >= 2,
             },
         )
-        if event == "issues" and action in ("opened", "reopened"):
+        if event == "issues" and action in ("opened", "reopened", "labeled"):
             await tasks.triage_issue(
                 settings=self.settings,
                 db=self.db,
@@ -511,7 +520,7 @@ class WorkerPool:
             )
         elif event == "pull_request" and action == "closed":
             pr = row.payload.get("pull_request") or {}
-            target_state = "merged" if bool(pr.get("merged")) else "closed"
+            target_state: IssueState = "merged" if bool(pr.get("merged")) else "closed"
             await tasks.cleanup_workspace(
                 db=self.db,
                 sandbox=self.sandbox,

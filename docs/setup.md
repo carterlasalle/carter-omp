@@ -96,7 +96,6 @@ Mount the private key where the proxy expects it (see `compose.yaml`
 secrets) — never paste it into `.env`.
 
 ## 5. Pick models
-
 <!-- trace:v1 id=doc.setup-models work=WORK-CO-Q8Z1HJJJ -->
 
 ```bash
@@ -104,10 +103,21 @@ carter-omp init-models
 ```
 
 Interactive picker: provider (openrouter, opencode-go, …), primary model,
-ordered fallbacks. It lists `omp models ls <provider>`, verifies each
-selector, writes `~/.omp/agent/models.container.yml` (mounted into the
-container), and prints the `CARTER_OMP_MODEL` pool to paste into `.env`.
-API keys stay wherever OMP already keeps them.
+then a cross-provider fallback chain. It lists `omp models ls <provider>`,
+verifies each selector, then writes `~/.omp/agent/models.container.yml` as an
+OMP **provider override** (mounted into the container as `models.yml`): the
+container routes through a host-side auth gateway (`transport: pi-native`)
+so raw provider credentials never enter the agent container. It prints
+`CARTER_OMP_MODEL` and `CARTER_OMP_FALLBACK_MODEL` to paste into `.env` —
+model selection lives there, not in the OMP file. API keys stay wherever OMP
+already keeps them.
+
+`CARTER_OMP_FALLBACK_MODEL` is a comma-separated chain OMP walks when a turn's
+model fails with a retryable provider error (provider down, quota exhausted).
+carter-omp renders it into a per-run `omp --config` overlay keyed on `default`,
+so it applies to whichever model the pool picked. The fallback provider's
+credential must also be in the container env — `OPENROUTER_API_KEY` for
+`openrouter/…` selectors.
 
 ## 6. VPS: from bare Ubuntu to TLS ingress
 
@@ -222,6 +232,49 @@ and refuses (non-zero exit) on any mismatch. Do not proceed with failures.
    repos are covered the moment the App is installed. With ID lists, add
    each repo ID and restart.
 3. Re-run `doctor` after every identity change.
+
+## 10. Adding another account or organization
+
+One command, plus one click in the browser:
+
+```bash
+carter-omp add-org <org-or-user>     # resolves the installation id, edits .env
+docker compose up -d                 # env-only change — no rebuild
+```
+
+`add-org` prints the App's install link first; if the App is not installed on
+that account yet it stops there, so the loop is: **click install → re-run
+`add-org` → restart.**
+
+What it changes (and what you'd otherwise do by hand):
+
+| Value | Why |
+|---|---|
+| `CARTER_OMP_REPO_OWNERS` += the login | every repo the account owns — present and future — is in scope for triggers, the search index, and the dashboard picker |
+| `CARTER_OMP_GITHUB_INSTALLATION_ID` += its installation id | the orchestrator admits webhooks only from installations listed here; the proxy resolves per-repo tokens from the repo itself, so nothing else changes |
+
+Manual equivalents, if you prefer: install from the App's **Install App**
+button (`https://github.com/settings/apps/<slug>` → *Install App*, then pick the
+account and repos), and read the id from the URL you land on —
+`https://github.com/settings/installations/<id>` — or
+`https://github.com/organizations/<org>/settings/installations/<id>`.
+(`gh api .../installation` does **not** work with a user token; that endpoint
+needs an App JWT, which is what `add-org` mints.)
+
+Three things stay true across accounts:
+
+- **Humans:** only IDs in `CARTER_OMP_AUTHORIZED_USER_IDS` can trigger
+  (label/mention/assign). Add the new account's maintainers if they should be
+  able to. `CARTER_OMP_MAINTAINER_LOGINS` is separate — it decides whose
+  directive may authorize *implementation* (opening a PR).
+- **Labels:** `carter-omp` must exist in each repo you intend to label-trigger
+  (create it once per repo; the bot never applies its own trigger label).
+  Mentions and assigning the bot need no label.
+- **Everything else** — trigger semantics, model + fallback chain, rate limits,
+  capabilities, thread context — is deployment-wide and unchanged.
+
+Finish with `docker compose exec carter-omp carter-omp doctor` (it prints the
+allowlist, owners, installation ids, and both model selectors).
 
 ## Reference
 

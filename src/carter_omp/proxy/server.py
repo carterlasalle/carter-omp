@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -178,12 +178,13 @@ def _optional_str_list(value: Any, field: str) -> list[str] | None:
     return list(value)
 
 
-def _require_review_comments(value: Any) -> list[dict[str, Any]]:
+# trace:v1 id=impl.proxy-review-comments work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _require_review_comments(value: Any) -> list[Mapping[str, Any]]:
     if value is None:
         return []
     if not isinstance(value, list):
         raise HTTPException(400, "missing/invalid 'comments'")
-    comments: list[dict[str, Any]] = []
+    comments: list[Mapping[str, Any]] = []
     for idx, item in enumerate(value):
         if not isinstance(item, dict):
             raise HTTPException(400, f"comments[{idx}] must be an object")
@@ -230,12 +231,33 @@ def _resolve_token(cfg: Settings) -> str:
     return cfg.github_token.get_secret_value()
 
 
+# trace:v1 id=impl.proxy-installation-for work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _installation_for(provider: Any, cfg: Settings, repo: str) -> int:
+    """Installation id serving `repo`, resolved from the repo itself.
+
+    A deployment can serve several orgs, each with its own App installation;
+    the configured id(s) are only a fallback for when the lookup fails.
+    """
+    try:
+        return int(provider.installation_for_repo(repo))
+    except Exception as exc:
+        fallback = cfg.github_installation_id
+        if fallback is None:
+            raise
+        log.warning(
+            "installation lookup failed; using the configured id",
+            extra={"repo": repo, "err": str(exc)[:160]},
+        )
+        return fallback
+
+
+# trace:v1 id=impl.proxy-resolve-git-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def _resolve_git_token(cfg: Settings, repo: str) -> str:
     """Token for authenticated git operations, preferring the App provider."""
     provider = getattr(cfg, "_app_token_provider", None)
-    if provider is not None and cfg.github_installation_id is not None:
+    if provider is not None:
         try:
-            return provider.token_for_repo(installation_id=cfg.github_installation_id, repo=repo)
+            return provider.token_for_repo(installation_id=_installation_for(provider, cfg, repo), repo=repo)
         except Exception as exc:
             log.warning("app token for git failed, PAT fallback", extra={"repo": repo, "err": str(exc)[:200]})
     return _resolve_token(cfg)
@@ -253,11 +275,36 @@ def _scoped_client(request: Request, repo: str) -> GitHubClient:
 
     cfg: Settings = request.app.state.settings
     provider: AppTokenProvider | None = getattr(request.app.state, "app_token_provider", None)
-    if provider is None or cfg.github_installation_id is None:
+    if provider is None:
         return request.app.state.github
-    token = provider.token_for_repo(installation_id=cfg.github_installation_id, repo=repo)
+    token = provider.token_for_repo(installation_id=_installation_for(provider, cfg, repo), repo=repo)
     transport = getattr(request.app.state.github, "_transport", None)
     return GitHubClient(token, transport=transport)
+
+
+# trace:v1 id=impl.proxy-shared-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _shared_token(settings: Settings, provider: Any) -> str:
+    """Token for the proxy's shared (unscoped) client.
+
+    App mode: the configured installation id when set, else the installation
+    serving the first allowlisted repo (a deployment may configure no id at
+    all). PAT mode: the static token.
+    """
+    if provider is not None:
+        installation = settings.github_installation_id
+        if installation is None:
+            for repo in sorted(settings.repo_allowlist):
+                try:
+                    installation = int(provider.installation_for_repo(repo))
+                    break
+                except Exception as exc:
+                    log.warning(
+                        "installation lookup for the shared client failed",
+                        extra={"repo": repo, "err": str(exc)[:160]},
+                    )
+        if installation is not None:
+            return provider.token_unscoped(installation_id=installation)
+    return _resolve_token(settings)
 
 
 def _resolve_hmac_key(cfg: Settings) -> bytes:
@@ -294,10 +341,11 @@ def _validate_repo_name(repo: str) -> None:
         raise HTTPException(400, f"invalid repo {repo!r}")
 
 
+# trace:v1 id=impl.proxy-enforce-scope work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _enforce_repo_scope(cfg: Settings, repo: str) -> None:
-    """Reject repos outside the proxy's own allowlist (never trust the caller)."""
+    """Reject repos outside the proxy's own scope (never trust the caller)."""
     _validate_repo_name(repo)
-    if repo.lower() not in cfg.repo_allowlist:
+    if not cfg.allows(repo):
         raise HTTPException(403, "repo not in proxy allowlist")
 
 
@@ -461,9 +509,11 @@ def _origin_remote_auth(
         raise
 
 
+# trace:v1 id=impl.proxy-app work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def create_proxy_app(settings: Settings) -> FastAPI:
     """Build the github-proxy FastAPI app bound to `settings`."""
 
+    # trace:v1 id=impl.proxy-lifespan work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from carter_omp.app_auth import AppTokenProvider
@@ -482,19 +532,25 @@ def create_proxy_app(settings: Settings) -> FastAPI:
                 if installation is not None:
                     token = provider.token_unscoped(installation_id=installation)
                     probe = GitHubClient(token)
-                    login = await probe.get_authenticated_login()
+                    # Installation tokens cannot call GET /user (user-only
+                    # endpoint → 403). Probe an installation-token endpoint.
+                    repos = await probe.request("GET", "/installation/repositories")
                     log.info(
-                        "github-proxy app identity",
+                        "github-proxy app auth ready",
                         extra={
                             "app_id": settings.github_app_id,
                             "installation_id": installation,
-                            "bot_login": login,
+                            "repository_count": repos.get("total_count", 0),
                         },
                     )
             except Exception as exc:
                 log.error("github-proxy app auth unavailable", extra={"err": str(exc)[:200]})
                 raise RuntimeError(f"github-proxy: GitHub App auth failed: {exc}") from exc
-        app.state.github = GitHubClient(_resolve_token(settings))
+        # Shared client: App mode mints an installation token up front (the
+        # per-request scoped client refreshes it later); PAT mode uses the
+        # static token. No GITHUB_TOKEN is required in App mode.
+        provider = getattr(settings, "_app_token_provider", None)
+        app.state.github = GitHubClient(_shared_token(settings, provider))
         app.state.settings = settings
         yield
 
@@ -572,10 +628,16 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         return {"status": "ok"}
 
     # ---- reads ----
+    # trace:v1 id=impl.proxy-auth-login work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @app.get("/gh/v1/authenticated_login")
     async def authenticated_login(request: Request) -> dict[str, str]:
         await _authenticate(request)
+        cfg: Settings = request.app.state.settings
         github: GitHubClient = request.app.state.github
+        # App installation tokens cannot call GET /user; fall back to the
+        # configured bot login instead of 403ing.
+        if cfg.github_app_id is not None:
+            return {"login": cfg.bot_login}
         try:
             login = await github.get_authenticated_login()
         except GitHubError as exc:
@@ -951,6 +1013,45 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         except GitHubError as exc:
             return _gh_error_response(exc)
         return JSONResponse({"items": [_serialize(r) for r in reactions]})
+
+    # trace:v1 id=impl.proxy-add-reaction work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @app.post("/gh/v1/add_comment_reaction")
+    async def add_comment_reaction(request: Request) -> JSONResponse:
+        data = await _json_body(request)
+        cfg: Settings = request.app.state.settings
+        token = _require_run_token(request, cfg)
+        repo = _require_str(data.get("repo"), "repo")
+        comment_id = _require_int(data.get("comment_id"), "comment_id")
+        content = _require_str(data.get("content"), "content")
+        _enforce_repo_scope(cfg, repo)
+        _require_run_cap(token, "comment")
+        _require_run_repo(token, repo)
+        github = _scoped_client(request, repo)
+        try:
+            await github.add_comment_reaction(repo, comment_id, content)
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse({"ok": True})
+
+    # trace:v1 id=impl.proxy-add-issue-reaction work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @app.post("/gh/v1/add_issue_reaction")
+    async def add_issue_reaction(request: Request) -> JSONResponse:
+        data = await _json_body(request)
+        cfg: Settings = request.app.state.settings
+        token = _require_run_token(request, cfg)
+        repo = _require_str(data.get("repo"), "repo")
+        number = _require_int(data.get("number"), "number")
+        content = _require_str(data.get("content"), "content")
+        _enforce_repo_scope(cfg, repo)
+        _require_run_cap(token, "comment")
+        _require_run_repo(token, repo)
+        _require_run_thread(token, number)
+        github = _scoped_client(request, repo)
+        try:
+            await github.add_issue_reaction(repo, number, content)
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse({"ok": True})
 
     @app.post("/gh/v1/close_issue")
     async def close_issue(request: Request) -> JSONResponse:

@@ -45,6 +45,15 @@ class _FakeRpcClient:
     def on_message_update(self, _cb) -> None:
         pass
 
+    def on_message_end(self, _cb) -> None:
+        pass
+
+    def on_retry_fallback_applied(self, _cb) -> None:
+        pass
+
+    def on_retry_fallback_succeeded(self, _cb) -> None:
+        pass
+
     def stop(self) -> None:
         self.stop_calls += 1
 
@@ -172,11 +181,10 @@ async def test_run_task_sets_impl_authorized_from_directive(
         *,
         task_kind: str,
         prompt: str,
-        loop: asyncio.AbstractEventLoop,
         bindings: worker.ToolBindings,
         directive: worker.DirectiveInfo | None = None,
     ) -> str:
-        del task_kind, prompt, loop, directive
+        del task_kind, prompt, directive
         captured["impl_authorized"] = bindings.impl_authorized
         return "ok"
 
@@ -215,24 +223,19 @@ async def test_run_task_preserves_impl_authorized_when_resuming(
 
     assert result == "ok"
     assert captured == {"impl_authorized": True}
-    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue",)
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue", "--no-extensions")
 
 
 @pytest.mark.asyncio
 async def test_run_rpc_passes_continue_when_session_jsonl_present(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=True)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
-    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue",)
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue", "--no-extensions")
 
 
 @pytest.mark.asyncio
@@ -244,18 +247,13 @@ async def test_run_rpc_omits_continue_when_session_empty(
     monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
 
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
-    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--no-extensions",)
     client_kwargs = _FakeRpcClient.instances[0].kwargs
     assert client_kwargs["env"]["HOME"] == str(agent_home)
     assert client_kwargs["env"]["GITHUB_TOKEN"] == ""
@@ -303,17 +301,12 @@ async def test_run_rpc_omits_home_when_agent_home_absent(
     monkeypatch.setattr(worker, "_AGENT_HOME", tmp_path / "missing-agent-home")
 
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
     client_kwargs = _FakeRpcClient.instances[0].kwargs
     assert "HOME" not in client_kwargs["env"]
     assert client_kwargs["env"]["GITHUB_TOKEN"] == ""
@@ -325,17 +318,12 @@ async def test_run_rpc_omits_home_when_agent_home_absent(
 @pytest.mark.asyncio
 async def test_run_rpc_uses_workspace_xdg_dirs_without_slot(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False, slot_uid=None)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
 
     env = _FakeRpcClient.instances[0].kwargs["env"]
     xdg_root = inputs.workspace.root / ".omp-xdg"
@@ -370,17 +358,12 @@ async def test_run_rpc_uses_workspace_xdg_dirs_for_slot_without_chown(
     )
 
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False, slot_uid=2001)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
 
     env = _FakeRpcClient.instances[0].kwargs["env"]
     for key in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
@@ -394,34 +377,24 @@ async def test_run_rpc_uses_workspace_xdg_dirs_for_slot_without_chown(
 @pytest.mark.asyncio
 async def test_run_rpc_skips_set_todos_on_resumed_triage(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=True)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
     assert _FakeRpcClient.instances[0].set_todos_calls == []
 
 
 @pytest.mark.asyncio
 async def test_run_rpc_seeds_todos_on_fresh_triage(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
     calls = _FakeRpcClient.instances[0].set_todos_calls
     assert len(calls) == 1
     assert calls[0] == _SEEDED_PHASES
@@ -430,17 +403,12 @@ async def test_run_rpc_seeds_todos_on_fresh_triage(tmp_path: Path, settings: Set
 @pytest.mark.asyncio
 async def test_run_rpc_merges_todos_on_followup_with_resume(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=True)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="handle_comment",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="handle_comment",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
     client = _FakeRpcClient.instances[0]
     assert client.get_todos_calls == 1
     assert len(client.set_todos_calls) == 1
@@ -450,17 +418,12 @@ async def test_run_rpc_merges_todos_on_followup_with_resume(tmp_path: Path, sett
 @pytest.mark.asyncio
 async def test_run_rpc_passes_slot_uid_user_slot_group_and_omp_extra_group(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False, slot_uid=2001)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
     client_kwargs = _FakeRpcClient.instances[0].kwargs
     assert client_kwargs["user"] == 2001
     assert client_kwargs["group"] == 2001
@@ -492,17 +455,12 @@ async def test_run_rpc_arms_hard_timeout_timer(
     settings.task_timeout_seconds = 3.0
     settings.task_timeout_hard_grace_seconds = 7.0
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
 
     assert len(timers) == 1
     timer = timers[0]
@@ -531,18 +489,13 @@ async def test_run_rpc_hard_timeout_stops_client_and_fails(
 
     monkeypatch.setattr("carter_omp.worker.threading.Timer", FiringTimer)
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    loop = asyncio.new_event_loop()
-    try:
-        with pytest.raises(TimeoutError, match="hard timeout"):
-            worker._run_rpc_blocking(
-                inputs,
-                task_kind="triage_issue",
-                prompt="x",
-                loop=loop,
-                bindings=bindings,  # type: ignore[arg-type]
-            )
-    finally:
-        loop.close()
+    with pytest.raises(TimeoutError, match="hard timeout"):
+        worker._run_rpc_blocking(
+            inputs,
+            task_kind="triage_issue",
+            prompt="x",
+            bindings=bindings,  # type: ignore[arg-type]
+        )
 
     fake = _FakeRpcClient.instances[0]
     assert fake.stop_calls == 1
@@ -568,17 +521,12 @@ async def test_run_rpc_cancel_hook_stops_and_marks_closed(
     monkeypatch.setattr("carter_omp.worker.unregister_cancel_hook", lambda: None)
 
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
 
     assert len(captured) == 1
     hook = captured[0]
@@ -617,17 +565,12 @@ def _make_inputs_with_classification(
 async def test_run_rpc_sends_reminder_when_pr_class_quits_early(tmp_path: Path, settings: Settings) -> None:
     """`bug` classified turn that never calls a terminal tool gets a reminder."""
     inputs, bindings = _make_inputs_with_classification(tmp_path, settings, classification="bug")
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="kickoff",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="kickoff",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
     fake = _FakeRpcClient.instances[0]
     # kickoff + 2 reminders (default CARTER_OMP_TASK_COMPLETION_MAX_REMINDERS=2)
     assert len(fake.prompts) == 1 + settings.task_completion_max_reminders
@@ -671,7 +614,6 @@ async def test_run_rpc_stops_reminding_after_terminal_tool(tmp_path: Path, setti
                 inputs,
                 task_kind="triage_issue",
                 prompt="kickoff",
-                loop=loop,
                 bindings=bindings,  # type: ignore[arg-type]
             )
         finally:
@@ -689,17 +631,12 @@ async def test_run_rpc_stops_reminding_after_terminal_tool(tmp_path: Path, setti
 async def test_run_rpc_skips_reminder_for_non_pr_classification(tmp_path: Path, settings: Settings) -> None:
     """`question` classified turns are not enforced — no reminder."""
     inputs, bindings = _make_inputs_with_classification(tmp_path, settings, classification="question")
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="kickoff",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="kickoff",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
     fake = _FakeRpcClient.instances[0]
     assert len(fake.prompts) == 1
 
@@ -708,17 +645,12 @@ async def test_run_rpc_skips_reminder_for_non_pr_classification(tmp_path: Path, 
 async def test_run_rpc_skips_reminder_when_unclassified(tmp_path: Path, settings: Settings) -> None:
     """No classification (agent quit before classify_issue) → no reminder."""
     inputs, bindings = _make_inputs_with_classification(tmp_path, settings, classification=None)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="kickoff",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="kickoff",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
     fake = _FakeRpcClient.instances[0]
     assert len(fake.prompts) == 1
 
@@ -726,17 +658,12 @@ async def test_run_rpc_skips_reminder_when_unclassified(tmp_path: Path, settings
 @pytest.mark.asyncio
 async def test_run_rpc_review_pr_reminds_until_submit_pr_review(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="review_pr",
-            prompt="kickoff",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="review_pr",
+        prompt="kickoff",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
     fake = _FakeRpcClient.instances[0]
     assert len(fake.prompts) == 1 + settings.task_completion_max_reminders
     assert fake.prompts[0] == "kickoff"
@@ -773,7 +700,6 @@ async def test_run_rpc_review_pr_stops_after_submit_without_dirty_probe(
                 inputs,
                 task_kind="review_pr",
                 prompt="kickoff",
-                loop=loop,
                 bindings=bindings,  # type: ignore[arg-type]
             )
         finally:
@@ -821,7 +747,6 @@ async def test_run_rpc_review_pr_still_reminds_when_submit_fails(tmp_path: Path,
                 inputs,
                 task_kind="review_pr",
                 prompt="kickoff",
-                loop=loop,
                 bindings=bindings,  # type: ignore[arg-type]
             )
         finally:
@@ -851,17 +776,12 @@ async def test_run_rpc_sends_dirty_state_reminder_when_worktree_has_unpushed_wor
     states = iter([dirty, clean])
     monkeypatch.setattr(worker, "_probe_workspace_dirty", lambda _ws, _slot: next(states, clean))
 
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="handle_comment",
-            prompt="kickoff",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="handle_comment",
+        prompt="kickoff",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
 
     fake = _FakeRpcClient.instances[0]
     assert len(fake.prompts) == 2, fake.prompts
@@ -883,17 +803,12 @@ async def test_run_rpc_skips_dirty_state_reminder_when_worktree_is_clean(
         lambda _ws, _slot: DirtyState(uncommitted=0, unpushed=0, summary=""),
     )
 
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="handle_comment",
-            prompt="kickoff",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="handle_comment",
+        prompt="kickoff",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
 
     fake = _FakeRpcClient.instances[0]
     assert len(fake.prompts) == 1
@@ -908,17 +823,12 @@ async def test_run_rpc_caps_dirty_state_reminders_at_budget(
     dirty = DirtyState(uncommitted=1, unpushed=0, summary="Uncommitted changes (1):\n?? oops.txt")
     monkeypatch.setattr(worker, "_probe_workspace_dirty", lambda _ws, _slot: dirty)
 
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="handle_comment",
-            prompt="kickoff",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="handle_comment",
+        prompt="kickoff",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
 
     fake = _FakeRpcClient.instances[0]
     # kickoff + N reminders, capped at the configured budget (default 2).
@@ -1086,17 +996,12 @@ async def test_release_task_reminds_until_terminal_tool_runs(
     inputs, bindings = _release_inputs(tmp_path, settings, session_has_jsonl=False)
     monkeypatch.setattr(worker.persona, "system_append_release", lambda **_kwargs: "SYS RELEASE", raising=False)
     monkeypatch.setattr(worker.persona, "followup_release", lambda **_kwargs: "retag or abort", raising=False)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="handle_release_ci",
-            prompt="kickoff",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="handle_release_ci",
+        prompt="kickoff",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
     fake = _FakeRpcClient.instances[0]
     assert fake.kwargs["append_system_prompt"] == "SYS RELEASE"
     assert fake.kwargs["model"] in settings.release_model_pool
@@ -1108,17 +1013,12 @@ def test_rpc_pins_minimal_builtin_tools(tmp_path: Path, settings: Settings) -> N
     from carter_omp.capabilities import OMP_BUILTIN_TOOLS, OMP_FORBIDDEN_BUILTINS
 
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="triage_issue",
-            prompt="x",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
     tools = _FakeRpcClient.instances[0].kwargs["tools"]
     assert sorted(tools) == sorted(OMP_BUILTIN_TOOLS)
     assert not (set(tools) & set(OMP_FORBIDDEN_BUILTINS))
@@ -1148,7 +1048,6 @@ def test_rpc_env_scrubs_app_and_cloud_secrets(tmp_path: Path, settings: Settings
                 inputs,
                 task_kind="triage_issue",
                 prompt="x",
-                loop=loop,
                 bindings=bindings,  # type: ignore[arg-type]
             )
         finally:
@@ -1169,3 +1068,185 @@ def test_rpc_env_scrubs_app_and_cloud_secrets(tmp_path: Path, settings: Settings
     finally:
         del os.environ["AWS_SECRET_ACCESS_KEY"]
         del os.environ["CARTER_OMP_GITHUB_APP_PRIVATE_KEY"]
+
+
+def test_write_fallback_chains_renders_default_overlay(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_home = tmp_path / "agent-home"
+    monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
+    cfg = settings.model_copy(update={"fallback_model": "openrouter/deepseek/deepseek-v4.1-flash, opencode-zen/x"})
+
+    path = worker._write_fallback_chains(cfg)
+
+    assert path == agent_home / ".omp" / "agent" / "carter-omp-fallback.yml"
+    body = path.read_text(encoding="utf-8")
+    assert "fallbackChains:" in body
+    assert body.rstrip().endswith('default: ["openrouter/deepseek/deepseek-v4.1-flash", "opencode-zen/x"]')
+    assert path.stat().st_mode & 0o777 == 0o644
+    # Idempotent: a second call is a no-op rewrite, still one file.
+    assert worker._write_fallback_chains(cfg) == path
+
+
+def test_write_fallback_chains_unset_writes_nothing(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_home = tmp_path / "agent-home"
+    monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
+
+    assert worker._write_fallback_chains(settings) is None
+    assert not agent_home.exists()
+
+
+@pytest.mark.asyncio
+async def test_run_rpc_passes_fallback_overlay_config(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_home = tmp_path / "agent-home"
+    monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
+    cfg = settings.model_copy(update={"fallback_model": "openrouter/deepseek/deepseek-v4.1-flash"})
+
+    inputs, bindings = _make_inputs(tmp_path, cfg, session_has_jsonl=False)
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
+
+    extra_args = _FakeRpcClient.instances[0].kwargs["extra_args"]
+    assert extra_args == ("--no-extensions", "--config", str(agent_home / ".omp" / "agent" / "carter-omp-fallback.yml"))
+
+
+@pytest.mark.asyncio
+async def test_run_rpc_omits_config_without_fallback(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker, "_AGENT_HOME", tmp_path / "agent-home")
+
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
+
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--no-extensions",)
+
+
+def test_run_token_ttl_outlives_the_task_budget(settings: Settings) -> None:
+    """One token covers a whole run: a 10-minute TTL expired mid-run and every
+    later mutation 401'd, leaving work committed but unpublished."""
+    cfg = settings.model_copy(
+        update={
+            "task_timeout_seconds": 2400.0,
+            "release_task_timeout_seconds": 3600.0,
+            "task_timeout_hard_grace_seconds": 60.0,
+        }
+    )
+
+    ttl = worker._run_token_ttl(cfg)
+
+    assert ttl > 3600.0  # the longest task budget the run can be given
+    assert ttl >= int(3600.0 + 60.0)
+
+
+def test_attach_run_token_mints_with_the_run_budget(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+
+    from carter_omp import run_token as run_token_module
+    from carter_omp.capabilities import Capability
+    from carter_omp.github_events import TriggerContext
+
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    inputs.trigger = TriggerContext(
+        run_id="run-1",
+        delivery_id="d1",
+        repository_id=1,
+        repository_full_name="acme/widgets",
+        installation_id=2,
+        actor_id=3,
+        actor_login="carterlasalle",
+        actor_type="User",
+        event_type="issues",
+        action="labeled",
+        trigger_kind="label",
+        trigger_object_id=None,
+        trigger_value="carter-omp",
+        issue_number=1,
+        pull_request_number=None,
+        capabilities=frozenset({Capability.COMMENT}),
+        policy_version="v1",
+        authorized_at=datetime(2026, 10, 6, tzinfo=UTC),
+    )
+    seen: dict[str, object] = {}
+
+    def _fake_mint(**kwargs: object) -> str:
+        seen.update(kwargs)
+        return "token"
+
+    monkeypatch.setattr(run_token_module, "mint_run_token", _fake_mint)
+
+    worker._attach_run_token(inputs, bindings)
+
+    assert seen["ttl_seconds"] == worker._run_token_ttl(settings)
+    assert seen["issue"] == 1
+
+
+def test_record_agent_abort_marks_the_delivery_failed(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent abort must not look green: a run that published nothing used to
+    end as `done` with the reason only in a log line."""
+    recorded: dict[str, object] = {}
+
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    inputs.db = SimpleNamespace(  # type: ignore[assignment]
+        mark_event=lambda delivery, state, error=None: recorded.update(
+            {"delivery": delivery, "state": state, "error": error}
+        )
+    )
+    bindings.abort = worker.host_tools.AbortController()
+    bindings.abort.signal("Harness credential fault: gh_push_branch rejected 401")
+
+    worker._record_agent_abort(inputs, bindings)
+
+    assert recorded["delivery"] == inputs.delivery_id
+    assert recorded["state"] == "failed"
+    assert "401" in str(recorded["error"])
+
+
+def test_record_agent_abort_is_a_noop_without_an_abort(tmp_path: Path, settings: Settings) -> None:
+    calls: list[object] = []
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    inputs.db = SimpleNamespace(mark_event=lambda *a, **k: calls.append((a, k)))  # type: ignore[assignment]
+    bindings.abort = worker.host_tools.AbortController()
+
+    worker._record_agent_abort(inputs, bindings)
+
+    assert calls == []
+
+
+def test_agent_env_disables_husky(tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repo lifecycle scripts must not rewrite SHARED git metadata: husky's
+    `prepare` runs `git config core.hooksPath`, which rewrote the pool's
+    `.git/config` as the invoking slot's uid:gid and locked other slots out."""
+    monkeypatch.setattr(worker, "_AGENT_HOME_STAGE", tmp_path / "missing-stage")
+    monkeypatch.setattr(worker, "_AGENT_HOME", tmp_path / "agent-home")
+
+    env = worker._build_extra_env(settings)
+
+    assert env["HUSKY"] == "0"
+    assert env["HUSKY_SKIP_INSTALL"] == "1"
+
+
+def test_agent_env_disables_pty(tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The child died mid-turn with `EPIPE: broken pipe, write` (Bun stream
+    teardown) on runs that use bash heavily; nothing here is interactive."""
+    monkeypatch.setattr(worker, "_AGENT_HOME_STAGE", tmp_path / "missing-stage")
+    monkeypatch.setattr(worker, "_AGENT_HOME", tmp_path / "agent-home")
+
+    assert worker._build_extra_env(settings)["PI_NO_PTY"] == "1"

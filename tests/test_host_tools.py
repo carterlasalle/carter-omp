@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -4867,7 +4868,12 @@ def test_release_retag_atomically_publishes_and_awaits_ci(db: Database, tmp_path
     finally:
         _stop_loop(loop, thread)
 
-    assert result == {"pushed": new_head, "tag": "v1.2.3", "round": 1}
+    # Text, not a bare dict: a dict normalizes to a payload with no `content`
+    # block, so the agent would see an empty tool result.
+    assert isinstance(result, str)
+    assert f"to {new_head[:12]}" in result
+    assert "v1.2.3" in result
+    assert "awaiting CI" in result
     assert len(transport.calls) == 1
     assert transport.calls[0]["workspace_key"] == "octo__widget__release"
     row = db.get_release("octo/widget#v1.2.3")
@@ -4998,3 +5004,164 @@ def test_release_status_and_job_log_are_scoped_to_expected_sha(
         f"head_sha={expected_sha}&per_page=100",
     )
     assert log_tail.splitlines() == log_lines[-1000:]
+
+
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        (("package.json", "bun.lock"), ("bun", "install", "--frozen-lockfile", "--ignore-scripts")),
+        (("package.json", "bun.lockb"), ("bun", "install", "--frozen-lockfile", "--ignore-scripts")),
+        (("package.json", "package-lock.json"), ("bun", "install", "--ignore-scripts")),
+        (("package.json", "yarn.lock"), ("bun", "install", "--ignore-scripts")),
+        (("package.json",), None),
+        (("bun.lock",), None),
+    ],
+)
+def test_install_command_picks_the_lockfile_install(
+    tmp_path: Path, files: tuple[str, ...], expected: tuple[str, ...] | None
+) -> None:
+    """The image ships bun only, and bun imports npm/yarn lockfiles. An npm repo
+    used to get no install at all, so its own `check` script died at the first
+    binary (`prettier: command not found` → exit 127) and every push was
+    refused."""
+    for name in files:
+        (tmp_path / name).write_text("{}", encoding="utf-8")
+
+    picked = host_tools._install_command(tmp_path)
+
+    assert (picked[0] if picked else None) == expected
+
+
+def test_ensure_workspace_dependencies_installs_for_npm_repo_and_cleans_lockfile(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Importing an npm lockfile makes bun write `bun.lock`; it must not be left
+    behind as an untracked change for the pre-publish dirty check."""
+    import subprocess
+
+    bindings, loop, thread = _bindings(db, tmp_path, httpx.MockTransport(lambda _r: httpx.Response(500)))
+    repo_dir = bindings.workspace.repo_dir
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+    (repo_dir / "package-lock.json").write_text("{}", encoding="utf-8")
+    captured: list[tuple[str, ...]] = []
+
+    def fake_run_repo_command(
+        _b: ToolBindings, cmd: list[str] | tuple[str, ...], *, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        captured.append(tuple(cmd))
+        (repo_dir / "bun.lock").write_text("{}", encoding="utf-8")
+        return subprocess.CompletedProcess(list(cmd), 0, "820 packages installed", "")
+
+    monkeypatch.setattr(host_tools, "_run_repo_command", fake_run_repo_command)
+    try:
+        host_tools.ensure_workspace_dependencies(bindings)
+    finally:
+        _stop_loop(loop, thread)
+
+    assert captured == [("bun", "install", "--ignore-scripts")]
+    assert not (repo_dir / "bun.lock").exists()
+
+
+def test_format_duration_boundaries() -> None:
+    assert host_tools._format_duration(0) == "0s"
+    assert host_tools._format_duration(42.9) == "42s"
+    assert host_tools._format_duration(252) == "4m12s"
+    assert host_tools._format_duration(3900) == "1h05m"
+
+
+def test_run_stats_footer_reports_model_duration_and_cost() -> None:
+    """Readers of a bot message can see which model wrote it, how long the run
+    had been going, and what it had spent."""
+    stats = host_tools.RunStats(model="opencode-go/muse-spark", started_monotonic=time.monotonic() - 30)
+
+    footer = stats.footer()
+
+    assert footer.startswith("\n\n---\n<sub>")
+    assert "`opencode-go/muse-spark`" in footer
+    assert ("30s" in footer) or ("31s" in footer)
+    assert "$0.0000" in footer
+
+
+def test_run_stats_accumulates_usage_and_ignores_junk() -> None:
+    stats = host_tools.RunStats(model="m", started_monotonic=time.monotonic())
+    stats.add_usage({"cost": {"total": 0.0312}, "input": 10, "output": 5})
+    stats.add_usage({"cost": {"total": 0.0025}})
+    assert stats.cost_usd == pytest.approx(0.0337)
+    assert "$0.0337" in stats.footer()
+
+    for junk in (None, {}, {"cost": "nope"}, {"cost": {"total": True}}, {"cost": {"total": None}}):
+        stats.add_usage(junk)
+    assert stats.cost_usd == pytest.approx(0.0337)
+
+
+def test_gh_post_comment_appends_run_stats_footer(db: Database, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": 999, "user": {"login": "b"}, "body": "hi", "created_at": "t"})
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    object.__setattr__(
+        bindings,
+        "stats",
+        host_tools.RunStats(model="opencode-go/muse-spark", started_monotonic=time.monotonic()),
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_post_comment")
+        tool.execute({"body": "Looking into this."}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    body = captured["body"]["body"]
+    assert body.startswith("Looking into this.")
+    assert body.rstrip().endswith("</sub>")
+    assert "`opencode-go/muse-spark`" in body
+
+
+def test_format_tokens_boundaries() -> None:
+    assert host_tools._format_tokens(842) == "842"
+    assert host_tools._format_tokens(62_100) == "62.1k"
+    assert host_tools._format_tokens(1_100_000) == "1.1M"
+
+
+def test_run_stats_footer_reports_tokens_cache_and_fallback() -> None:
+    """The footer must say who actually answered (omp switches providers on
+    its own), and break spend down by cache bucket."""
+    stats = host_tools.RunStats(model="opencode-go/muse-spark", started_monotonic=time.monotonic())
+    stats.add_usage(
+        {
+            "input": 62_100,
+            "output": 14_300,
+            "cacheRead": 1_100_000,
+            "cacheWrite": 84_000,
+            "cost": {"total": 0.1832, "cacheRead": 0.0041},
+        }
+    )
+    stats.note_answered_model("openrouter", "deepseek/deepseek-v4.1-flash")
+
+    footer = stats.footer()
+
+    assert "`opencode-go/muse-spark` → `openrouter/deepseek/deepseek-v4.1-flash`" in footer
+    assert "$0.1832" in footer
+    assert "miss 62.1k" in footer
+    assert "out 14.3k" in footer
+    assert "cache r 1.1M w 84.0k" in footer
+    assert "cache $0.0041" in footer
+
+
+def test_run_stats_answered_model_ignores_the_configured_one() -> None:
+    stats = host_tools.RunStats(model="opencode-go/muse-spark-1.3-contributor", started_monotonic=time.monotonic())
+
+    # The configured model answering is not a fallback.
+    stats.note_answered_model("opencode-go", "muse-spark-1.3-contributor")
+    assert stats.fallback_model is None
+
+    stats.note_answered_model("openrouter", "deepseek/deepseek-v4.1-flash")
+    assert stats.fallback_model == "openrouter/deepseek/deepseek-v4.1-flash"
+
+    # Junk and repeats never overwrite the first observation.
+    stats.note_answered_model(None, None)
+    stats.note_answered_model("openrouter", "other/model")
+    assert stats.fallback_model == "openrouter/deepseek/deepseek-v4.1-flash"

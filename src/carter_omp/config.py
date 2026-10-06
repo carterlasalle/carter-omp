@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     github_webhook_secret: SecretStr = Field(..., alias="GITHUB_WEBHOOK_SECRET")
     bot_login: str = Field(..., alias="CARTER_OMP_BOT_LOGIN")
     git_author_name: str | None = Field(None, alias="CARTER_OMP_GIT_AUTHOR_NAME")
-    git_author_email: str = Field(..., alias="CARTER_OMP_GIT_AUTHOR_EMAIL")
+    git_author_email: str = Field("carter-omp[bot]@users.noreply.github.com", alias="CARTER_OMP_GIT_AUTHOR_EMAIL")
     repo_allowlist_raw: str = Field("", alias="CARTER_OMP_REPO_ALLOWLIST")
     pr_review_enabled: bool = Field(True, alias="CARTER_OMP_PR_REVIEW_ENABLED")
 
@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     trigger_label: str = Field("carter-omp", alias="CARTER_OMP_TRIGGER_LABEL")
     label_triggers: bool = Field(True, alias="CARTER_OMP_LABEL_TRIGGERS")
     mention_triggers: bool = Field(True, alias="CARTER_OMP_MENTION_TRIGGERS")
+    # Assigning the bot itself is an explicit trigger, same gate as a label
+    # (authorized sender + installation + repo scope).
+    assign_triggers: bool = Field(True, alias="CARTER_OMP_ASSIGN_TRIGGERS")
     auto_issue_triage: bool = Field(False, alias="CARTER_OMP_AUTO_ISSUE_TRIAGE")
     auto_pr_review: bool = Field(False, alias="CARTER_OMP_AUTO_PR_REVIEW")
     auto_comment_followups: bool = Field(False, alias="CARTER_OMP_AUTO_COMMENT_FOLLOWUPS")
@@ -73,7 +76,37 @@ class Settings(BaseSettings):
     # without listing IDs. The App-install list stays the real boundary:
     # only repos where the App is actually installed can deliver webhooks.
     allowed_repo_owners_raw: str = Field("", alias="CARTER_OMP_REPO_OWNERS")
-    github_installation_id: int | None = Field(None, alias="CARTER_OMP_GITHUB_INSTALLATION_ID")
+    # Comma-separated installation ids — one per account/org the App is
+    # installed on. A deployment can serve several orgs; each has its own
+    # installation id, and webhooks from any of them must be admissible.
+    github_installation_ids_raw: str = Field("", alias="CARTER_OMP_GITHUB_INSTALLATION_ID")
+
+    # trace:v1 id=impl.config-installation-ids work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    @property
+    def github_installation_ids(self) -> frozenset[int]:
+        """Every installation id this deployment serves (comma-separated)."""
+        ids: set[int] = set()
+        for piece in self.github_installation_ids_raw.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            try:
+                ids.add(int(piece))
+            except ValueError:
+                continue
+        return frozenset(ids)
+
+    # trace:v1 id=impl.config-single-installation-id work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    @property
+    def github_installation_id(self) -> int | None:
+        """One installation id, for callers that need a single anchor.
+
+        Used for the proxy's startup identity probe and `doctor`; per-repo
+        work resolves the installation from the repo instead (see
+        `app_auth.AppTokenProvider.installation_for_repo`).
+        """
+        ids = self.github_installation_ids
+        return min(ids) if ids else None
 
     @property
     def authorized_user_ids(self) -> frozenset[int]:
@@ -125,6 +158,7 @@ class Settings(BaseSettings):
             piece.strip().lstrip("@").lower() for piece in self.allowed_repo_owners_raw.split(",") if piece.strip()
         )
 
+    # trace:v1 id=impl.trigger-policy work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
     @property
     def trigger_policy(self) -> TriggerPolicy:
         """First-class trigger policy derived from the flat env fields."""
@@ -137,6 +171,7 @@ class Settings(BaseSettings):
             label_triggers=self.label_triggers,
             trigger_label=self.trigger_label,
             mention_triggers=self.mention_triggers,
+            assign_triggers=self.assign_triggers,
             auto_issue_triage=self.auto_issue_triage,
             auto_pr_review=self.auto_pr_review,
             auto_followup_comments=self.auto_comment_followups,
@@ -162,6 +197,10 @@ class Settings(BaseSettings):
 
     # Model selection
     model: str = Field("anthropic/claude-sonnet-4-6", alias="CARTER_OMP_MODEL")
+    # Comma-separated fallback chain OMP walks when the primary model fails
+    # with a retryable provider error. Its provider credential must be in the
+    # container env (`OPENROUTER_API_KEY` for `openrouter/…` selectors).
+    fallback_model: str = Field("", alias="CARTER_OMP_FALLBACK_MODEL")
     provider: str | None = Field(None, alias="CARTER_OMP_PROVIDER")
     thinking_level: ThinkingLevel = Field("high", alias="CARTER_OMP_THINKING")
 
@@ -321,6 +360,17 @@ class Settings(BaseSettings):
                 return None
         return value
 
+    # trace:exempt reason=internal-detail
+    @field_validator("github_app_id", "github_app_private_key_file", mode="before")
+    @classmethod
+    def _blank_app_disables(cls, value: object) -> object:
+        """Treat empty App-key strings as unset (test .env shadowing; see conftest)."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        if isinstance(value, Path) and str(value).strip() == "":
+            return None
+        return value
+
     @model_validator(mode="after")
     def _validate_proxy_or_pat(self) -> Settings:
         """Enforce credential-mode exclusivity.
@@ -448,8 +498,12 @@ class Settings(BaseSettings):
         ]
         return frozenset(item for item in items if item)
 
+    # trace:v1 id=impl.config-allows-owner-scope work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     def allows(self, full_name: str) -> bool:
-        return full_name.lower() in self.repo_allowlist
+        lowered = full_name.lower()
+        if lowered in self.repo_allowlist:
+            return True
+        return "/" in lowered and lowered.split("/")[0] in self.allowed_repo_owners
 
     @property
     def model_pool(self) -> tuple[str, ...]:
@@ -461,6 +515,12 @@ class Settings(BaseSettings):
     def pick_model(self) -> str:
         """Random selection from the pool (uniform). One-element pools return that one."""
         return random.choice(self.model_pool)
+
+    # trace:v1 id=impl.config-fallback-models work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @property
+    def fallback_models(self) -> tuple[str, ...]:
+        """Parsed `CARTER_OMP_FALLBACK_MODEL` chain (empty when unset)."""
+        return tuple(piece.strip() for piece in self.fallback_model.split(",") if piece.strip())
 
     @property
     def release_model_pool(self) -> tuple[str, ...]:
@@ -529,6 +589,7 @@ def reset_settings_cache() -> None:
     get_settings.cache_clear()
 
 
+# trace:v1 id=impl.config-proxy-env work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 class _ProxyEnvLoader(BaseSettings):
     """Minimal env loader for `python -m carter_omp.proxy serve`.
 
@@ -550,7 +611,9 @@ class _ProxyEnvLoader(BaseSettings):
     github_token: SecretStr | None = Field(None, alias="GITHUB_TOKEN")
     github_app_id: str | None = Field(None, alias="CARTER_OMP_GITHUB_APP_ID")
     github_app_private_key_file: Path | None = Field(None, alias="CARTER_OMP_GITHUB_PRIVATE_KEY_FILE")
-    github_installation_id: int | None = Field(None, alias="CARTER_OMP_GITHUB_INSTALLATION_ID")
+    github_installation_ids_raw: str = Field("", alias="CARTER_OMP_GITHUB_INSTALLATION_ID")
+    repo_allowlist_raw: str = Field("", alias="CARTER_OMP_REPO_ALLOWLIST")
+    allowed_repo_owners_raw: str = Field("", alias="CARTER_OMP_REPO_OWNERS")
     github_proxy_hmac_key: SecretStr = Field(..., alias="CARTER_OMP_GH_PROXY_HMAC_KEY")
     github_proxy_bind_host: str = Field("0.0.0.0", alias="CARTER_OMP_GH_PROXY_BIND_HOST")
     github_proxy_bind_port: int = Field(8081, alias="CARTER_OMP_GH_PROXY_BIND_PORT")
@@ -570,8 +633,16 @@ class _ProxyEnvLoader(BaseSettings):
                 raise ValueError("must be a non-empty string")
         return value
 
+    # trace:v1 id=impl.config-proxy-credential work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @model_validator(mode="after")
     def _require_credential(self) -> _ProxyEnvLoader:
+        # Compose passes "" for unset `:-` defaults; treat blank as absent.
+        if self.github_token is not None and not self.github_token.get_secret_value().strip():
+            self.github_token = None
+        if self.github_app_id is not None and not self.github_app_id.strip():
+            self.github_app_id = None
+        if self.github_app_private_key_file is not None and not str(self.github_app_private_key_file).strip():
+            self.github_app_private_key_file = None
         has_token = self.github_token is not None
         has_app = self.github_app_id is not None or self.github_app_private_key_file is not None
         if has_token and has_app:
@@ -583,6 +654,7 @@ class _ProxyEnvLoader(BaseSettings):
         return self
 
 
+# trace:v1 id=impl.config-proxy-settings work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def load_proxy_settings() -> Settings:
     """Build a `Settings` instance suitable for the github-proxy process.
 
@@ -597,7 +669,9 @@ def load_proxy_settings() -> Settings:
         github_token=loader.github_token,
         github_app_id=loader.github_app_id,
         github_app_private_key_file=loader.github_app_private_key_file,
-        github_installation_id=loader.github_installation_id,
+        github_installation_ids_raw=loader.github_installation_ids_raw,
+        repo_allowlist_raw=loader.repo_allowlist_raw,
+        allowed_repo_owners_raw=loader.allowed_repo_owners_raw,
         github_webhook_secret=SecretStr(""),
         bot_login="github-proxy",
         git_author_email="github-proxy@invalid",

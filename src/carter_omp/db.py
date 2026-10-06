@@ -362,6 +362,7 @@ def issue_key(repo: str, number: int) -> str:
     return f"{repo}#{number}"
 
 
+# trace:v1 id=impl.db-database work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 class Database:
     """Thread-safe sqlite wrapper. One connection per thread via locks."""
 
@@ -1610,6 +1611,20 @@ class Database:
                 """,
                 (repo, last_synced),
             )
+
+    # trace:v1 id=impl.db-issue-index-repos work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def issue_index_repos(self) -> tuple[str, ...]:
+        """Every repo the local index knows about, sorted.
+
+        Owner scope authorizes repos that were never listed in
+        `CARTER_OMP_REPO_ALLOWLIST`, so the set of repos to reconcile (and to
+        browse) cannot come from config alone. A repo enters this set the first
+        time one of its webhooks is ingested, which is also when it becomes
+        worth syncing.
+        """
+        with self._lock:
+            rows = self._conn.execute("SELECT DISTINCT repo FROM issue_index ORDER BY repo").fetchall()
+        return tuple(str(row["repo"]) for row in rows)
 
 
 def _index_entry_from_row(row: sqlite3.Row) -> IssueIndexEntry:

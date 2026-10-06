@@ -69,7 +69,7 @@ def _issue_row(action: str, *, delivery: str = "is1") -> EventRow:
     )
 
 
-@pytest.mark.parametrize("action", ["opened", "reopened"])
+@pytest.mark.parametrize("action", ["opened", "reopened", "labeled"])
 @pytest.mark.asyncio
 async def test_dispatch_routes_issue_triage_actions_to_triage_issue(
     settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch, action: str
@@ -159,3 +159,40 @@ def test_control_stop_marks_done_without_dispatch(tmp_path, settings) -> None:
     assert _control_command("stop") == "stop"
     assert _control_command("status") == "status"
     assert _control_command("fix the bug") is None
+    # People type `@carter-omp status?` — trailing punctuation must not turn a
+    # deterministic DB answer into a full model run.
+    assert _control_command("status?") == "status"
+    assert _control_command("STOP!") == "stop"
+    # Only a bare command line counts: prose that merely starts with a command
+    # word stays a normal follow-up (a model run), not a canned DB answer.
+    assert _control_command("status: what's the state?") is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_and_mark_keeps_a_worker_recorded_failure(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent's own abort records `failed` with its reason; the success path
+    must not paint over it — that is what made an aborted run look green."""
+    db.record_event(
+        delivery_id="d-abort",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key="octo/widget#4",
+        payload={"action": "labeled", "issue": {"number": 4}},
+    )
+    row = db.claim_next_event()
+    assert row is not None
+    db.mark_event(row.delivery_id, "failed", error="agent aborted: harness fault")
+
+    async def _noop(*_a, **_k) -> None:
+        return None
+
+    monkeypatch.setattr(WorkerPool, "_dispatch", _noop)
+
+    await _make_pool(settings, db)._dispatch_and_mark(row)  # noqa: SLF001
+
+    latest = db.get_event(row.delivery_id)
+    assert latest is not None
+    assert latest.state == "failed"
+    assert latest.last_error == "agent aborted: harness fault"

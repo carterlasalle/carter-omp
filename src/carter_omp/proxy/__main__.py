@@ -32,6 +32,7 @@ def main() -> None:
     """github-proxy control surface."""
 
 
+# trace:v1 id=impl.proxy-serve-app-mode work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 @main.command()
 def serve() -> None:
     """Run the HMAC-authenticated GitHub proxy."""
@@ -39,12 +40,11 @@ def serve() -> None:
     configure_logging(cfg.log_dir)
     cfg.ensure_paths()
     # `load_proxy_settings` already rejects blank values, but stay defensive
-    # in case a caller constructs the Settings by hand.
-    if cfg.github_token is None:
-        click.echo("github-proxy: GITHUB_TOKEN is required in proxy mode", err=True)
-        sys.exit(2)
-    if cfg.github_proxy_hmac_key is None:
-        click.echo("github-proxy: CARTER_OMP_GH_PROXY_HMAC_KEY is required in proxy mode", err=True)
+    # in case a caller constructs the Settings by hand. App mode needs no
+    # GITHUB_TOKEN — the per-request installation token covers API + git.
+    has_app = cfg.github_app_id is not None and cfg.github_app_private_key_file is not None
+    if cfg.github_token is None and not has_app:
+        click.echo("github-proxy: GITHUB_TOKEN or GitHub App credentials required", err=True)
         sys.exit(2)
     app = create_proxy_app(cfg)
     uvicorn.run(

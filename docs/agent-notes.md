@@ -45,7 +45,10 @@ Durable operational knowledge. Read this before touching Docker, CI, or trace co
 ## Analyzers
 <!-- trace:v1 id=doc.agent-notes-analyzers work=WORK-CO-Q8Z1HJJJ -->
 
-- mypy baseline: 19 errors / 6 files (lenient: `ignore_missing_imports`).
+- mypy baseline: 0 errors (lenient: `ignore_missing_imports`). The 2026-09-24
+  baseline of 19 errors was cleared with real fixes (nullable narrowing, Row-type
+  unions, a `release_retag` result payload that would have reached the agent
+  without its `content` block).
   Do not chase zero speculatively — the strict run (43 errors) is mostly
   vendored-RPC generic variance. CI fails only if the count grows.
 - bandit skips live in `pyproject.toml` with reasons; zero `nosec` in tree.

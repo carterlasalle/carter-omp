@@ -14,6 +14,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -47,6 +48,12 @@ _PRE_PR_FIX_COMMAND = ("bun", "run", "fix")
 _PRE_PR_CHECK_COMMAND = ("bun", "check")
 _PRE_PR_TEST_COMMAND = ("bun", "run", "test")
 _BUN_INSTALL_COMMAND = ("bun", "install", "--frozen-lockfile", "--ignore-scripts")
+# `--frozen-lockfile` is bun-lockfile-only. bun can import an npm/yarn/pnpm
+# lockfile, but that path has to write its own `bun.lock`, and the migrated
+# lock is removed afterwards so the pre-publish dirty check still passes.
+_BUN_INSTALL_IMPORTED_LOCK_COMMAND = ("bun", "install", "--ignore-scripts")
+_BUN_LOCKFILES = ("bun.lock", "bun.lockb")
+_IMPORTABLE_LOCKFILES = ("package-lock.json", "yarn.lock", "pnpm-lock.yaml")
 _BUN_INSTALL_TIMEOUT_SECONDS = 300.0
 _REPO_COMMAND_SCRUBBED_ENV_KEYS: tuple[str, ...] = (
     "GITHUB_TOKEN",
@@ -70,6 +77,125 @@ _PRE_PR_TEST_TIMEOUT_SECONDS = 3600.0
 _DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
+# trace:v1 id=impl.host-tools-format-duration work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _format_duration(seconds: float) -> str:
+    total = int(max(0.0, seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m{total % 60:02d}s"
+    return f"{total // 3600}h{(total % 3600) // 60:02d}m"
+
+
+# trace:v1 id=impl.host-tools-format-tokens work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _format_tokens(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
+
+
+# trace:v1 id=impl.host-tools-run-stats work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+@dataclass(slots=True)
+class RunStats:
+    """Per-run telemetry appended to the bot's GitHub messages.
+
+    The worker fills this in (model + monotonic start at launch, spend
+    accumulated from `message_end` usage events); `gh_post_comment` and
+    `gh_open_pr` render it as a footer so a reader can see which model wrote
+    the message, how long the run had been going, and what it had cost.
+    """
+
+    model: str
+    started_monotonic: float
+    # Set when omp switched providers mid-run (or when a message names a model
+    # other than the configured one): the footer then names both, so a reader
+    # never mistakes the configured model for the one that answered.
+    fallback_model: str | None = None
+    cost_usd: float = 0.0
+    cost_cache_usd: float = 0.0
+    # `input` is the uncached bucket (a cache miss); `cacheRead`/`cacheWrite`
+    # are the cached buckets — omp reports them separately per message.
+    miss_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+
+    # trace:v1 id=impl.run-stats-elapsed work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def elapsed_seconds(self) -> float:
+        return max(0.0, time.monotonic() - self.started_monotonic)
+
+    @staticmethod
+    def _number(value: Any) -> float | None:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        return None
+
+    # trace:v1 id=impl.run-stats-answered work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def note_answered_model(self, provider: str | None, model: str | None) -> None:
+        """Record which model actually answered a message.
+
+        Ground truth beats configuration: omp switches providers when the
+        configured one fails, and a footer naming only the configured model
+        would then be wrong about who wrote the message.
+        """
+        if not model:
+            return
+        selector = f"{provider}/{model}" if provider else model
+        if selector != self.model and self.fallback_model is None:
+            self.fallback_model = selector
+
+    # trace:v1 id=impl.run-stats-add-usage work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def add_usage(self, usage: Mapping[str, Any] | None) -> None:
+        """Accumulate one assistant message's tokens + spend (USD)."""
+        if not isinstance(usage, Mapping):
+            return
+        for key, attr in (
+            ("input", "miss_tokens"),
+            ("output", "output_tokens"),
+            ("cacheRead", "cache_read_tokens"),
+            ("cacheWrite", "cache_write_tokens"),
+        ):
+            amount = self._number(usage.get(key))
+            if amount:
+                setattr(self, attr, getattr(self, attr) + int(amount))
+        cost = usage.get("cost")
+        if not isinstance(cost, Mapping):
+            return
+        total = self._number(cost.get("total"))
+        if total:
+            self.cost_usd += total
+        cached = self._number(cost.get("cacheRead"))
+        if cached:
+            self.cost_cache_usd += cached
+
+    # trace:v1 id=impl.run-stats-footer work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def footer(self) -> str:
+        """Markdown footer: model (with fallback), wall clock, spend, usage."""
+        cost = f"${self.cost_usd:.4f}" if self.cost_usd < 1 else f"${self.cost_usd:.2f}"
+        model = f"`{self.model}`"
+        if self.fallback_model and self.fallback_model != self.model:
+            model += f" → `{self.fallback_model}`"
+        headline = [model, _format_duration(self.elapsed_seconds()), cost]
+        usage: list[str] = []
+        if self.miss_tokens:
+            usage.append(f"miss {_format_tokens(self.miss_tokens)}")
+        if self.output_tokens:
+            usage.append(f"out {_format_tokens(self.output_tokens)}")
+        if self.cache_read_tokens or self.cache_write_tokens:
+            usage.append(
+                f"cache r {_format_tokens(self.cache_read_tokens)} w {_format_tokens(self.cache_write_tokens)}"
+            )
+        if self.cost_cache_usd:
+            usage.append(f"cache ${self.cost_cache_usd:.4f}")
+        lines = ["<sub>" + " · ".join(headline) + "</sub>"]
+        if usage:
+            lines.append("<sub>" + " · ".join(usage) + "</sub>")
+        return "\n\n---\n" + "\n".join(lines)
+
+
+# trace:v1 id=impl.host-tools-abort-controller work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 @dataclass(slots=True)
 class AbortController:
     """Mutable handoff between the `abort_task` host tool and the worker.
@@ -79,7 +205,8 @@ class AbortController:
     thread-safe terminator (the same one used for queue cancellation and the
     hard-timeout watchdog), and inspects `triggered` after `prompt_and_wait`
     unblocks to decide whether the resulting `RpcError` is an intentional
-    abort (swallow, mark event `done`) vs an actual failure (propagate).
+    abort (swallow the error; the worker records the delivery as failed with
+    this `reason`, so an abort is visible) vs an actual failure (propagate).
     """
 
     triggered: bool = False
@@ -110,6 +237,7 @@ class ReleaseToolContext:
     default_branch: str
 
 
+# trace:v1 id=impl.host-tools-bindings work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 @dataclass(slots=True, frozen=True)
 class ToolBindings:
     """Per-task closure that the host tools capture."""
@@ -155,6 +283,8 @@ class ToolBindings:
     # without a live RpcClient.
     abort: AbortController | None = None
     release: ReleaseToolContext | None = None
+    # Per-run telemetry for the message footer; None outside a real run.
+    stats: RunStats | None = None
 
     @property
     def issue_key(self) -> str:
@@ -235,8 +365,9 @@ def _audit(
     )
 
 
+# trace:v1 id=impl.host-tools-raise-command work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _raise_command(message: str) -> NoReturn:
-    raise RpcCommandError(message, error={"message": message})
+    raise RpcCommandError(message, error=message)
 
 
 def _require_issue(bindings: ToolBindings) -> IssueInfo:
@@ -348,6 +479,26 @@ def _format_process_output(stdout: Any, stderr: Any) -> str:
     )
 
 
+# trace:v1 id=impl.host-tools-install-command work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _install_command(repo_dir: Path) -> tuple[tuple[str, ...], Path | None] | None:
+    """Pick the dependency install for a checkout, plus a lockfile to clean up.
+
+    The image ships bun only (no node/npm/yarn), and bun resolves
+    `package-lock.json`/`yarn.lock`/`pnpm-lock.yaml` on import. That import
+    writes `bun.lock`, which the pre-publish dirty check would then see as an
+    untracked change, so the caller removes it when we created it. Returns None
+    when there is no lockfile to install from.
+    """
+    if not (repo_dir / "package.json").is_file():
+        return None
+    if any((repo_dir / name).is_file() for name in _BUN_LOCKFILES):
+        return _BUN_INSTALL_COMMAND, None
+    if any((repo_dir / name).is_file() for name in _IMPORTABLE_LOCKFILES):
+        return _BUN_INSTALL_IMPORTED_LOCK_COMMAND, repo_dir / "bun.lock"
+    return None
+
+
+# trace:v1 id=impl.host-tools-workspace-deps work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
     """Bootstrap ``node_modules`` so the agent can resolve workspace packages.
 
@@ -369,7 +520,8 @@ def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
     slot-owned env as the other repo-owned bun commands (``bun run fix`` /
     ``bun check``).
 
-    Skips non-bun repos. Otherwise runs unconditionally on every launch
+    Installs for any lockfile bun can read (bun, npm, yarn, pnpm). Runs
+    unconditionally on every launch
     (including ``--continue`` resumes): a frozen install verifies an intact
     tree in ~20ms and re-links anything missing, so a previous install that
     timed out or crashed half-way self-heals instead of being skipped forever
@@ -378,10 +530,13 @@ def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
     logged and swallowed — the agent can still install itself or report the gap.
     """
     repo_dir = bindings.workspace.repo_dir
-    if not (repo_dir / "package.json").is_file() or not (repo_dir / "bun.lock").is_file():
+    install = _install_command(repo_dir)
+    if install is None:
         return
+    command, migrated_lock = install
+    lock_existed = migrated_lock is not None and migrated_lock.exists()
     try:
-        proc = _run_repo_command(bindings, _BUN_INSTALL_COMMAND, timeout=_BUN_INSTALL_TIMEOUT_SECONDS)
+        proc = _run_repo_command(bindings, command, timeout=_BUN_INSTALL_TIMEOUT_SECONDS)
     except FileNotFoundError:
         log.warning("bun_install bootstrap skipped: bun not on PATH", extra={"issue": bindings.issue_key})
         return
@@ -398,7 +553,15 @@ def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
             },
         )
         return
-    log.info("bun_install bootstrap ok", extra={"issue": bindings.issue_key})
+    if migrated_lock is not None and not lock_existed:
+        # `bun install` imported the repo's npm/yarn/pnpm lockfile and left a
+        # bun lockfile behind; drop it so the tree stays clean for the gates.
+        with suppress(OSError):
+            migrated_lock.unlink()
+    log.info(
+        "dependency bootstrap ok",
+        extra={"issue": bindings.issue_key, "command": " ".join(command)},
+    )
 
 
 def _run_pre_publish_bun_fix(
@@ -690,7 +853,9 @@ def _schedule_autoclose(bindings: ToolBindings, *, comment_id: int, hours: float
 
 
 # ---------- gh_post_comment ----------
+# trace:v1 id=impl.host-tools-post-comment work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
+    # trace:v1 id=impl.host-tools-post-comment-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         bindings.require(Capability.COMMENT, "gh_post_comment", args)
         body = args.get("body")
@@ -706,6 +871,8 @@ def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
         body_to_post = body
         if schedule_close is not None:
             body_to_post = f"{body.rstrip()}\n\n{persona.question_autoclose_suffix(schedule_close)}"
+        if bindings.stats is not None:
+            body_to_post = f"{body_to_post.rstrip()}{bindings.stats.footer()}"
         try:
             comment = _run_coro(
                 bindings.loop,
@@ -1079,12 +1246,14 @@ def _build_release_job_log(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 # ---------- release_retag ----------
+# trace:v1 id=impl.host-tools-release-retag work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_release_retag(bindings: ToolBindings) -> HostTool[Any, Any]:
     def refuse(args: Mapping[str, Any], message: str) -> NoReturn:
         _audit(bindings, "release_retag", args, error=message)
         _raise_command(message)
 
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> dict[str, Any]:
+    # trace:v1 id=impl.host-tools-release-retag-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         bindings.require(Capability.UPDATE_DEFAULT_BRANCH, "release_retag", args)
         bindings.require(Capability.MOVE_RELEASE_TAG, "release_retag", args)
         release = _require_release(bindings)
@@ -1218,7 +1387,9 @@ def _build_release_retag(bindings: ToolBindings) -> HostTool[Any, Any]:
             "round": row.rounds,
         }
         _audit(bindings, "release_retag", args, result={**result, "summary": summary})
-        return result
+        # HostTool results must be a text payload or str; a bare dict would be
+        # normalized without `content` and the agent would see empty output.
+        return f"retagged {release.repo} to {pushed.head[:12]} ({release.tag}); awaiting CI, round {row.rounds}"
 
     return host_tool(
         name="release_retag",
@@ -1281,7 +1452,9 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 # ---------- gh_open_pr ----------
+# trace:v1 id=impl.host-tools-open-pr work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
+    # trace:v1 id=impl.host-tools-open-pr-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         bindings.require(Capability.OPEN_PR, "gh_open_pr", args)
         if bindings.review_mode:
@@ -1310,6 +1483,9 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
                 "GitHub auto-closes the issue when the PR merges. Put it at the end of the "
                 "Verification section per the template."
             )
+        if bindings.stats is not None:
+            # Same footer as comments: which model, how long, what it cost.
+            body = f"{body.rstrip()}{bindings.stats.footer()}"
         _run_pre_publish_bun_fix(bindings, args, tool_name="gh_open_pr", stage="open PR")
         _run_pre_publish_bun_check(bindings, args, tool_name="gh_open_pr", stage="open PR")
         # Last and slowest: the suite runs against the tree that is actually
@@ -2120,6 +2296,7 @@ def _build_pr_review_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
     )
 
 
+# trace:v1 id=impl.host-tools-diff-anchorable-lines work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _diff_anchorable_lines(patch: str) -> tuple[frozenset[int], frozenset[int]]:
     """Map a unified-diff patch to (RIGHT, LEFT) anchorable line sets.
 
@@ -2143,10 +2320,9 @@ def _diff_anchorable_lines(patch: str) -> tuple[frozenset[int], frozenset[int]]:
         # `+++`/`---` are file headers only before the first hunk. Inside a
         # hunk a diff line's *content* may start with `++` (added) or `--`
         # (removed), and those lines must advance the counters.
-        in_hunk = new_line is not None and old_line is not None
-        if raw.startswith(("+++", "---")) and not in_hunk:
+        if raw.startswith(("+++", "---")) and (new_line is None or old_line is None):
             continue
-        if not in_hunk:
+        if new_line is None or old_line is None:
             continue
         if raw.startswith("+"):
             right.add(new_line)
