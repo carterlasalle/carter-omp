@@ -1232,3 +1232,12 @@ def test_agent_env_disables_husky(tmp_path: Path, settings: Settings, monkeypatc
 
     assert env["HUSKY"] == "0"
     assert env["HUSKY_SKIP_INSTALL"] == "1"
+
+
+def test_agent_env_disables_pty(tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The child died mid-turn with `EPIPE: broken pipe, write` (Bun stream
+    teardown) on runs that use bash heavily; nothing here is interactive."""
+    monkeypatch.setattr(worker, "_AGENT_HOME_STAGE", tmp_path / "missing-stage")
+    monkeypatch.setattr(worker, "_AGENT_HOME", tmp_path / "agent-home")
+
+    assert worker._build_extra_env(settings)["PI_NO_PTY"] == "1"

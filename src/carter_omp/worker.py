@@ -313,6 +313,13 @@ def _build_extra_env(settings: Settings) -> dict[str, str]:
     # Git hooks are useless in a sandboxed worktree anyway.
     env["HUSKY"] = "0"
     env["HUSKY_SKIP_INSTALL"] = "1"
+    # omp's bash tool allocates a PTY by default. In this harness the child
+    # occasionally dies mid-turn with `EPIPE: broken pipe, write` from Bun's
+    # stream teardown (observed right after bash/edit tool calls, exit 1, no
+    # cancel or timeout involved), which fails the event and re-runs the whole
+    # task. Nothing here is interactive, so run bash without a PTY — omp's own
+    # escape hatch for non-interactive/daemon contexts.
+    env["PI_NO_PTY"] = "1"
     if _AGENT_HOME.is_dir():
         env["HOME"] = str(_AGENT_HOME)
     return env
