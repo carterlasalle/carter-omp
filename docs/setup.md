@@ -256,8 +256,14 @@ nothing is per-org except the three values below. No re-setup, no rebuild.
    in each repo you intend to label-trigger; create it once per repo (the bot
    never applies its own trigger label). Mentions and assigning the bot need no
    label.
-6. Re-run `docker compose exec carter-omp carter-omp doctor` — it prints the
-   allowlist, owners, and both model selectors.
+6. **Humans are deployment-wide too.** Only IDs in
+   `CARTER_OMP_AUTHORIZED_USER_IDS` can trigger (label/mention/assign). If the
+   new org has other maintainers who should be able to, add their immutable
+   user IDs (`gh api users/<login> --jq .id`). `CARTER_OMP_MAINTAINER_LOGINS`
+   is separate: it decides whose directive may authorize *implementation*
+   (opening a PR).
+7. Re-run `docker compose exec carter-omp carter-omp doctor` — it prints the
+   allowlist, owners, installation ids, and both model selectors.
 
 ## Reference
 

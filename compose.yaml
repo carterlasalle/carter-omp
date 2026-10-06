@@ -48,6 +48,10 @@ services:
       CARTER_OMP_REPO_IDS: ${CARTER_OMP_REPO_IDS:-}
       CARTER_OMP_REPOS: ${CARTER_OMP_REPOS:-}
       CARTER_OMP_REPO_OWNERS: ${CARTER_OMP_REPO_OWNERS:-}
+      # Webhook admission: only installations listed here may trigger. One id
+      # per account/org the App is installed on (comma-separated). Without it
+      # the orchestrator skips the installation check entirely.
+      CARTER_OMP_GITHUB_INSTALLATION_ID: ${CARTER_OMP_GITHUB_INSTALLATION_ID:-}
       CARTER_OMP_GIT_AUTHOR_NAME: ${CARTER_OMP_GIT_AUTHOR_NAME:-}
       CARTER_OMP_GIT_AUTHOR_EMAIL: ${CARTER_OMP_GIT_AUTHOR_EMAIL:-}
       CARTER_OMP_REPO_ALLOWLIST: ${CARTER_OMP_REPO_ALLOWLIST:-}
