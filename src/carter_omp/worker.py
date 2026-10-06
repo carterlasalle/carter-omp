@@ -1020,7 +1020,29 @@ async def run_task(
     else:
         await asyncio.to_thread(_capture_natives_cache, inputs)
         await _consume_trigger_label(inputs)
+        _record_agent_abort(inputs, bindings)
         return result
+
+
+# trace:v1 id=impl.worker-record-agent-abort work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _record_agent_abort(inputs: TaskInputs, bindings: ToolBindings) -> None:
+    """Mark the delivery failed when the agent pulled its own plug.
+
+    `abort_task` is a legitimate stop ("needs info", "harness fault"), but it
+    used to leave the delivery marked `done`, so a run that published nothing
+    still looked green in `status`/dashboards and nobody went looking. Record
+    the agent's own reason instead. Terminal — nothing auto-retries, because a
+    30-minute task is not worth blind-retrying; the operator re-triggers.
+    """
+    abort = bindings.abort
+    if abort is None or not abort.triggered:
+        return
+    reason = (abort.reason or "no reason given").strip()[:500]
+    inputs.db.mark_event(inputs.delivery_id, "failed", error=f"agent aborted: {reason}")
+    log.warning(
+        "event marked failed",
+        extra={"delivery": inputs.delivery_id, "issue": bindings.issue_key, "reason": reason[:200]},
+    )
 
 
 async def _consume_trigger_label(inputs: TaskInputs) -> None:

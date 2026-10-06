@@ -12,7 +12,7 @@ from contextlib import suppress
 from carter_omp import tasks
 from carter_omp.cancellation import clear_current_event, set_current_event
 from carter_omp.config import Settings
-from carter_omp.db import Database, EventRow, IssueState
+from carter_omp.db import INACTIVE_EVENT_STATES, Database, EventRow, IssueState
 from carter_omp.github_backend import GitHubBackend
 from carter_omp.sandbox import GitTransport, SandboxManager, _reap_slot
 from carter_omp.slot_pool import SlotPool
@@ -406,6 +406,7 @@ class WorkerPool:
         if reclaimed:
             log.info("workspace caches reclaimed", extra={"key": row.issue_key})
 
+    # trace:v1 id=impl.queue-dispatch-and-mark work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     async def _dispatch_and_mark(self, row: EventRow, *, slot_uid: int | None = None) -> None:
         if _handle_control_command(self, row):
             self.db.mark_event(row.delivery_id, "done")
@@ -413,8 +414,13 @@ class WorkerPool:
         await self._dispatch(row, slot_uid=slot_uid)
         if row.delivery_id in self._cancelled:
             self.db.mark_event(row.delivery_id, "failed", error="cancelled by operator")
-        else:
-            self.db.mark_event(row.delivery_id, "done")
+            return
+        latest = self.db.get_event(row.delivery_id)
+        if latest is not None and latest.state in INACTIVE_EVENT_STATES:
+            # The worker already recorded a terminal outcome (the agent aborted
+            # mid-run with a reason). Do not overwrite diagnosis with success.
+            return
+        self.db.mark_event(row.delivery_id, "done")
 
     # trace:v1 id=impl.queue-dispatch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
     async def _dispatch(self, row: EventRow, *, slot_uid: int | None = None) -> None:

@@ -1185,3 +1185,39 @@ def test_attach_run_token_mints_with_the_run_budget(
 
     assert seen["ttl_seconds"] == worker._run_token_ttl(settings)
     assert seen["issue"] == 1
+
+
+def test_record_agent_abort_marks_the_delivery_failed(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent abort must not look green: a run that published nothing used to
+    end as `done` with the reason only in a log line."""
+    recorded: dict[str, object] = {}
+
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    inputs.db = SimpleNamespace(  # type: ignore[assignment]
+        mark_event=lambda delivery, state, error=None: recorded.update(
+            {"delivery": delivery, "state": state, "error": error}
+        )
+    )
+    bindings.abort = worker.host_tools.AbortController()
+    bindings.abort.signal("Harness credential fault: gh_push_branch rejected 401")
+
+    worker._record_agent_abort(inputs, bindings)
+
+    assert recorded["delivery"] == inputs.delivery_id
+    assert recorded["state"] == "failed"
+    assert "401" in str(recorded["error"])
+
+
+def test_record_agent_abort_is_a_noop_without_an_abort(
+    tmp_path: Path, settings: Settings
+) -> None:
+    calls: list[object] = []
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    inputs.db = SimpleNamespace(mark_event=lambda *a, **k: calls.append((a, k)))  # type: ignore[assignment]
+    bindings.abort = worker.host_tools.AbortController()
+
+    worker._record_agent_abort(inputs, bindings)
+
+    assert calls == []

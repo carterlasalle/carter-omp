@@ -43,6 +43,18 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- Dependency bootstrap now installs for **any** lockfile bun can read
+  (`package-lock.json`/`yarn.lock`/`pnpm-lock.yaml`, not just `bun.lock`), using
+  bun as the only installer the image ships. An npm repo used to get no install
+  at all, so its own `check` script died at the first binary
+  (`prettier: command not found`, exit 127) and every `gh_push_branch` was
+  refused with `bun check failed before push` — the run then aborted with the
+  commit stranded locally. The `bun.lock` bun writes while importing a foreign
+  lockfile is removed again, so the pre-publish dirty check stays clean.
+- An agent-side `abort_task` now records the delivery as **failed** with the
+  agent's own reason instead of `done` (only the log line showed it). A run that
+  published nothing no longer looks green in `status`/dashboards.
+
 - Per-run proxy tokens now live as long as the run's own budget
   (`worker._run_token_ttl`: max task/release timeout + hard-stop grace + 5 min)
   instead of a fixed 600 s. Runs last 10–40 minutes, so the old TTL expired

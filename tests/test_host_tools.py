@@ -5003,3 +5003,58 @@ def test_release_status_and_job_log_are_scoped_to_expected_sha(
         f"head_sha={expected_sha}&per_page=100",
     )
     assert log_tail.splitlines() == log_lines[-1000:]
+
+
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        (("package.json", "bun.lock"), ("bun", "install", "--frozen-lockfile", "--ignore-scripts")),
+        (("package.json", "bun.lockb"), ("bun", "install", "--frozen-lockfile", "--ignore-scripts")),
+        (("package.json", "package-lock.json"), ("bun", "install", "--ignore-scripts")),
+        (("package.json", "yarn.lock"), ("bun", "install", "--ignore-scripts")),
+        (("package.json",), None),
+        (("bun.lock",), None),
+    ],
+)
+def test_install_command_picks_the_lockfile_install(tmp_path: Path, files: tuple[str, ...], expected: tuple[str, ...] | None) -> None:
+    """The image ships bun only, and bun imports npm/yarn lockfiles. An npm repo
+    used to get no install at all, so its own `check` script died at the first
+    binary (`prettier: command not found` → exit 127) and every push was
+    refused."""
+    for name in files:
+        (tmp_path / name).write_text("{}", encoding="utf-8")
+
+    picked = host_tools._install_command(tmp_path)
+
+    assert (picked[0] if picked else None) == expected
+
+
+def test_ensure_workspace_dependencies_installs_for_npm_repo_and_cleans_lockfile(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Importing an npm lockfile makes bun write `bun.lock`; it must not be left
+    behind as an untracked change for the pre-publish dirty check."""
+    import subprocess
+
+    bindings, loop, thread = _bindings(db, tmp_path, httpx.MockTransport(lambda _r: httpx.Response(500)))
+    repo_dir = bindings.workspace.repo_dir
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+    (repo_dir / "package-lock.json").write_text("{}", encoding="utf-8")
+    captured: list[tuple[str, ...]] = []
+
+    def fake_run_repo_command(
+        _b: ToolBindings, cmd: list[str] | tuple[str, ...], *, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        captured.append(tuple(cmd))
+        (repo_dir / "bun.lock").write_text("{}", encoding="utf-8")
+        return subprocess.CompletedProcess(list(cmd), 0, "820 packages installed", "")
+
+    monkeypatch.setattr(host_tools, "_run_repo_command", fake_run_repo_command)
+    try:
+        host_tools.ensure_workspace_dependencies(bindings)
+    finally:
+        _stop_loop(loop, thread)
+
+    assert captured == [("bun", "install", "--ignore-scripts")]
+    assert not (repo_dir / "bun.lock").exists()

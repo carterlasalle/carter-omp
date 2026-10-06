@@ -14,6 +14,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -47,6 +48,12 @@ _PRE_PR_FIX_COMMAND = ("bun", "run", "fix")
 _PRE_PR_CHECK_COMMAND = ("bun", "check")
 _PRE_PR_TEST_COMMAND = ("bun", "run", "test")
 _BUN_INSTALL_COMMAND = ("bun", "install", "--frozen-lockfile", "--ignore-scripts")
+# `--frozen-lockfile` is bun-lockfile-only. bun can import an npm/yarn/pnpm
+# lockfile, but that path has to write its own `bun.lock`, and the migrated
+# lock is removed afterwards so the pre-publish dirty check still passes.
+_BUN_INSTALL_IMPORTED_LOCK_COMMAND = ("bun", "install", "--ignore-scripts")
+_BUN_LOCKFILES = ("bun.lock", "bun.lockb")
+_IMPORTABLE_LOCKFILES = ("package-lock.json", "yarn.lock", "pnpm-lock.yaml")
 _BUN_INSTALL_TIMEOUT_SECONDS = 300.0
 _REPO_COMMAND_SCRUBBED_ENV_KEYS: tuple[str, ...] = (
     "GITHUB_TOKEN",
@@ -70,6 +77,7 @@ _PRE_PR_TEST_TIMEOUT_SECONDS = 3600.0
 _DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
+# trace:v1 id=impl.host-tools-abort-controller work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 @dataclass(slots=True)
 class AbortController:
     """Mutable handoff between the `abort_task` host tool and the worker.
@@ -79,7 +87,8 @@ class AbortController:
     thread-safe terminator (the same one used for queue cancellation and the
     hard-timeout watchdog), and inspects `triggered` after `prompt_and_wait`
     unblocks to decide whether the resulting `RpcError` is an intentional
-    abort (swallow, mark event `done`) vs an actual failure (propagate).
+    abort (swallow the error; the worker records the delivery as failed with
+    this `reason`, so an abort is visible) vs an actual failure (propagate).
     """
 
     triggered: bool = False
@@ -349,6 +358,26 @@ def _format_process_output(stdout: Any, stderr: Any) -> str:
     )
 
 
+# trace:v1 id=impl.host-tools-install-command work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _install_command(repo_dir: Path) -> tuple[tuple[str, ...], Path | None] | None:
+    """Pick the dependency install for a checkout, plus a lockfile to clean up.
+
+    The image ships bun only (no node/npm/yarn), and bun resolves
+    `package-lock.json`/`yarn.lock`/`pnpm-lock.yaml` on import. That import
+    writes `bun.lock`, which the pre-publish dirty check would then see as an
+    untracked change, so the caller removes it when we created it. Returns None
+    when there is no lockfile to install from.
+    """
+    if not (repo_dir / "package.json").is_file():
+        return None
+    if any((repo_dir / name).is_file() for name in _BUN_LOCKFILES):
+        return _BUN_INSTALL_COMMAND, None
+    if any((repo_dir / name).is_file() for name in _IMPORTABLE_LOCKFILES):
+        return _BUN_INSTALL_IMPORTED_LOCK_COMMAND, repo_dir / "bun.lock"
+    return None
+
+
+# trace:v1 id=impl.host-tools-workspace-deps work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
     """Bootstrap ``node_modules`` so the agent can resolve workspace packages.
 
@@ -370,7 +399,8 @@ def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
     slot-owned env as the other repo-owned bun commands (``bun run fix`` /
     ``bun check``).
 
-    Skips non-bun repos. Otherwise runs unconditionally on every launch
+    Installs for any lockfile bun can read (bun, npm, yarn, pnpm). Runs
+    unconditionally on every launch
     (including ``--continue`` resumes): a frozen install verifies an intact
     tree in ~20ms and re-links anything missing, so a previous install that
     timed out or crashed half-way self-heals instead of being skipped forever
@@ -379,10 +409,13 @@ def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
     logged and swallowed — the agent can still install itself or report the gap.
     """
     repo_dir = bindings.workspace.repo_dir
-    if not (repo_dir / "package.json").is_file() or not (repo_dir / "bun.lock").is_file():
+    install = _install_command(repo_dir)
+    if install is None:
         return
+    command, migrated_lock = install
+    lock_existed = migrated_lock is not None and migrated_lock.exists()
     try:
-        proc = _run_repo_command(bindings, _BUN_INSTALL_COMMAND, timeout=_BUN_INSTALL_TIMEOUT_SECONDS)
+        proc = _run_repo_command(bindings, command, timeout=_BUN_INSTALL_TIMEOUT_SECONDS)
     except FileNotFoundError:
         log.warning("bun_install bootstrap skipped: bun not on PATH", extra={"issue": bindings.issue_key})
         return
@@ -399,7 +432,15 @@ def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
             },
         )
         return
-    log.info("bun_install bootstrap ok", extra={"issue": bindings.issue_key})
+    if migrated_lock is not None and not lock_existed:
+        # `bun install` imported the repo's npm/yarn/pnpm lockfile and left a
+        # bun lockfile behind; drop it so the tree stays clean for the gates.
+        with suppress(OSError):
+            migrated_lock.unlink()
+    log.info(
+        "dependency bootstrap ok",
+        extra={"issue": bindings.issue_key, "command": " ".join(command)},
+    )
 
 
 def _run_pre_publish_bun_fix(
