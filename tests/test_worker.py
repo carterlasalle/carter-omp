@@ -45,6 +45,9 @@ class _FakeRpcClient:
     def on_message_update(self, _cb) -> None:
         pass
 
+    def on_message_end(self, _cb) -> None:
+        pass
+
     def stop(self) -> None:
         self.stop_calls += 1
 
@@ -214,7 +217,7 @@ async def test_run_task_preserves_impl_authorized_when_resuming(
 
     assert result == "ok"
     assert captured == {"impl_authorized": True}
-    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue",)
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue", "--no-extensions")
 
 
 @pytest.mark.asyncio
@@ -226,7 +229,7 @@ async def test_run_rpc_passes_continue_when_session_jsonl_present(tmp_path: Path
         prompt="x",
         bindings=bindings,  # type: ignore[arg-type]
     )
-    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue",)
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue", "--no-extensions")
 
 
 @pytest.mark.asyncio
@@ -244,7 +247,7 @@ async def test_run_rpc_omits_continue_when_session_empty(
         prompt="x",
         bindings=bindings,  # type: ignore[arg-type]
     )
-    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ()
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--no-extensions",)
     client_kwargs = _FakeRpcClient.instances[0].kwargs
     assert client_kwargs["env"]["HOME"] == str(agent_home)
     assert client_kwargs["env"]["GITHUB_TOKEN"] == ""
@@ -1106,7 +1109,7 @@ async def test_run_rpc_passes_fallback_overlay_config(
     )
 
     extra_args = _FakeRpcClient.instances[0].kwargs["extra_args"]
-    assert extra_args == ("--config", str(agent_home / ".omp" / "agent" / "carter-omp-fallback.yml"))
+    assert extra_args == ("--no-extensions", "--config", str(agent_home / ".omp" / "agent" / "carter-omp-fallback.yml"))
 
 
 @pytest.mark.asyncio
@@ -1123,7 +1126,7 @@ async def test_run_rpc_omits_config_without_fallback(
         bindings=bindings,  # type: ignore[arg-type]
     )
 
-    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ()
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--no-extensions",)
 
 
 def test_run_token_ttl_outlives_the_task_budget(settings: Settings) -> None:
