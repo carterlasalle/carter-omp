@@ -24,32 +24,44 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           UPSTREAM="can1357/oh-my-pi"
-          PATHS="python/robomp python/omp-rpc"
           KNOWN_FILE="docs/upstream.md"
           KNOWN=$(grep -oE 'Upstream commit used for extraction: `[0-9a-f]{40}`' "$KNOWN_FILE" | grep -oE '[0-9a-f]{40}' | head -1)
-          # Plus every hash recorded under "Later upstream commits".
-          SEEN="$KNOWN $(grep -oE '\b[0-9a-f]{40}\b' "$KNOWN_FILE" | sort -u | tr '\n' ' ')"
-          HEAD_SHA=$(gh api "repos/$UPSTREAM/commits?path=python/robomp&per_page=1" --jq '.[0].sha')
-          if [ -z "$HEAD_SHA" ]; then
-            echo "could not resolve upstream HEAD" >&2
+          if [ -z "$KNOWN" ]; then
+            echo "$KNOWN_FILE has no 'Upstream commit used for extraction' line; cannot diff" >&2
             exit 1
           fi
+          # Every hash already recorded in the file counts as seen.
+          SEEN="$KNOWN $(grep -oE '\b[0-9a-f]{40}\b' "$KNOWN_FILE" | sort -u | tr '\n' ' ')"
+          # Per-path commit lists instead of one giant `compare`: a compare
+          # spanning weeks of a monorepo returns no file list (and the old
+          # version swallowed that with `|| true`, so the watch went green and
+          # did nothing). Path-scoped commits are bounded and reliable.
+          RECENT="$(gh api "repos/$UPSTREAM/commits?path=python/robomp&sha=main&per_page=30" --jq '.[] | "\(.sha) \(.commit.message | split("\n")[0])"')
+          RECENT_IPC="$(gh api "repos/$UPSTREAM/commits?path=python/omp-rpc&sha=main&per_page=30" --jq '.[] | "\(.sha) \(.commit.message | split("\n")[0])"')"
+          NEW=""
+          while read -r sha subject; do
+            [ -n "$sha" ] || continue
+            if ! echo "$SEEN" | grep -qw "$sha"; then
+              NEW="${NEW}${sha} ${subject}"$'\n'
+            fi
+          done <<< "$(printf '%s\n%s\n' "$RECENT" "$RECENT_IPC")"
+          NEW="$(printf '%s' "$NEW" | head -10)"
+          if [ -z "$NEW" ]; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            echo "no new upstream commits since $KNOWN"
+            exit 0
+          fi
+          HEAD_SHA="$(printf '%s' "$NEW" | head -1 | cut -d' ' -f1)"
           echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-          if echo "$SEEN" | grep -qw "$HEAD_SHA"; then
-            echo "new=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Files touching robomp/omp-rpc since the extraction commit.
-          # (The compare API returns commits + a merged file list; the file
-          # list is authoritative, per-commit `.files` is not present here.)
-          CHANGED=$(gh api "repos/$UPSTREAM/compare/$KNOWN...$HEAD_SHA" --jq '[.files[] | select(.filename | startswith("python/robomp") or startswith("python/omp-rpc")) | .filename] | unique | .[]' 2>/dev/null || true)
-          if [ -z "$CHANGED" ]; then
-            echo "new=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          LOG=$(gh api "repos/$UPSTREAM/commits?path=python/robomp&sha=main&per_page=20" --jq '.[] | "- \(.sha[0:12]) \(.commit.message | split("\n")[0])"' | head -20)
-          LOG="$LOG"$'\n\n'"Files changed since extraction:"$'\n'"$CHANGED"
+          echo "known=$KNOWN" >> "$GITHUB_OUTPUT"
+          # Files each new commit touched under the vendored paths (bounded).
+          CHANGED="$(for sha in $(printf '%s' "$NEW" | cut -d' ' -f1); do
+              gh api "repos/$UPSTREAM/commits/$sha" \
+                --jq '.files[]?.filename | select(startswith("python/robomp") or startswith("python/omp-rpc"))'
+            done | sort -u)"
+          LOG="$NEW"$'\n\n'"Files changed since extraction:"$'\n'"$CHANGED"
           {
             echo "new=true"
             echo "log<<EOF"
@@ -79,6 +91,6 @@ jobs:
           Recent commits:
           ${{ steps.upstream.outputs.log }}
 
-          Compare: https://github.com/can1357/oh-my-pi/compare/${{ steps.upstream.outputs.head }}...main
+          Compare: https://github.com/can1357/oh-my-pi/compare/\${{ steps.upstream.outputs.known }}...\${{ steps.upstream.outputs.head }}
 
           To triage: review the diff for behavior/security impact on our explicit-trigger contract. To port: \`@carter-omp cherry-pick the <sha> changes into carter_omp per docs/upstream.md\`, then record the hash under \"Later upstream commits\" in \`docs/upstream.md\`."
