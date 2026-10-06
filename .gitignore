@@ -41,3 +41,4 @@ CODEX.md
 .coverage
 .coverage.*
 coverage.xml
+pyrightconfig.json
