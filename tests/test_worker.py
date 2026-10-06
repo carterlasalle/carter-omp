@@ -1059,3 +1059,68 @@ def test_rpc_env_scrubs_app_and_cloud_secrets(tmp_path: Path, settings: Settings
     finally:
         del os.environ["AWS_SECRET_ACCESS_KEY"]
         del os.environ["CARTER_OMP_GITHUB_APP_PRIVATE_KEY"]
+
+
+def test_write_fallback_chains_renders_default_overlay(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_home = tmp_path / "agent-home"
+    monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
+    cfg = settings.model_copy(update={"fallback_model": "openrouter/deepseek/deepseek-v4.1-flash, opencode-zen/x"})
+
+    path = worker._write_fallback_chains(cfg)
+
+    assert path == agent_home / ".omp" / "agent" / "carter-omp-fallback.yml"
+    body = path.read_text(encoding="utf-8")
+    assert "fallbackChains:" in body
+    assert body.rstrip().endswith('default: ["openrouter/deepseek/deepseek-v4.1-flash", "opencode-zen/x"]')
+    assert path.stat().st_mode & 0o777 == 0o644
+    # Idempotent: a second call is a no-op rewrite, still one file.
+    assert worker._write_fallback_chains(cfg) == path
+
+
+def test_write_fallback_chains_unset_writes_nothing(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_home = tmp_path / "agent-home"
+    monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
+
+    assert worker._write_fallback_chains(settings) is None
+    assert not agent_home.exists()
+
+
+@pytest.mark.asyncio
+async def test_run_rpc_passes_fallback_overlay_config(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_home = tmp_path / "agent-home"
+    monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
+    cfg = settings.model_copy(update={"fallback_model": "openrouter/deepseek/deepseek-v4.1-flash"})
+
+    inputs, bindings = _make_inputs(tmp_path, cfg, session_has_jsonl=False)
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
+
+    extra_args = _FakeRpcClient.instances[0].kwargs["extra_args"]
+    assert extra_args == ("--config", str(agent_home / ".omp" / "agent" / "carter-omp-fallback.yml"))
+
+
+@pytest.mark.asyncio
+async def test_run_rpc_omits_config_without_fallback(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker, "_AGENT_HOME", tmp_path / "agent-home")
+
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
+
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ()

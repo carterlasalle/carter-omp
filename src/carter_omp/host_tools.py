@@ -235,8 +235,9 @@ def _audit(
     )
 
 
+# trace:v1 id=impl.host-tools-raise-command work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _raise_command(message: str) -> NoReturn:
-    raise RpcCommandError(message, error={"message": message})
+    raise RpcCommandError(message, error=message)
 
 
 def _require_issue(bindings: ToolBindings) -> IssueInfo:
@@ -1079,12 +1080,14 @@ def _build_release_job_log(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 # ---------- release_retag ----------
+# trace:v1 id=impl.host-tools-release-retag work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_release_retag(bindings: ToolBindings) -> HostTool[Any, Any]:
     def refuse(args: Mapping[str, Any], message: str) -> NoReturn:
         _audit(bindings, "release_retag", args, error=message)
         _raise_command(message)
 
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> dict[str, Any]:
+    # trace:v1 id=impl.host-tools-release-retag-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         bindings.require(Capability.UPDATE_DEFAULT_BRANCH, "release_retag", args)
         bindings.require(Capability.MOVE_RELEASE_TAG, "release_retag", args)
         release = _require_release(bindings)
@@ -1218,7 +1221,9 @@ def _build_release_retag(bindings: ToolBindings) -> HostTool[Any, Any]:
             "round": row.rounds,
         }
         _audit(bindings, "release_retag", args, result={**result, "summary": summary})
-        return result
+        # HostTool results must be a text payload or str; a bare dict would be
+        # normalized without `content` and the agent would see empty output.
+        return f"retagged {release.repo} to {pushed.head[:12]} ({release.tag}); awaiting CI, round {row.rounds}"
 
     return host_tool(
         name="release_retag",
@@ -2120,6 +2125,7 @@ def _build_pr_review_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
     )
 
 
+# trace:v1 id=impl.host-tools-diff-anchorable-lines work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _diff_anchorable_lines(patch: str) -> tuple[frozenset[int], frozenset[int]]:
     """Map a unified-diff patch to (RIGHT, LEFT) anchorable line sets.
 
@@ -2143,10 +2149,9 @@ def _diff_anchorable_lines(patch: str) -> tuple[frozenset[int], frozenset[int]]:
         # `+++`/`---` are file headers only before the first hunk. Inside a
         # hunk a diff line's *content* may start with `++` (added) or `--`
         # (removed), and those lines must advance the counters.
-        in_hunk = new_line is not None and old_line is not None
-        if raw.startswith(("+++", "---")) and not in_hunk:
+        if raw.startswith(("+++", "---")) and (new_line is None or old_line is None):
             continue
-        if not in_hunk:
+        if new_line is None or old_line is None:
             continue
         if raw.startswith("+"):
             right.add(new_line)

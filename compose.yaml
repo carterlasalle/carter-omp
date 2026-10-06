@@ -73,6 +73,10 @@ services:
 
       # --- model selection ---
       CARTER_OMP_MODEL: ${CARTER_OMP_MODEL:-anthropic/claude-sonnet-4-6}
+      # Comma-separated fallback chain. OMP walks it when the primary model
+      # fails with a retryable provider error (dead provider, quota out);
+      # written to the agent's `--config` overlay at run time.
+      CARTER_OMP_FALLBACK_MODEL: ${CARTER_OMP_FALLBACK_MODEL:-}
       CARTER_OMP_PROVIDER: ${CARTER_OMP_PROVIDER:-}
       CARTER_OMP_THINKING: ${CARTER_OMP_THINKING:-high}
       # --- provider auth (interim direct passthrough) ---
@@ -82,6 +86,9 @@ services:
       # anything OMP can read, agent-executed code can printenv. A gateway
       # (transport: pi-native) removes this sharing when it exists.
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      # Credential for the OpenRouter leg of the fallback chain. Same sharing
+      # caveat as above.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
 
       # --- runtime tuning ---
       CARTER_OMP_MAX_CONCURRENCY: ${CARTER_OMP_MAX_CONCURRENCY:-8}

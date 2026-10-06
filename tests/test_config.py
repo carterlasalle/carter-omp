@@ -235,3 +235,13 @@ def test_strict_mode_rejects_bot_in_allowlist(monkeypatch: pytest.MonkeyPatch, e
     reset_settings_cache()
     with pytest.raises(ValidationError, match="bot login"):
         Settings()  # type: ignore[call-arg]
+
+
+def test_fallback_model_csv_parsing(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    monkeypatch.setenv("CARTER_OMP_FALLBACK_MODEL", " openrouter/deepseek/deepseek-v4.1-flash , opencode-zen/x,, ")
+    reset_settings_cache()
+    cfg = Settings()  # type: ignore[call-arg]
+    assert cfg.fallback_models == ("openrouter/deepseek/deepseek-v4.1-flash", "opencode-zen/x")
+    monkeypatch.delenv("CARTER_OMP_FALLBACK_MODEL")
+    reset_settings_cache()
+    assert Settings().fallback_models == ()  # type: ignore[call-arg]

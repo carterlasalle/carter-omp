@@ -103,13 +103,21 @@ carter-omp init-models
 ```
 
 Interactive picker: provider (openrouter, opencode-go, …), primary model,
-ordered fallbacks. It lists `omp models ls <provider>`, verifies each
-selector, then writes `~/.omp/agent/models.container.yml` as an OMP
-**provider override** (mounted into the container as `models.yml`): the
+then a cross-provider fallback chain. It lists `omp models ls <provider>`,
+verifies each selector, then writes `~/.omp/agent/models.container.yml` as an
+OMP **provider override** (mounted into the container as `models.yml`): the
 container routes through a host-side auth gateway (`transport: pi-native`)
-so raw provider credentials never enter the agent container. It prints the
-`CARTER_OMP_MODEL` pool to paste into `.env` — model selection lives there,
-not in the OMP file. API keys stay wherever OMP already keeps them.
+so raw provider credentials never enter the agent container. It prints
+`CARTER_OMP_MODEL` and `CARTER_OMP_FALLBACK_MODEL` to paste into `.env` —
+model selection lives there, not in the OMP file. API keys stay wherever OMP
+already keeps them.
+
+`CARTER_OMP_FALLBACK_MODEL` is a comma-separated chain OMP walks when a turn's
+model fails with a retryable provider error (provider down, quota exhausted).
+carter-omp renders it into a per-run `omp --config` overlay keyed on `default`,
+so it applies to whichever model the pool picked. The fallback provider's
+credential must also be in the container env — `OPENROUTER_API_KEY` for
+`openrouter/…` selectors.
 
 ## 6. VPS: from bare Ubuntu to TLS ingress
 

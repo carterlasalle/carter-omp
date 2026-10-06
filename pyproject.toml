@@ -102,9 +102,9 @@ exclude_also = [
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
-# Baseline: 19 known errors (6 files) as of 2026-09-24 — mostly vendored-RPC
-# generic variance, Optional-narrowing, and Row-type unions. Fix incrementally;
-# do not add new errors (`mypy src/carter_omp` count must not exceed 19).
+# Baseline: 0 errors as of 2026-10-06. The former 19-error baseline (vendored
+# RPC generic variance, Optional-narrowing, Row-type unions) was cleared with
+# real fixes; the gate fails on any new error (`mypy src/carter_omp`).
 # See docs/agent-notes.md.
 show_error_codes = true
 

@@ -4867,7 +4867,12 @@ def test_release_retag_atomically_publishes_and_awaits_ci(db: Database, tmp_path
     finally:
         _stop_loop(loop, thread)
 
-    assert result == {"pushed": new_head, "tag": "v1.2.3", "round": 1}
+    # Text, not a bare dict: a dict normalizes to a payload with no `content`
+    # block, so the agent would see an empty tool result.
+    assert isinstance(result, str)
+    assert f"to {new_head[:12]}" in result
+    assert "v1.2.3" in result
+    assert "awaiting CI" in result
     assert len(transport.calls) == 1
     assert transport.calls[0]["workspace_key"] == "octo__widget__release"
     row = db.get_release("octo/widget#v1.2.3")

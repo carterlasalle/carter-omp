@@ -936,8 +936,11 @@ def route(
     repo = _repo_full_name(payload)
     if repo is None or repo.lower() not in allowlist:
         owner = repo.split("/")[0].lower() if repo and "/" in repo else None
-        if owner not in (allowed_repo_owners or frozenset()):
+        if repo is None or owner not in (allowed_repo_owners or frozenset()):
             return RouteDecision("skip", None, repo, None, "repo not on allowlist")
+        # Owner-admitted: the owners set can only match a named repo, so the
+        # payload did carry one (narrows `str | None` to `str` below).
+        assert repo is not None
 
     action = str(payload.get("action") or "")
 
@@ -967,18 +970,18 @@ def route(
         allowed_repo_owners=allowed_repo_owners,
     )
     if not authz.authorized:
-        key: str | None = None
-        number: Any = None
+        unauthorized_key: str | None = None
+        unauthorized_number: Any = None
         container = payload.get("issue") or payload.get("pull_request")
         if isinstance(container, Mapping):
-            number = container.get("number")
-        if isinstance(number, int):
-            key = issue_key(repo, number)
+            unauthorized_number = container.get("number")
+        if isinstance(unauthorized_number, int):
+            unauthorized_key = issue_key(repo, unauthorized_number)
         return RouteDecision(
             "skip",
             None,
             repo,
-            key,
+            unauthorized_key,
             authz.reason,
             submitter=authz.actor.login if authz.actor else None,
             authz=authz,

@@ -12,7 +12,7 @@ from contextlib import suppress
 from carter_omp import tasks
 from carter_omp.cancellation import clear_current_event, set_current_event
 from carter_omp.config import Settings
-from carter_omp.db import Database, EventRow
+from carter_omp.db import Database, EventRow, IssueState
 from carter_omp.github_backend import GitHubBackend
 from carter_omp.sandbox import GitTransport, SandboxManager, _reap_slot
 from carter_omp.slot_pool import SlotPool
@@ -513,7 +513,7 @@ class WorkerPool:
             )
         elif event == "pull_request" and action == "closed":
             pr = row.payload.get("pull_request") or {}
-            target_state = "merged" if bool(pr.get("merged")) else "closed"
+            target_state: IssueState = "merged" if bool(pr.get("merged")) else "closed"
             await tasks.cleanup_workspace(
                 db=self.db,
                 sandbox=self.sandbox,

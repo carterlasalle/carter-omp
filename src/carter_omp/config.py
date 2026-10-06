@@ -162,6 +162,10 @@ class Settings(BaseSettings):
 
     # Model selection
     model: str = Field("anthropic/claude-sonnet-4-6", alias="CARTER_OMP_MODEL")
+    # Comma-separated fallback chain OMP walks when the primary model fails
+    # with a retryable provider error. Its provider credential must be in the
+    # container env (`OPENROUTER_API_KEY` for `openrouter/…` selectors).
+    fallback_model: str = Field("", alias="CARTER_OMP_FALLBACK_MODEL")
     provider: str | None = Field(None, alias="CARTER_OMP_PROVIDER")
     thinking_level: ThinkingLevel = Field("high", alias="CARTER_OMP_THINKING")
 
@@ -477,6 +481,12 @@ class Settings(BaseSettings):
         """Random selection from the pool (uniform). One-element pools return that one."""
         return random.choice(self.model_pool)
 
+    # trace:v1 id=impl.config-fallback-models work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @property
+    def fallback_models(self) -> tuple[str, ...]:
+        """Parsed `CARTER_OMP_FALLBACK_MODEL` chain (empty when unset)."""
+        return tuple(piece.strip() for piece in self.fallback_model.split(",") if piece.strip())
+
     @property
     def release_model_pool(self) -> tuple[str, ...]:
         """Release-specific model pool, falling back to the general pool."""
@@ -576,6 +586,7 @@ class _ProxyEnvLoader(BaseSettings):
     log_dir: Path = Field(Path("./data/logs"), alias="CARTER_OMP_LOG_DIR")
     github_proxy_max_body_bytes: int = Field(1 << 20, alias="CARTER_OMP_GH_PROXY_MAX_BODY_BYTES")
     github_proxy_git_timeout_seconds: float = Field(60.0, alias="CARTER_OMP_GH_PROXY_GIT_TIMEOUT_SECONDS")
+
     @field_validator("github_proxy_hmac_key", mode="before")
     @classmethod
     def _reject_blank(cls, value: object) -> object:

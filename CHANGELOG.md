@@ -24,3 +24,20 @@ versions are `Unreleased` until the first tagged release.
 - Docs: `architecture.md`, `security.md`, `setup.md`, `triggers.md`,
   `github-app.md`, `upstream.md`, `upstream-parity.md`, `agent-notes.md`.
 - Baseline: `CONTRIBUTING.md`, `SECURITY.md`, Dependabot, CodeQL, secret scan.
+- Cross-provider model fallback: `CARTER_OMP_FALLBACK_MODEL` is a
+  comma-separated chain rendered into a per-run `omp --config` overlay
+  (`retry.fallbackChains.default`), so a dead or quota-exhausted primary
+  provider degrades to the chain (e.g. OpenRouter) instead of failing the run.
+- Pickup acknowledgement: the bot reacts 👀 to the triggering comment, or to
+  the issue itself for label triggers, through the per-run capability token.
+
+### Fixed
+
+- `github-proxy` enforced a parallel allowlist that ignored
+  `CARTER_OMP_REPO_OWNERS`, so owner-scoped repos (e.g. `mac_messages_mcp`)
+  were rejected with `repo not in proxy allowlist`. Both processes now share
+  one scope predicate.
+- The pickup reaction was dead on arrival: it called the reaction endpoint on
+  the unscoped client (HMAC only, no run token) and the resulting 401 was
+  swallowed. It now runs after run-token attachment, at the single choke point
+  covering issue comments, PR conversations, and label triggers.

@@ -292,6 +292,26 @@ fi
 if ! env_set CARTER_OMP_THINKING; then
   set_kv CARTER_OMP_THINKING high && pass "thinking=high (default)"
 fi
+if ! env_set CARTER_OMP_FALLBACK_MODEL; then
+  echo ""
+  echo "  CARTER_OMP_FALLBACK_MODEL — selector(s) OMP uses when the primary model"
+  echo "  fails on a provider error. This is what keeps runs alive when a provider"
+  echo "  dies or hits quota. e.g. openrouter/deepseek/deepseek-v4.1-flash."
+  printf "%s" "  Fallback chain (empty to skip): "
+read_tty FALLBACK
+  if [ -n "$FALLBACK" ]; then
+    set_kv CARTER_OMP_FALLBACK_MODEL "$FALLBACK"
+    pass "fallback chain set"
+    if ! env_set OPENROUTER_API_KEY; then
+      echo "  The fallback provider needs its credential in .env (e.g. OPENROUTER_API_KEY)."
+      printf "%s" "  OPENROUTER_API_KEY (empty to set later): "
+read_tty OPENROUTER_KEY
+      [ -n "$OPENROUTER_KEY" ] && set_kv OPENROUTER_API_KEY "$OPENROUTER_KEY" && pass "openrouter credential set"
+    fi
+  else
+    todo "no fallback chain — a dead primary provider fails every run"
+  fi
+fi
 
 # --- 8. start + report -----------------------------------------------------------
 step "8. Start and report"

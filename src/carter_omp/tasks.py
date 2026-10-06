@@ -977,6 +977,7 @@ async def handle_pr_conversation(
         log.warning("pr-conversation fetch failed", extra={"err": str(exc)})
         return
     clone_url = repo.clone_url
+    existing_branch: str | None
     if issue_row is None:
         assert pr_info is not None
         existing_branch = pr_info.head_ref

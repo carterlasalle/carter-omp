@@ -10,11 +10,14 @@ findings: mypy errors, bandit B324 (SHA-1), and uncovered-code unknowns.
 
 ## Decisions
 
-- **mypy non-strict baseline (19 errors, 6 files), not strict.** `strict = true`
-  fails 43 errors, mostly vendored-RPC generic variance (`HostTool[Any, Any]`
-  vs `HostToolResultValue`), `Optional`-narrowing in hot paths, and Row-type
-  unions. Fixing those means touching security-critical code for type-cosmetics.
-  CI enforces the count does not grow; `docs/agent-notes.md` records the plan.
+- **mypy non-strict, baseline 0 errors (was 19).** The 19-error baseline —
+  vendored-RPC generic variance (`HostTool[Any, Any]` vs `HostToolResultValue`),
+  `Optional`-narrowing in hot paths, Row-type unions — has been cleared with
+  real fixes rather than a raised baseline. One was a live defect: the
+  `release_retag` host tool returned a bare dict, which normalized to a payload
+  without `content` (the agent silently saw no tool output). `strict = true`
+  still fails on vendored-RPC variance. CI fails on any new error;
+  `docs/agent-notes.md` records the history.
 - **bandit with documented skips, not per-line `nosec`.** B101/B104/B404/B603/
   B607/B608/B105/B311 are all triaged in `pyproject.toml` with reasons. The one
   real finding (B324 SHA-1 in `_short_hex`) was fixed at the root cause
@@ -35,6 +38,6 @@ findings: mypy errors, bandit B324 (SHA-1), and uncovered-code unknowns.
 
 ## Consequences
 
-- CI runs: ruff, pytest+cov (≥70%), mypy (≤19 errors), vulture, bandit, pip-audit,
+- CI runs: ruff, pytest+cov (≥70%), mypy (0 errors), vulture, bandit, pip-audit,
   CodeQL, gitleaks, Docker build.
-- Follow-up: drive mypy 19 → 0 incrementally; raise coverage floor toward 85%.
+- Follow-up: raise the coverage floor toward 85%.
