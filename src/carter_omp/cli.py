@@ -639,18 +639,29 @@ def _upsert_env_file(path: Path, updates: Mapping[str, str]) -> list[str]:
     return changed
 
 
-# trace:v1 id=impl.cli-app-slug work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
-def _app_slug(*, app_id: str, private_key_pem: str, transport: object | None = None) -> str | None:
-    """The App's public slug, for building the one-click install URL."""
+# trace:v1 id=impl.cli-app-get work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _app_get(path: str, *, app_id: str, private_key_pem: str, transport: object | None = None) -> object | None:
+    """`app_auth.app_get` that yields None instead of raising.
+
+    Network hiccups and JWT problems must not turn a "is the App installed
+    here?" question into a traceback — the caller reports the install link
+    instead.
+    """
     from carter_omp.app_auth import app_get
 
     try:
-        resp = app_get("/app", app_id=app_id, private_key_pem=private_key_pem, transport=transport)  # type: ignore[arg-type]
+        return app_get(path, app_id=app_id, private_key_pem=private_key_pem, transport=transport)  # type: ignore[arg-type]
     except Exception:
         return None
-    if resp.status_code >= 400:
+
+
+# trace:v1 id=impl.cli-app-slug work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _app_slug(*, app_id: str, private_key_pem: str, transport: object | None = None) -> str | None:
+    """The App's public slug, for building the one-click install URL."""
+    resp = _app_get("/app", app_id=app_id, private_key_pem=private_key_pem, transport=transport)
+    if resp is None or getattr(resp, "status_code", 500) >= 400:
         return None
-    slug = resp.json().get("slug")
+    slug = resp.json().get("slug")  # type: ignore[attr-defined]
     return str(slug) if isinstance(slug, str) and slug else None
 
 
@@ -659,17 +670,13 @@ def _installation_for_owner(
     owner: str, *, app_id: str, private_key_pem: str, transport: object | None = None
 ) -> int | None:
     """Installation id for an org or user account, or None when not installed."""
-    from carter_omp.app_auth import app_get
-
     for path in (f"/orgs/{owner}/installation", f"/users/{owner}/installation"):
-        try:
-            resp = app_get(path, app_id=app_id, private_key_pem=private_key_pem, transport=transport)  # type: ignore[arg-type]
-        except Exception:
+        resp = _app_get(path, app_id=app_id, private_key_pem=private_key_pem, transport=transport)
+        if resp is None or getattr(resp, "status_code", 500) != 200:
             continue
-        if resp.status_code == 200:
-            installation_id = resp.json().get("id")
-            if isinstance(installation_id, int):
-                return installation_id
+        installation_id = resp.json().get("id")  # type: ignore[attr-defined]
+        if isinstance(installation_id, int):
+            return installation_id
     return None
 
 
