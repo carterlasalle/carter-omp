@@ -289,3 +289,15 @@ def test_kickoff_renders_every_comment_inline() -> None:
     assert "also fails on Linux" in out
     assert "@alice" in out and "@bob" in out
     assert "## Comments on this issue" in out
+
+
+def test_system_prompts_prune_tracelayer() -> None:
+    """The sandbox has no `trace` binary by design; a repo's TraceLayer hooks
+    must not become a gate the agent burns time trying to satisfy (its
+    `uv run trace` fallback hangs ~180s per call and aborts runs)."""
+    for out in (
+        persona.system_append(repo=_Repo(), issue=_Issue(), workspace=_Workspace(), bot_login="carter-omp"),
+        persona.system_append_pr_review(repo=_Repo(), issue=_Issue(), workspace=_Workspace(), bot_login="carter-omp"),
+    ):
+        assert "TraceLayer (`trace`) is absent by design" in out
+        assert "NEVER install, run, or wait on it" in out

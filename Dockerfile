@@ -84,6 +84,20 @@ RUN case "${TARGETARCH:-amd64}" in \
     && rm -rf /tmp/bun.zip /tmp/bun-extract \
     && bun --version
 
+# TraceLayer (`trace`) is deliberately NOT installed. Some repos wire their own
+# agent hooks/instructions to it (`.pi/hooks.json` -> `.pi/trace-hook.sh`), and
+# running a repo-provided gate inside this sandbox would bind our runs to that
+# repo's tooling. Leaving the binary absent is worse than it sounds: the
+# adapter's fallback is `uv run trace`, which hangs ~180s per call resolving
+# dependencies, so runs stall for minutes between tool calls and then abort.
+# A fast-failing shim makes any attempt cheap and explicit instead.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'echo "trace: TraceLayer CLI is not available in this sandbox; TraceLayer gating is skipped. Note it in your summary and continue." >&2' \
+      'exit 1' > /usr/local/bin/trace \
+    && chmod 0755 /usr/local/bin/trace \
+    && /usr/local/bin/trace; test $? -eq 1
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock* ./
