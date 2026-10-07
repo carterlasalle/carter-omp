@@ -370,14 +370,53 @@ def _require_run_repo(token: RunToken, repo: str) -> None:
         raise HTTPException(403, "run token repo mismatch")
 
 
+# trace:v1 id=impl.proxy-run-branch-namespace work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _run_branch_namespace(branch: str) -> str | None:
+    """`carter-omp/<hex>/…` → `carter-omp/<hex>`, else None.
+
+    `<hex>` identifies one workspace/run. A sanctioned rename
+    (`classify_issue(branch_slug=…)` → `rename_workspace_branch`) keeps that
+    segment and only swaps the slug, so namespace identity survives a rename
+    while still separating one run's branches from another's.
+    """
+    parts = branch.split("/")
+    if len(parts) >= 3 and parts[0] == "carter-omp" and parts[1]:
+        return f"{parts[0]}/{parts[1]}"
+    return None
+
+
+# trace:v1 id=impl.proxy-require-run-thread work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _require_run_thread(token: RunToken, number: int) -> None:
-    if token.issue is not None and token.issue != number:
+    """Accept the originating issue OR the PR this run opened.
+
+    Both threads belong to the same authorized run; a token pinned to the
+    issue alone rejects every follow-up (review request, reply, label edit) on
+    the PR the run just created.
+    """
+    allowed = {n for n in (token.issue, token.pull_request) if n is not None}
+    if allowed and number not in allowed:
         raise HTTPException(403, "run token thread mismatch")
 
 
+# trace:v1 id=impl.proxy-require-run-branch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _require_run_branch(token: RunToken, branch: str) -> None:
-    if token.branch is not None and token.branch != branch:
-        raise HTTPException(403, "run token branch mismatch")
+    """Accept the token's branch or another branch in the same run namespace.
+
+    The exact branch is pinned at mint time, but a run may legitimately rename
+    its own workspace branch (classify_issue branch_slug) — the rename keeps
+    `carter-omp/<hex>/`, so the namespace is the real boundary. Failures name
+    both accepted scopes so a caller can see what was expected instead of
+    guessing.
+    """
+    if token.branch is None or branch == token.branch:
+        return
+    token_namespace = _run_branch_namespace(token.branch)
+    if token_namespace is not None and _run_branch_namespace(branch) == token_namespace:
+        return
+    raise HTTPException(
+        403,
+        f"run token branch mismatch: {branch!r} is outside {token_namespace or token.branch!r}",
+    )
 
 
 def _require_push_namespace(branch: str) -> None:

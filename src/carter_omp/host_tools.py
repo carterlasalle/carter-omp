@@ -285,6 +285,13 @@ class ToolBindings:
     release: ReleaseToolContext | None = None
     # Per-run telemetry for the message footer; None outside a real run.
     stats: RunStats | None = None
+    # Re-mint the per-run proxy token from the run's *current* branch/PR.
+    # The token is minted before the agent starts, but the run's identity
+    # changes mid-flight (classify_issue renames the workspace branch; the
+    # run opens its own PR), and the proxy pins what the token covers. Tools
+    # that change either call this so the token never lags reality.
+    # `None` in tests / legacy paths with no run token.
+    refresh_run_token: Callable[[str | None, int | None], None] | None = None
 
     @property
     def issue_key(self) -> str:
@@ -852,6 +859,20 @@ def _schedule_autoclose(bindings: ToolBindings, *, comment_id: int, hours: float
     return close_at
 
 
+# ---------- telemetry footer ----------
+# trace:v1 id=impl.host-tools-footer-suffix work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _footer_suffix(bindings: ToolBindings) -> str:
+    """Telemetry footer for any bot-authored GitHub text.
+
+    Empty outside a real run (no stats on the bindings). Applied at every
+    surface that publishes text on the bot's behalf — comments, PR bodies and
+    review bodies — so a reader always sees which model wrote it, how long it
+    took, and what it cost.
+    """
+    stats = bindings.stats
+    return "" if stats is None else stats.footer()
+
+
 # ---------- gh_post_comment ----------
 # trace:v1 id=impl.host-tools-post-comment work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
@@ -871,8 +892,7 @@ def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
         body_to_post = body
         if schedule_close is not None:
             body_to_post = f"{body.rstrip()}\n\n{persona.question_autoclose_suffix(schedule_close)}"
-        if bindings.stats is not None:
-            body_to_post = f"{body_to_post.rstrip()}{bindings.stats.footer()}"
+        body_to_post = f"{body_to_post.rstrip()}{_footer_suffix(bindings)}"
         try:
             comment = _run_coro(
                 bindings.loop,
@@ -1483,9 +1503,8 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
                 "GitHub auto-closes the issue when the PR merges. Put it at the end of the "
                 "Verification section per the template."
             )
-        if bindings.stats is not None:
-            # Same footer as comments: which model, how long, what it cost.
-            body = f"{body.rstrip()}{bindings.stats.footer()}"
+        # Same footer as comments: which model, how long, what it cost.
+        body = f"{body.rstrip()}{_footer_suffix(bindings)}"
         _run_pre_publish_bun_fix(bindings, args, tool_name="gh_open_pr", stage="open PR")
         _run_pre_publish_bun_check(bindings, args, tool_name="gh_open_pr", stage="open PR")
         # Last and slowest: the suite runs against the tree that is actually
@@ -1512,6 +1531,17 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
             _raise_command(f"GitHub rejected PR: {exc.status} {exc.message}")
         bindings.db.set_issue_pr(bindings.issue_key, pr.number)
         bindings.db.set_issue_state(bindings.issue_key, "opened")
+        # The run owns this PR thread now (review requests, replies, label
+        # edits). The token was minted with the originating issue only, so
+        # re-mint before anything tries to touch the PR.
+        if bindings.refresh_run_token is not None:
+            try:
+                bindings.refresh_run_token(None, pr.number)
+            except Exception as exc:  # noqa: BLE001 — PR is open; the token only widens follow-ups
+                log.warning(
+                    "run token refresh after PR open failed",
+                    extra={"issue": bindings.issue_key, "pr": pr.number, "err": str(exc)[:200]},
+                )
         needs_info_label_cleared = _remove_needs_info_label(bindings) if was_needs_info else False
         artifact = bindings.workspace.artifacts_dir / "pr.json"
         artifact.write_text(
@@ -1670,7 +1700,9 @@ def _build_repro_record(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 # ---------- mark_unable_to_reproduce ----------
+# trace:v1 id=impl.host-tools-mark-unable work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_mark_unable(bindings: ToolBindings) -> HostTool[Any, Any]:
+    # trace:v1 id=impl.host-tools-mark-unable-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         diagnosis = args.get("diagnosis")
         needed = args.get("info_needed")
@@ -1682,6 +1714,7 @@ def _build_mark_unable(bindings: ToolBindings) -> HostTool[Any, Any]:
             diagnosis=diagnosis,
             info_needed=needed,
         )
+        body = f"{body.rstrip()}{_footer_suffix(bindings)}"
         try:
             comment = _run_coro(
                 bindings.loop,
@@ -2375,7 +2408,9 @@ def _filter_anchorable_comments(staged: list[Any], files: list[PullRequestFileIn
     return anchorable, dropped
 
 
+# trace:v1 id=impl.host-tools-submit-pr-review work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
+    # trace:v1 id=impl.host-tools-submit-pr-review-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         _require_review_mode(bindings, "submit_pr_review", args)
         body = args.get("body")
@@ -2400,7 +2435,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                 commit_id = pr.head_sha or None
             except GitHubError:
                 commit_id = None
-        body = body.strip()
+        body = f"{body.strip()}{_footer_suffix(bindings)}"
         dropped: list[Any] = []
         if staged:
             try:
@@ -2582,11 +2617,13 @@ def _build_set_issue_labels(bindings: ToolBindings) -> HostTool[Any, Any]:
     )
 
 
+# trace:v1 id=impl.host-tools-classify-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
     """Triage step. Pick a primary type, optional priority/functional/provider/platform,
     apply labels on GitHub, persist the primary type in sqlite, and signal which workflow
     branch the agent should follow."""
 
+    # trace:v1 id=impl.host-tools-classify-issue-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         existing = bindings.db.get_issue(bindings.issue_key)
         if bindings.inbound_is_pr:
@@ -2676,6 +2713,17 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
                 # refactor of that helper still surfaces the mismatch.
                 _raise_command("classify_issue internal: branch rename inconsistent.")
             bindings.db.set_issue_branch(bindings.issue_key, renamed_to)
+            # The run token pinned the pre-rename branch at mint time; the
+            # proxy re-checks it on every push/PR. Hand it the branch the run
+            # is actually on now, or publishing 403s after the work is done.
+            if bindings.refresh_run_token is not None:
+                try:
+                    bindings.refresh_run_token(renamed_to, None)
+                except Exception as exc:  # noqa: BLE001 — publishing still works via the run namespace
+                    log.warning(
+                        "run token refresh after rename failed",
+                        extra={"issue": bindings.issue_key, "branch": renamed_to, "err": str(exc)[:200]},
+                    )
 
         try:
             applied = _run_coro(

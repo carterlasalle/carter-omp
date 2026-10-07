@@ -14,11 +14,31 @@ import type {
 const BASE_RUNTIME: RuntimeInfo = {
   bot_login: "carter_omp",
   repo_allowlist: [],
+  repo_owners: [],
+  installation_ids: [],
   max_concurrency: 1,
   model: "test-model",
+  model_pool: ["test-model"],
+  fallback_models: [],
   thinking_level: "low",
+  trigger_mode: "label",
+  trigger_label: "carter-omp",
+  issue_index_sync_seconds: 900,
   uptime_seconds: 0,
 };
+
+function spend() {
+  return {
+    runs: 0,
+    cost_usd: 0,
+    cache_cost_usd: 0,
+    miss_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    fallback_runs: 0,
+  };
+}
 
 function eventCounts(): Record<EventState, number> {
   return {
@@ -40,6 +60,16 @@ function status(overrides: Partial<StatusResponse> = {}): StatusResponse {
     issues: [],
     releases: [],
     recent_events: [],
+    system: {
+      queue: { pending: [], dead_letters: [], retry_budget: 3 },
+      index: [],
+      runs: [],
+      spend: {
+        today: spend(),
+        week: spend(),
+        all_time: spend(),
+      },
+    },
     ...overrides,
   };
 }

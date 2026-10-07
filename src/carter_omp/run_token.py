@@ -33,6 +33,12 @@ class RunToken:
     repo_id: int
     repo: str
     issue: int | None
+    # The PR this run opened, once it exists. The run owns both threads: the
+    # originating issue and the PR it created from its own branch, so the
+    # proxy accepts either (review requests, replies, label edits on the run's
+    # own PR) — a token pinned to the issue alone 403s every follow-up on the
+    # PR the run just opened.
+    pull_request: int | None
     workspace: str | None
     branch: str | None
     capabilities: frozenset[str]
@@ -48,6 +54,7 @@ def _b64d(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
 
 
+# trace:v1 id=impl.run-token-mint work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def mint_run_token(
     *,
     key: bytes,
@@ -55,6 +62,7 @@ def mint_run_token(
     repo_id: int,
     repo: str,
     issue: int | None = None,
+    pull_request: int | None = None,
     workspace: str | None = None,
     branch: str | None = None,
     capabilities: frozenset[str] | set[str] | tuple[str, ...] | list[str],
@@ -68,6 +76,7 @@ def mint_run_token(
         "repo_id": repo_id,
         "repo": repo,
         "issue": issue,
+        "pull_request": pull_request,
         "workspace": workspace,
         "branch": branch,
         "capabilities": sorted(set(capabilities)),
@@ -79,6 +88,7 @@ def mint_run_token(
     return _b64e(body) + "." + _b64e(sig)
 
 
+# trace:v1 id=impl.run-token-verify work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def verify_run_token(*, key: bytes, token: str | None, now: float | None = None) -> RunToken | None:
     """Verify a run token. Returns the parsed token or None on any failure."""
     if not token or "." not in token:
@@ -102,11 +112,13 @@ def verify_run_token(*, key: bytes, token: str | None, now: float | None = None)
         if now_int > exp:
             return None
         issue = payload.get("issue")
+        pull_request = payload.get("pull_request")
         return RunToken(
             run_id=str(payload["run_id"]),
             repo_id=int(payload["repo_id"]),
             repo=str(payload["repo"]),
             issue=None if issue is None else int(issue),
+            pull_request=None if pull_request is None else int(pull_request),
             workspace=str(payload["workspace"]) if payload.get("workspace") is not None else None,
             branch=str(payload["branch"]) if payload.get("branch") is not None else None,
             capabilities=frozenset(str(c) for c in (payload.get("capabilities") or [])),

@@ -49,6 +49,7 @@ GitHub is untrusted input. The signed webhook's `sender.id` and `repository.id` 
 | Search | Issue/commit search, reviewer requests, thread context with provenance |
 | Sessions | Persistent per-issue transcripts (`--continue` resume), crash recovery, durable SQLite queue, per-issue serialization |
 | Operations | Dashboard with trigger/actor/decision/capability columns, audited host-tool actions, cancellation, model/thinking overrides |
+| Spend + telemetry | Per-run model/duration/cost/tokens recorded by the worker, aggregated per day/week/all-time in the console's **System** view; every bot-authored GitHub text (comments, PR bodies, review bodies) carries the model/duration/cost footer |
 | Release repair | Elevated default-branch/tag capabilities via explicit `@carter-omp release-fix` only |
 
 ## Quick start

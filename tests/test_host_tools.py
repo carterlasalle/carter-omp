@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -2245,6 +2246,10 @@ def test_classify_issue_renames_branch_when_slug_provided(db: Database, tmp_path
     )
     # The stub workspace's initial branch matches `_stub_workspace`.
     _init_git_repo(bindings.workspace.repo_dir, bindings.workspace.branch)
+    # The run token pinned this branch at mint time; the rename must hand the
+    # proxy the branch the run is actually on (issue #14).
+    refreshes: list[tuple[str | None, int | None]] = []
+    object.__setattr__(bindings, "refresh_run_token", lambda branch, pr: refreshes.append((branch, pr)))
     try:
         tool = next(x for x in build(bindings) if x.name == "classify_issue")
         result = tool.execute(
@@ -2260,6 +2265,7 @@ def test_classify_issue_renames_branch_when_slug_provided(db: Database, tmp_path
         _stop_loop(loop, t)
 
     assert "branch renamed to" in result.lower()
+    assert refreshes == [("carter-omp/abc12345/fix-windows-env-colon-vars", None)]
     assert bindings.workspace.branch == "carter-omp/abc12345/fix-windows-env-colon-vars"
     row = db.get_issue(bindings.issue_key)
     assert row is not None and row.branch == "carter-omp/abc12345/fix-windows-env-colon-vars"
@@ -3925,7 +3931,6 @@ def test_gh_open_pr_runs_fix_then_check_and_amends_formatter_diff(
             branch=ws.branch,
             session_dir=str(ws.session_dir),
         )
-        db.set_issue_classification(bindings.issue_key, "bug")
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
         body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
         result = tool.execute({"title": "fix: x", "body": body}, _ctx())
@@ -4441,6 +4446,10 @@ def test_gh_open_pr_skips_fix_when_no_script(db: Database, tmp_path: Path, monke
             session_dir=str(ws.session_dir),
         )
         db.set_issue_classification(bindings.issue_key, "bug")
+        # The run owns the PR it just opened: re-mint so review requests and
+        # replies on that thread clear the proxy's thread check (issue #14).
+        refreshes: list[tuple[str | None, int | None]] = []
+        object.__setattr__(bindings, "refresh_run_token", lambda branch, pr: refreshes.append((branch, pr)))
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
         body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
         result = tool.execute({"title": "fix: x", "body": body}, _ctx())
@@ -4450,6 +4459,7 @@ def test_gh_open_pr_skips_fix_when_no_script(db: Database, tmp_path: Path, monke
     assert not fix_calls.exists()
     assert check_calls.read_text() == "called"
     assert "opened #7" in result
+    assert refreshes == [(None, 7)]
 
 
 # -------- gh_post_comment + question auto-close ---------------------------
@@ -5165,3 +5175,44 @@ def test_run_stats_answered_model_ignores_the_configured_one() -> None:
     stats.note_answered_model(None, None)
     stats.note_answered_model("openrouter", "other/model")
     assert stats.fallback_model == "openrouter/deepseek/deepseek-v4.1-flash"
+
+
+def test_review_body_carries_the_telemetry_footer(db: Database, tmp_path: Path) -> None:
+    """PR reviews are bot-authored text too: the review summary must show the
+    model, duration and spend, not just issue comments and PR bodies."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": 46,
+                "user": {"login": "carter_omp-bot"},
+                "body": "ok",
+                "state": "COMMENTED",
+                "submitted_at": "t",
+            },
+        )
+
+    bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
+    object.__setattr__(
+        bindings,
+        "stats",
+        host_tools.RunStats(model="opencode-go/muse-spark-1.3-contributor", started_monotonic=time.monotonic()),
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
+        tool.execute({"body": "one correctness note"}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    body = captured["body"]["body"]
+    assert body.startswith("one correctness note")
+    assert body.rstrip().endswith("</sub>")
+    assert "`opencode-go/muse-spark-1.3-contributor`" in body
+
+
+def test_footer_suffix_is_empty_outside_a_run() -> None:
+    bindings = SimpleNamespace(stats=None)
+    assert host_tools._footer_suffix(bindings) == ""  # type: ignore[arg-type]

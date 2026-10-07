@@ -1,11 +1,13 @@
 import { type JSX, Show } from "solid-js";
 
 import { CONFIG } from "../../config";
+import { statusResource } from "../../state";
 import { activeView, setActiveView, type View } from "../../view";
 import { ThemeToggle } from "../ThemeToggle";
 import { Vitals } from "./Vitals";
 
 // Inline nav glyphs — carter_omp has no icon library.
+// trace:v1 id=impl.web-src-components-shell-rail.activity-icon work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
 function ActivityIcon(): JSX.Element {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -33,6 +35,18 @@ function TriageIcon(): JSX.Element {
     </svg>
   );
 }
+// trace:v1 id=impl.web-src-components-shell-rail.system-icon work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
+function SystemIcon(): JSX.Element {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4 20h16" />
+      <path d="M7 20v-7" />
+      <path d="M12 20V6" />
+      <path d="M17 20v-4" />
+    </svg>
+  );
+}
 function LockIcon(): JSX.Element {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -48,14 +62,26 @@ interface NavDef {
   label: string;
   icon: () => JSX.Element;
   locked: boolean;
+  /** Live count rendered as a badge; 0 hides it. */
+  badge?: () => number;
+  badgeTitle?: string;
 }
 
 const NAV: NavDef[] = [
   { id: "operations", label: "Operations", icon: OpsIcon, locked: false },
   { id: "activity", label: "Activity", icon: ActivityIcon, locked: false },
   { id: "triage", label: "Triage", icon: TriageIcon, locked: !CONFIG.replayEnabled },
+  {
+    id: "system",
+    label: "System",
+    icon: SystemIcon,
+    locked: false,
+    badge: () => statusResource()?.system?.queue.dead_letters.length ?? 0,
+    badgeTitle: "events that exhausted their retry budget",
+  },
 ];
 
+// trace:v1 id=impl.web-src-components-shell-rail.rail work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
 export function Rail(): JSX.Element {
   return (
     <aside class="rmp-rail">
@@ -85,6 +111,11 @@ export function Rail(): JSX.Element {
           >
             <span class="rmp-nav-item-icon">{item.icon()}</span>
             <span class="rmp-nav-item-label">{item.label}</span>
+            <Show when={item.badge && item.badge() > 0}>
+              <span class="rmp-nav-item-badge" title={item.badgeTitle}>
+                {item.badge!()}
+              </span>
+            </Show>
             <Show when={item.locked}>
               <span class="rmp-nav-item-lock" title="read-only">
                 <LockIcon />

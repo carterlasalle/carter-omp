@@ -559,6 +559,13 @@ def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
     ToolBindings is frozen, so the scoped clients are attached via
     object.__setattr__. Without a TriggerContext (legacy/manual paths) the
     shared HMAC-only clients are left untouched.
+
+    The mint happens *before* the agent runs, but the run's identity does not
+    exist yet: `classify_issue(branch_slug=…)` renames the workspace branch and
+    the run opens its own PR later. The proxy pins both, so a token minted once
+    would 403 the run's own push/PR/review-request (issue #14). `bindings
+    .refresh_run_token` re-mints from the live branch/PR and re-scopes both
+    clients; the tools that change either call it.
     """
     from carter_omp.github_events import TriggerContext
     from carter_omp.proxy_client import GitHubProxyClient, ProxyGitTransport
@@ -571,21 +578,48 @@ def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
     if key is None:
         return
     thread = trigger.pull_request_number if trigger.pull_request_number is not None else trigger.issue_number
-    token = mint_run_token(
-        key=key.get_secret_value().encode("utf-8"),
-        run_id=trigger.run_id,
-        repo_id=trigger.repository_id,
-        repo=trigger.repository_full_name,
-        issue=thread,
-        workspace=None,
-        branch=inputs.workspace.branch,
-        capabilities=frozenset(c.value for c in trigger.capabilities),
-        ttl_seconds=_run_token_ttl(inputs.settings),
-    )
-    if isinstance(inputs.github, GitHubProxyClient):
-        object.__setattr__(bindings, "github", inputs.github.with_run_token(token))
-    if isinstance(inputs.git_transport, ProxyGitTransport):
-        object.__setattr__(bindings, "git_transport", inputs.git_transport.with_run_token(token))
+    secret = key.get_secret_value().encode("utf-8")
+    capabilities = frozenset(c.value for c in trigger.capabilities)
+    ttl_seconds = _run_token_ttl(inputs.settings)
+    # Live claims, not a snapshot: `refresh` mutates these and re-mints.
+    claims: dict[str, str | int | None] = {
+        "branch": inputs.workspace.branch,
+        "pull_request": trigger.pull_request_number,
+    }
+
+    # trace:v1 id=impl.worker-run-token-apply work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def _apply(token: str) -> None:
+        if isinstance(inputs.github, GitHubProxyClient):
+            object.__setattr__(bindings, "github", inputs.github.with_run_token(token))
+        if isinstance(inputs.git_transport, ProxyGitTransport):
+            object.__setattr__(bindings, "git_transport", inputs.git_transport.with_run_token(token))
+
+    # trace:v1 id=impl.worker-run-token-mint work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def mint() -> str:
+        return mint_run_token(
+            key=secret,
+            run_id=trigger.run_id,
+            repo_id=trigger.repository_id,
+            repo=trigger.repository_full_name,
+            issue=thread,
+            pull_request=claims["pull_request"] if isinstance(claims["pull_request"], int) else None,
+            workspace=None,
+            branch=claims["branch"] if isinstance(claims["branch"], str) else None,
+            capabilities=capabilities,
+            ttl_seconds=ttl_seconds,
+        )
+
+    # trace:v1 id=impl.worker-run-token-refresh work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def refresh_run_token(branch: str | None, pull_request: int | None) -> None:
+        """Re-mint with the run's current branch/PR and re-scope both clients."""
+        if branch is not None:
+            claims["branch"] = branch
+        if pull_request is not None:
+            claims["pull_request"] = pull_request
+        _apply(mint())
+
+    _apply(mint())
+    object.__setattr__(bindings, "refresh_run_token", refresh_run_token)
 
 
 # trace:v1 id=impl.worker-pickup-ack work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
@@ -1087,13 +1121,46 @@ async def run_task(
         )
     except BaseException:
         # Failed/aborted task: NEVER capture, the artifacts may be inconsistent
-        # with the source state and would poison the cache.
+        # with the source state and would poison the cache. Telemetry is still
+        # recorded: a failed run spent real money, and that spend is exactly
+        # what the console needs to show.
+        _record_run_telemetry(inputs, bindings)
         raise
     else:
         await asyncio.to_thread(_capture_natives_cache, inputs)
         await _consume_trigger_label(inputs)
+        _record_run_telemetry(inputs, bindings)
         _record_agent_abort(inputs, bindings)
         return result
+
+
+# trace:v1 id=impl.worker-record-run-telemetry work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _record_run_telemetry(inputs: TaskInputs, bindings: ToolBindings) -> None:
+    """Persist the run's telemetry (spend, tokens, fallback) on its event row.
+
+    Best-effort observability: a missing or failing write must never change the
+    run's outcome, and it never raises.
+    """
+    stats = bindings.stats
+    if stats is None:
+        return
+    try:
+        inputs.db.set_event_telemetry(
+            inputs.delivery_id,
+            fallback_model=stats.fallback_model,
+            duration_ms=int(stats.elapsed_seconds() * 1000),
+            cost_usd=stats.cost_usd,
+            cache_cost_usd=stats.cost_cache_usd,
+            miss_tokens=stats.miss_tokens,
+            output_tokens=stats.output_tokens,
+            cache_read_tokens=stats.cache_read_tokens,
+            cache_write_tokens=stats.cache_write_tokens,
+        )
+    except Exception as exc:  # noqa: BLE001 — observability must never fail a run
+        log.debug(
+            "run telemetry write failed",
+            extra={"delivery": inputs.delivery_id, "err": str(exc)[:120]},
+        )
 
 
 # trace:v1 id=impl.worker-record-agent-abort work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP

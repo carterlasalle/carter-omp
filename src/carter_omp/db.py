@@ -376,6 +376,7 @@ class Database:
             self._conn.executescript(SCHEMA)
             self._migrate()
 
+    # trace:v1 id=impl.db-migrate work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def _migrate(self) -> None:
         # SQLite-friendly forward migrations. Each is idempotent.
         issue_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(issues)").fetchall()}
@@ -386,6 +387,22 @@ class Database:
             self._conn.execute("ALTER TABLE events ADD COLUMN model TEXT")
         if "available_at" not in event_cols:
             self._conn.execute("ALTER TABLE events ADD COLUMN available_at TEXT")
+        # Run telemetry, written once per run by the worker from `RunStats`.
+        # Kept on `events` (not a side table): one row per run already exists
+        # here, the dashboard reads these rows anyway, and the columns stay
+        # sum-able for spend aggregates.
+        for column, kind in (
+            ("fallback_model", "TEXT"),
+            ("duration_ms", "INTEGER"),
+            ("cost_usd", "REAL"),
+            ("cache_cost_usd", "REAL"),
+            ("tokens_miss", "INTEGER"),
+            ("tokens_out", "INTEGER"),
+            ("tokens_cache_read", "INTEGER"),
+            ("tokens_cache_write", "INTEGER"),
+        ):
+            if column not in event_cols:
+                self._conn.execute(f"ALTER TABLE events ADD COLUMN {column} {kind}")
 
     def close(self) -> None:
         with self._lock:
@@ -502,6 +519,126 @@ class Database:
                 "UPDATE events SET model=? WHERE delivery_id=?",
                 (model, delivery_id),
             )
+
+    # trace:v1 id=impl.db-event-telemetry work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def set_event_telemetry(
+        self,
+        delivery_id: str,
+        *,
+        fallback_model: str | None,
+        duration_ms: int,
+        cost_usd: float,
+        cache_cost_usd: float,
+        miss_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int,
+        cache_write_tokens: int,
+    ) -> None:
+        """Persist one run's telemetry (model spend + fallback) on its event.
+
+        Written once when the run ends, success or not, so the console can
+        report duration, spend, cache buckets and whether the configured model
+        actually answered. Best-effort by the caller: telemetry is
+        observability, never a reason to fail a run.
+        """
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE events SET fallback_model=?, duration_ms=?, cost_usd=?, cache_cost_usd=?,
+                       tokens_miss=?, tokens_out=?, tokens_cache_read=?, tokens_cache_write=?
+                WHERE delivery_id=?
+                """,
+                (
+                    fallback_model,
+                    int(duration_ms),
+                    float(cost_usd),
+                    float(cache_cost_usd),
+                    int(miss_tokens),
+                    int(output_tokens),
+                    int(cache_read_tokens),
+                    int(cache_write_tokens),
+                    delivery_id,
+                ),
+            )
+
+    # trace:v1 id=impl.db-pending-events work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def pending_events(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Queued events with their retry backoff, soonest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT delivery_id, event_type, repo, issue_key, attempts, received_at, available_at
+                FROM events WHERE state = 'queued'
+                ORDER BY COALESCE(available_at, received_at) ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # trace:v1 id=impl.db-dead-letter-events work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def dead_letter_events(self, *, max_attempts: int, limit: int = 20) -> list[dict[str, Any]]:
+        """Events that burned their retry budget: terminal failures worth eyes."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT delivery_id, event_type, repo, issue_key, attempts, received_at, finished_at,
+                       last_error, model, fallback_model
+                FROM events WHERE state = 'failed' AND attempts >= ?
+                ORDER BY COALESCE(finished_at, received_at) DESC
+                LIMIT ?
+                """,
+                (max_attempts, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # trace:v1 id=impl.db-telemetry-summary work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def telemetry_summary(self, *, since: str | None = None) -> dict[str, Any]:
+        """Spend + token totals over runs that carry telemetry.
+
+        `fallback_runs` counts runs whose answering model differed from the
+        configured one — the number that says whether the primary provider is
+        actually serving traffic.
+        """
+        where = "WHERE cost_usd IS NOT NULL"
+        params: list[Any] = []
+        if since is not None:
+            where += " AND COALESCE(finished_at, received_at) >= ?"
+            params.append(since)
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT COUNT(*) AS runs,
+                       COALESCE(SUM(cost_usd), 0) AS cost_usd,
+                       COALESCE(SUM(cache_cost_usd), 0) AS cache_cost_usd,
+                       COALESCE(SUM(tokens_miss), 0) AS miss_tokens,
+                       COALESCE(SUM(tokens_out), 0) AS output_tokens,
+                       COALESCE(SUM(tokens_cache_read), 0) AS cache_read_tokens,
+                       COALESCE(SUM(tokens_cache_write), 0) AS cache_write_tokens,
+                       COALESCE(SUM(CASE WHEN fallback_model IS NOT NULL THEN 1 ELSE 0 END), 0) AS fallback_runs
+                FROM events {where}
+                """,
+                params,
+            ).fetchone()
+        return dict(row) if row is not None else {}
+
+    # trace:v1 id=impl.db-recent-run-telemetry work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def recent_run_telemetry(self, *, limit: int = 12) -> list[dict[str, Any]]:
+        """Newest runs that recorded telemetry, with the model that answered."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT delivery_id, event_type, repo, issue_key, state, attempts,
+                       COALESCE(finished_at, received_at) AS ended_at,
+                       model, fallback_model, duration_ms, cost_usd, cache_cost_usd,
+                       tokens_miss, tokens_out, tokens_cache_read, tokens_cache_write, last_error
+                FROM events WHERE cost_usd IS NOT NULL OR duration_ms IS NOT NULL
+                ORDER BY COALESCE(finished_at, received_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def reset_stuck_running(self) -> int:
         """Recover events that were running at shutdown."""
@@ -1611,6 +1748,25 @@ class Database:
                 """,
                 (repo, last_synced),
             )
+
+    # trace:v1 id=impl.db-issue-index-status work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def issue_index_status(self) -> list[dict[str, Any]]:
+        """Per-repo index health: rows held, PRs, last write, sync watermark."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT i.repo AS repo,
+                       COUNT(*) AS rows,
+                       COALESCE(SUM(CASE WHEN i.is_pr THEN 1 ELSE 0 END), 0) AS pull_requests,
+                       COALESCE(MAX(i.updated_at), '') AS newest_issue_at,
+                       COALESCE(s.last_synced, '') AS last_synced
+                FROM issue_index i
+                LEFT JOIN issue_index_sync s ON s.repo = i.repo
+                GROUP BY i.repo
+                ORDER BY i.repo
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # trace:v1 id=impl.db-issue-index-repos work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     def issue_index_repos(self) -> tuple[str, ...]:

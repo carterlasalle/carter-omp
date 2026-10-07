@@ -3,6 +3,7 @@ import { type JSX, Show } from "solid-js";
 import { CONFIG } from "../../config";
 import { activeView, type View } from "../../view";
 
+// trace:v1 id=impl.web-src-components-shell-top-bar.top-bar-props work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
 interface TopBarProps {
   onMenuToggle: () => void;
 }
@@ -11,6 +12,7 @@ const TITLES: Record<View, string> = {
   operations: "Operations",
   activity: "Activity",
   triage: "Triage",
+  system: "System",
 };
 
 function MenuIcon(): JSX.Element {

@@ -873,6 +873,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         token = cfg.replay_token.get_secret_value() if cfg.replay_token else None
         return HTMLResponse(render_index(token))
 
+    # trace:v1 id=impl.server-api-status work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @app.get("/api/status")
     async def api_status(request: Request) -> dict[str, Any]:
         bag = request.app.state.bag
@@ -881,6 +882,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         pool: _AppPool = bag["pool"]
         started = float(bag.get("started_at") or time.time())
 
+        # trace:v1 id=impl.server-status-collect work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
         def _collect() -> dict[str, Any]:
             # All SQLite reads run off the event loop. The dashboard polls this
             # every 3s, and the queries (200 issues + per-issue latest events +
@@ -971,6 +973,26 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                     }
                     for r in events_rows
                 ],
+                # Everything the console needs beyond work items: what is
+                # waiting and when it fires, what died for good, what the runs
+                # cost (per model, with the fallback share), and how fresh the
+                # search index is.
+                "system": {
+                    "queue": {
+                        "pending": db.pending_events(limit=20),
+                        "dead_letters": db.dead_letter_events(
+                            max_attempts=cfg.event_max_retries, limit=20
+                        ),
+                        "retry_budget": cfg.event_max_retries,
+                    },
+                    "index": db.issue_index_status(),
+                    "runs": db.recent_run_telemetry(limit=12),
+                    "spend": {
+                        "today": db.telemetry_summary(since=iso_seconds_ago(86400)),
+                        "week": db.telemetry_summary(since=iso_seconds_ago(7 * 86400)),
+                        "all_time": db.telemetry_summary(),
+                    },
+                },
             }
 
         collected = await asyncio.to_thread(_collect)
@@ -979,9 +1001,16 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             "runtime": {
                 "bot_login": cfg.bot_login,
                 "repo_allowlist": sorted(cfg.repo_allowlist),
+                "repo_owners": sorted(cfg.allowed_repo_owners),
+                "installation_ids": sorted(cfg.github_installation_ids),
                 "max_concurrency": cfg.max_concurrency,
                 "model": cfg.model,
+                "model_pool": list(cfg.model_pool),
+                "fallback_models": list(cfg.fallback_models),
                 "thinking_level": cfg.thinking_level,
+                "trigger_mode": cfg.trigger_mode,
+                "trigger_label": cfg.trigger_label,
+                "issue_index_sync_seconds": cfg.issue_index_sync_seconds,
                 "uptime_seconds": max(0.0, time.time() - started),
             },
             "inflight": inflight,

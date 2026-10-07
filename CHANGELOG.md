@@ -13,6 +13,18 @@ versions are `Unreleased` until the first tagged release.
 
 ### Added
 
+- Console **System** view (4th rail entry, dead-letter badge): spend for
+  today/7 days/all-time (runs, fallback share, cost, cache cost, token
+  breakdown), the live queue with each event's next attempt, dead letters with
+  their burned retry budget, the last 12 runs with model/duration/cost/tokens,
+  and per-repo issue-index freshness. Backed by a `system` block in
+  `/api/status`; runtime now also reports owners, installation ids, model pool
+  and fallback chain.
+
+- Per-run telemetry: the worker writes model, fallback model, duration, cost,
+  cache cost and token counts onto the event row on both success and failure
+  (`cost_usd`-carrying rows are what the spend aggregates and the footer read).
+
 - `carter-omp add-org <owner>`: onboards another account/org in one step —
   prints the App's install link, resolves the new installation id (App JWT,
   `/orgs/<org>/installation` then `/users/<login>/installation`), and appends it
@@ -64,6 +76,32 @@ versions are `Unreleased` until the first tagged release.
   terminal action (#13583); and `RpcClient.stop()` verifies teardown and
   retains unreaped survivors so a child stuck in uninterruptible sleep stays
   observable and reapable instead of pinning its concurrency slot.
+- **Run tokens follow the run (#14).** `_attach_run_token` minted the proxy
+  token before the agent started, pinning the pre-classification branch and the
+  originating issue number. A triage run that classified with a `branch_slug`
+  (renaming `carter-omp/<hex>/issue-N` → `carter-omp/<hex>/fix-…`) could commit
+  its work and then never publish it: `gh_push_branch`/`gh_open_pr` failed with
+  `403 run token branch mismatch`, and review requests on the PR the run had
+  just opened failed with `403 run token thread mismatch`. Three changes:
+  the token carries the run's own `pull_request`; the proxy accepts any branch
+  in the token's own `carter-omp/<hex>/` namespace plus both threads the run
+  owns (originating issue and its PR); and `ToolBindings.refresh_run_token`
+  re-mints from the live branch/PR (called by `classify_issue` after a
+  sanctioned rename and by `gh_open_pr` once the PR exists). Cross-run pushes
+  and other threads are still rejected.
+
+- The dashboard bundle installs into the path the server actually mounts.
+  `web/vite.config.ts` fanned the build into `src/static/`, but
+  `dashboard.static_dir()` and the Docker `web-builder` stage use
+  `src/carter_omp/static/`, so `yarn build` alone never reached the served
+  bundle (and a stale copy sat committed under `src/static/`). The plugin now
+  writes the package directory, the leftover tracked bundle is gone.
+
+- PR review bodies now carry the same model/duration/cost footer as comments
+  and PR bodies (`_footer_suffix` applied at every bot-authored surface:
+  `gh_post_comment`, `gh_open_pr`, `submit_pr_review`, the review 422/500
+  fallback comment, and `mark_unable_to_reproduce`). Reviews were the one
+  surface the footer had missed, so they showed no cost.
 
 - Shared git pool kept its group across slots again: the containers were
   missing `CAP_FSETID`, so `chmod 2770` silently dropped the setgid bit (exit 0,

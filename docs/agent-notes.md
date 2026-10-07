@@ -42,6 +42,30 @@ Durable operational knowledge. Read this before touching Docker, CI, or trace co
 - `Dockerfile` carries `# trace:exempt reason=deploy-packaging-no-runtime-behavior`.
   Prefer `reason=` form; bare `# trace:exempt <words>` does not satisfy TL012.
 
+## Console (web/)
+<!-- trace:v1 id=doc.agent-notes-console work=WORK-CO-Q8Z1HJJJ -->
+
+- The served bundle is **`src/carter_omp/static/`** — that is what
+  `dashboard.static_dir()` mounts and what the Docker `web-builder` stage
+  copies into. The Vite plugin (`syncStaticBundle`) fans `web/dist/` there;
+  a `src/static/` directory is the pre-extraction path and must not come back
+  (a stale copy was committed once and shadowed nothing but confused tools).
+- `yarn build` alone is the whole install step locally; the FastAPI process
+  caches `index.html` at startup, so restart the server after a rebuild or `/`
+  keeps serving the previous asset names.
+
+## Proxy run tokens
+<!-- trace:v1 id=doc.agent-notes-proxy-tokens work=WORK-CO-Q8Z1HJJJ -->
+
+- The per-run token is minted before the agent starts, but a run's identity
+  changes mid-flight: `classify_issue(branch_slug=…)` renames the branch and
+  the run opens its own PR. The proxy therefore accepts any branch in the
+  token's own `carter-omp/<hex>/` namespace and both threads the run owns
+  (originating issue + `pull_request`), and `ToolBindings.refresh_run_token`
+  re-mints from the live branch/PR. Tools that change either must refresh.
+- Pinning the full branch name (not the namespace) is what made issue #14
+  unable to publish; do not "tighten" `_require_run_branch` back to equality.
+
 ## Analyzers
 <!-- trace:v1 id=doc.agent-notes-analyzers work=WORK-CO-Q8Z1HJJJ -->
 
