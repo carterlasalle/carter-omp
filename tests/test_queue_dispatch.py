@@ -30,11 +30,11 @@ class _StubGitTransport:
     pass
 
 
-def _make_pool(settings: Settings, db: Database) -> WorkerPool:
+def _make_pool(settings: Settings, db: Database, *, github: object | None = None) -> WorkerPool:
     return WorkerPool(
         settings=settings,
         db=db,
-        github=_StubGitHub(),  # type: ignore[arg-type]
+        github=github if github is not None else _StubGitHub(),  # type: ignore[arg-type]
         sandbox=_StubSandbox(),  # type: ignore[arg-type]
         git_transport=_StubGitTransport(),  # type: ignore[arg-type]
         slot_pool=SlotPool(),
@@ -166,6 +166,10 @@ def test_control_stop_marks_done_without_dispatch(tmp_path, settings) -> None:
     # Only a bare command line counts: prose that merely starts with a command
     # word stays a normal follow-up (a model run), not a canned DB answer.
     assert _control_command("status: what's the state?") is None
+    # `review`, `resume`, and `release-fix` need a model run, so they must not be
+    # claimed as deterministic control commands.
+    for ordinary in ("review", "resume", "release-fix"):
+        assert _control_command(ordinary) is None
 
 
 @pytest.mark.asyncio
@@ -196,3 +200,112 @@ async def test_dispatch_and_mark_keeps_a_worker_recorded_failure(
     assert latest is not None
     assert latest.state == "failed"
     assert latest.last_error == "agent aborted: harness fault"
+
+
+class _RecordingGitHub:
+    def __init__(self) -> None:
+        self.comments: list[tuple[str, int, str]] = []
+
+    async def post_comment(self, repo: str, number: int, body: str) -> None:
+        self.comments.append((repo, number, body))
+
+
+def _record_task_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+
+    def _make(name: str):
+        async def _fake(**_kwargs: object) -> None:
+            calls.append(name)
+
+        return _fake
+
+    for name in (
+        "triage_issue",
+        "handle_comment",
+        "handle_pr_conversation",
+        "review_pr",
+        "handle_review",
+        "handle_release_ci",
+        "cleanup_workspace",
+    ):
+        monkeypatch.setattr(tasks, name, _make(name))
+    return calls
+
+
+def _insert_command_row(db: Database, command: str, *, delivery: str) -> EventRow:
+    db.record_event(
+        delivery_id=delivery,
+        event_type="issue_comment",
+        repo="octo/widget",
+        issue_key="octo/widget#4",
+        payload={
+            "action": "created",
+            "issue": {"number": 4},
+            "_carter_omp_directive": {"body": command, "author": "carterlasalle"},
+        },
+    )
+    row = db.claim_next_event()
+    assert row is not None
+    return row
+
+
+@pytest.mark.asyncio
+async def test_status_control_command_answers_from_db_without_model(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`@bot status` posts a DB answer and invokes no task entry point."""
+    db.upsert_issue(
+        key="octo/widget#4",
+        repo="octo/widget",
+        number=4,
+        state="reproducing",
+        branch="carter-omp/ab/fix",
+        pr_number=12,
+    )
+    db.record_event(
+        delivery_id="prev",
+        event_type="issue_comment",
+        repo="octo/widget",
+        issue_key="octo/widget#4",
+        payload={"action": "created"},
+    )
+    prev = db.claim_next_event()
+    assert prev is not None
+    db.mark_event(prev.delivery_id, "done")
+
+    calls = _record_task_calls(monkeypatch)
+    github = _RecordingGitHub()
+    row = _insert_command_row(db, "status", delivery="cmd-status")
+
+    await _make_pool(settings, db, github=github)._dispatch_and_mark(row)  # noqa: SLF001
+
+    assert calls == []
+    assert db.get_event("cmd-status").state == "done"
+    assert len(github.comments) == 1
+    repo, number, body = github.comments[0]
+    assert (repo, number) == ("octo/widget", 4)
+    assert "`octo/widget#4`" in body
+    assert "`reproducing`" in body
+    assert "carter-omp/ab/fix" in body
+    assert "#12" in body
+    # The status command reports the run before it, not itself.
+    assert "`issue_comment` — `done`" in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["review", "resume", "release-fix"])
+async def test_control_words_without_a_handler_are_ordinary_directives(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """These have no deterministic handler, so they stay model directives."""
+    seen: list[str] = []
+
+    async def fake_handle_comment(**_kwargs: object) -> None:
+        seen.append(command)
+
+    monkeypatch.setattr(tasks, "handle_comment", fake_handle_comment)
+    row = _insert_command_row(db, command, delivery=f"cmd-{command}")
+
+    await _make_pool(settings, db)._dispatch_and_mark(row)  # noqa: SLF001
+
+    assert seen == [command]

@@ -1228,6 +1228,18 @@ async def run_task(
             expected_sha=release_row.current_sha,
             default_branch=inputs.release.default_branch,
         )
+    # The trigger is the authoritative capability record minted by trusted
+    # routing code, and it is already the source for the run token's scopes.
+    # Bindings must mirror that exact set: operator-granted extras (notably
+    # SKIP_CHECKS from `/allow-skip-checks`) live only on the trigger, so
+    # building from `capabilities_for(task_kind)` would silently drop them and
+    # leave the pre-publish gates unreachable. Legacy/manual paths without a
+    # trigger keep the task-kind profile.
+    from carter_omp.github_events import TriggerContext
+
+    capabilities = (
+        inputs.trigger.capabilities if isinstance(inputs.trigger, TriggerContext) else capabilities_for(task_kind)
+    )
     bindings = ToolBindings(
         db=inputs.db,
         github=inputs.github,
@@ -1242,7 +1254,7 @@ async def run_task(
         inbound_thread_number=pr_number,
         inbound_is_pr=pr_number is not None,
         review_mode=review_mode,
-        capabilities=capabilities_for(task_kind),
+        capabilities=capabilities,
         trigger=inputs.trigger,
         impl_authorized=bool(directive is not None and directive.authorizes_impl),
         slot_uid=inputs.slot_uid,
