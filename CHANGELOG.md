@@ -86,6 +86,16 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **Trigger label is consumed through the run-scoped client (#15).** After a
+  successful label-triggered run, `_consume_trigger_label` called
+  `inputs.github` — the shared HMAC-only client — instead of the run-token
+  client on `bindings.github`. Every proxy label endpoint requires a run token,
+  so the `remove_issue_label`/`add_issue_labels` calls answered 401 and the
+  failure was swallowed at DEBUG: the one-shot trigger label stayed on the
+  issue, and re-applying it (the documented re-trigger) fired no `labeled`
+  event. The function now takes `bindings` and uses `bindings.github`, and logs
+  failures at WARNING.
+
 - Mention turns must end with a reply. `_needs_completion_reminder` only knew
   the triage, review and release task kinds, so a `handle_comment` turn had no
   terminal action at all: the 2026-10-07 run on `personal_website#64` called

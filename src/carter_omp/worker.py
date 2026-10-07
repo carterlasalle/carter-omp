@@ -1281,7 +1281,7 @@ async def run_task(
         raise
     else:
         await asyncio.to_thread(_capture_natives_cache, inputs)
-        await _consume_trigger_label(inputs)
+        await _consume_trigger_label(inputs, bindings)
         _record_run_telemetry(inputs, bindings)
         _record_agent_abort(inputs, bindings)
         return result
@@ -1337,11 +1337,14 @@ def _record_agent_abort(inputs: TaskInputs, bindings: ToolBindings) -> None:
     )
 
 
-async def _consume_trigger_label(inputs: TaskInputs) -> None:
+# trace:v1 id=impl.worker-consume-trigger-label work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+async def _consume_trigger_label(inputs: TaskInputs, bindings: ToolBindings) -> None:
     """Consume the one-shot trigger label after an authorized label run.
 
     Remove `trigger_label`, add `<label>:running` at start is handled by
     queue state; here we mark terminal state via labels best-effort.
+    Must use `bindings.github`: the proxy's label endpoints require the
+    per-run token, so the unscoped `inputs.github` client 401s.
     Failures are swallowed: labels are UX, never the security boundary
     (replay uses the stored TriggerContext, never current labels).
     """
@@ -1357,10 +1360,10 @@ async def _consume_trigger_label(inputs: TaskInputs) -> None:
     if number is None:
         return
     try:
-        await inputs.github.remove_issue_label(trigger.repository_full_name, number, label)
-        await inputs.github.add_issue_labels(trigger.repository_full_name, number, [f"{label}:running"])
-    except Exception:
-        log.debug("trigger label consume failed", extra={"delivery": inputs.delivery_id})
+        await bindings.github.remove_issue_label(trigger.repository_full_name, number, label)
+        await bindings.github.add_issue_labels(trigger.repository_full_name, number, [f"{label}:running"])
+    except Exception as exc:
+        log.warning("trigger label consume failed", extra={"delivery": inputs.delivery_id, "err": str(exc)[:120]})
 
 
 def _capture_natives_cache(inputs: TaskInputs) -> None:
