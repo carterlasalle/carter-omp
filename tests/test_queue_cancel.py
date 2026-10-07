@@ -9,6 +9,7 @@ real omp subprocess; that's covered by the integration smoke test.
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 
 import pytest
@@ -93,11 +94,13 @@ async def test_cancel_fires_hook_armed_by_worker(settings: Settings, db: Databas
 
     worker = asyncio.create_task(fake_worker())
     try:
-        # Give the worker a tick to register.
-        for _ in range(20):
-            await asyncio.sleep(0)
-            if row.delivery_id in pool._cancel_hooks:  # noqa: SLF001 — test inspecting state
-                break
+        # Wait for the worker's thread to arm the hook before firing. A fixed
+        # number of event-loop ticks is not enough: registration runs in a
+        # thread, and `--cov` line tracing starves it, so bound the wait by a
+        # deadline instead of a tick count.
+        deadline = time.monotonic() + 5.0
+        while row.delivery_id not in pool._cancel_hooks and time.monotonic() < deadline:  # noqa: SLF001
+            await asyncio.sleep(0.01)
         assert row.delivery_id in pool._cancel_hooks  # noqa: SLF001
 
         assert await pool.cancel_event(row.delivery_id) is True
