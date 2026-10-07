@@ -29,6 +29,9 @@ Durable operational knowledge. Read this before touching Docker, CI, or trace co
   vendored `vendor/omp-rpc` has its own style and `docs/*.md` embeds code
   snippets; running ruff over the whole tree fails on files we must not
   reformat.
+- CI gates on **both** `ruff check` and `ruff format --check src tests`. `ruff
+  check` passing is not enough: run `uv run ruff format src tests` before
+  pushing or the `python` job fails on formatting alone.
 - `vendor/` is also excluded from trace policy (`.trace/policy.toml` is
   gitignored, so this exclusion is local-only and must be re-applied on fresh
   checkouts if TL012 fires on vendored code).

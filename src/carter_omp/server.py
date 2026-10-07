@@ -980,9 +980,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 "system": {
                     "queue": {
                         "pending": db.pending_events(limit=20),
-                        "dead_letters": db.dead_letter_events(
-                            max_attempts=cfg.event_max_retries, limit=20
-                        ),
+                        "dead_letters": db.dead_letter_events(max_attempts=cfg.event_max_retries, limit=20),
                         "retry_budget": cfg.event_max_retries,
                     },
                     "index": db.issue_index_status(),

@@ -61,7 +61,13 @@ def _gh(req: httpx.Request) -> httpx.Response:
         head = json.loads(req.content)["head"]
         return httpx.Response(
             201,
-            json={"number": PR_NUMBER, "html_url": "u", "head": {"ref": head}, "base": {"ref": "main"}, "state": "open"},
+            json={
+                "number": PR_NUMBER,
+                "html_url": "u",
+                "head": {"ref": head},
+                "base": {"ref": "main"},
+                "state": "open",
+            },
         )
     return httpx.Response(201, json={})
 
@@ -129,7 +135,11 @@ def test_pre_fix_tokens_still_verify() -> None:
     }
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     signature = hmac.new(_HMAC.encode(), b"carter-omp-run-token\n" + raw, hashlib.sha256).digest()
-    token = base64.urlsafe_b64encode(raw).decode().rstrip("=") + "." + base64.urlsafe_b64encode(signature).decode().rstrip("=")
+    token = (
+        base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        + "."
+        + base64.urlsafe_b64encode(signature).decode().rstrip("=")
+    )
 
     parsed = verify_run_token(key=_HMAC.encode(), token=token)
     assert parsed is not None
@@ -257,8 +267,6 @@ async def test_attach_run_token_installs_a_refresh_that_follows_the_rename_and_p
     assert before.value.status == 403
 
     bindings.refresh_run_token(RENAMED, PR_NUMBER)
-    pr = await bindings.github.open_pull_request(
-        repo="octo/widget", head=RENAMED, base="main", title="t", body="b"
-    )
+    pr = await bindings.github.open_pull_request(repo="octo/widget", head=RENAMED, base="main", title="t", body="b")
     assert pr.number == PR_NUMBER
     await bindings.github.request_reviewers(repo="octo/widget", pr_number=PR_NUMBER, reviewers=["alice"])

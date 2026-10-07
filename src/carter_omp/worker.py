@@ -1099,6 +1099,7 @@ def _run_rpc_blocking(
                 "rpc_start",
                 extra={"issue": bindings.issue_key, "task": task_kind, "branch": bindings.workspace.branch},
             )
+
             # Silence detection. `hard_timeout` below bounds the whole turn;
             # this bounds *silence*, because a hung provider stream otherwise
             # looks like work until the budget runs out and every retry repeats

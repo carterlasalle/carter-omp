@@ -550,9 +550,7 @@ def test_agent_activity_watch_fires_on_silence_and_rearms() -> None:
     """The watch is the *silence* deadline `prompt_and_wait` never had."""
     now = {"t": 1000.0}
     stalls: list[str] = []
-    watch = worker._AgentActivityWatch(
-        seconds=10.0, on_stall=lambda: stalls.append("x"), clock=lambda: now["t"]
-    )
+    watch = worker._AgentActivityWatch(seconds=10.0, on_stall=lambda: stalls.append("x"), clock=lambda: now["t"])
     assert watch.enabled is True
     assert watch.fired is False
 
@@ -563,9 +561,7 @@ def test_agent_activity_watch_fires_on_silence_and_rearms() -> None:
     assert watch.reason() == "no agent activity for 30s (last event: turn start)"
 
     # A second watch re-armed by steady events never fires (4s < 10s each time).
-    quiet = worker._AgentActivityWatch(
-        seconds=10.0, on_stall=lambda: stalls.append("y"), clock=lambda: now["t"]
-    )
+    quiet = worker._AgentActivityWatch(seconds=10.0, on_stall=lambda: stalls.append("y"), clock=lambda: now["t"])
     for _ in range(5):
         now["t"] += 4
         quiet.touch("message_update")
@@ -577,9 +573,7 @@ def test_agent_activity_watch_fires_on_silence_and_rearms() -> None:
 
 
 def test_agent_activity_watch_is_disabled_at_zero() -> None:
-    watch = worker._AgentActivityWatch(
-        seconds=0.0, on_stall=lambda: pytest.fail("disabled watch must never fire")
-    )
+    watch = worker._AgentActivityWatch(seconds=0.0, on_stall=lambda: pytest.fail("disabled watch must never fire"))
     watch.start()
     assert watch.enabled is False
     assert watch.check() is False
