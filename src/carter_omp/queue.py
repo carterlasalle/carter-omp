@@ -6,14 +6,15 @@ import asyncio
 import logging
 import os
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 
 from carter_omp import tasks
 from carter_omp.cancellation import clear_current_event, set_current_event
 from carter_omp.config import Settings
-from carter_omp.db import INACTIVE_EVENT_STATES, Database, EventRow, IssueState
+from carter_omp.db import INACTIVE_EVENT_STATES, Database, EventRow, IssueRow, IssueState, issue_key
 from carter_omp.github_backend import GitHubBackend
+from carter_omp.github_client import GitHubError
 from carter_omp.sandbox import GitTransport, SandboxManager, _reap_slot
 from carter_omp.slot_pool import SlotPool
 
@@ -21,7 +22,10 @@ log = logging.getLogger(__name__)
 
 # Deterministic control commands: handled without running another model turn.
 # `stop` cancels via the cancellation channel; `status` answers from the DB.
-_CONTROL_COMMANDS = ("status", "stop", "review", "resume", "release-fix")
+# Only commands with a real deterministic handler belong here — `review`,
+# `resume`, and `release-fix` are ordinary directives (model runs), so listing
+# them as control commands would promise a no-model answer the queue cannot give.
+_CONTROL_COMMANDS = ("status", "stop")
 
 
 # trace:v1 id=impl.queue-control-command work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
@@ -33,8 +37,9 @@ def _control_command(body: str | None) -> str | None:
     return first if first in _CONTROL_COMMANDS else None
 
 
-def _handle_control_command(pool: WorkerPool, row: EventRow) -> bool:
-    """Execute deterministic control commands synchronously. Returns True if handled."""
+# trace:v1 id=impl.queue-control-command-dispatch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+async def _handle_control_command(pool: WorkerPool, row: EventRow) -> bool:
+    """Execute deterministic control commands. Returns True if handled."""
     raw = row.payload.get("_carter_omp_directive")
     if not isinstance(raw, dict):
         return False
@@ -42,17 +47,61 @@ def _handle_control_command(pool: WorkerPool, row: EventRow) -> bool:
     command = _control_command(body if isinstance(body, str) else None)
     if command is None:
         return False
+    if command == "status":
+        await _post_status(pool, row)
+        return True
     if command == "stop":
-        import asyncio as _asyncio
-
         try:
-            loop = _asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
             return False
         target = row.issue_key or row.delivery_id
         loop.create_task(_cancel_issue_runs(pool, target, row.delivery_id))
         return True
     return False
+
+
+# trace:v1 id=impl.queue-status-answer work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+async def _post_status(pool: WorkerPool, row: EventRow) -> None:
+    """Answer `@bot status` from the database — no model turn."""
+    issue = row.payload.get("issue")
+    number = issue.get("number") if isinstance(issue, Mapping) else None
+    repo = row.repo
+    if not repo or not isinstance(number, int):
+        log.info("status: missing repo/number", extra={"delivery": row.delivery_id})
+        return
+    key = row.issue_key or issue_key(repo, number)
+    body = _status_comment(
+        key=key,
+        issue_row=pool.db.get_issue(key),
+        latest=pool.db.latest_event_for_issue(key, exclude_delivery=row.delivery_id),
+    )
+    try:
+        await pool.github.post_comment(repo, number, body)
+    except GitHubError as exc:
+        log.warning("status comment failed", extra={"key": key, "err": str(exc)})
+
+
+def _status_comment(*, key: str, issue_row: IssueRow | None, latest: EventRow | None) -> str:
+    """Render the deterministic `status` answer from persisted rows."""
+    lines = [f"**carter-omp status** — `{key}`", ""]
+    if issue_row is None:
+        lines.append("No run recorded for this issue yet.")
+    else:
+        lines.append(f"- Issue state: `{issue_row.state}`")
+        if issue_row.branch:
+            lines.append(f"- Branch: `{issue_row.branch}`")
+        if issue_row.pr_number is not None:
+            lines.append(f"- Pull request: #{issue_row.pr_number}")
+        if issue_row.classification:
+            lines.append(f"- Classification: `{issue_row.classification}`")
+        lines.append(f"- Updated: {issue_row.updated_at}")
+    if latest is not None:
+        detail = f"- Last event: `{latest.event_type}` — `{latest.state}`"
+        if latest.last_error:
+            detail += f" ({latest.last_error})"
+        lines.append(detail)
+    return "\n".join(lines)
 
 
 async def _cancel_issue_runs(pool: WorkerPool, target: str, except_delivery: str) -> None:
@@ -408,7 +457,7 @@ class WorkerPool:
 
     # trace:v1 id=impl.queue-dispatch-and-mark work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     async def _dispatch_and_mark(self, row: EventRow, *, slot_uid: int | None = None) -> None:
-        if _handle_control_command(self, row):
+        if await _handle_control_command(self, row):
             self.db.mark_event(row.delivery_id, "done")
             return
         await self._dispatch(row, slot_uid=slot_uid)

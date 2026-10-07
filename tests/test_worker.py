@@ -264,6 +264,105 @@ async def test_run_task_preserves_impl_authorized_when_resuming(
     assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue", "--no-extensions")
 
 
+def _trigger(*, capabilities) -> Any:
+    from datetime import UTC, datetime
+
+    from carter_omp.github_events import TriggerContext
+
+    return TriggerContext(
+        run_id="run-1",
+        delivery_id="d-test",
+        repository_id=1,
+        repository_full_name="acme/widgets",
+        installation_id=1,
+        actor_id=1,
+        actor_login="carterlasalle",
+        actor_type="User",
+        event_type="issue_comment",
+        action="created",
+        trigger_kind="mention",
+        trigger_object_id=555,
+        trigger_value="/allow-skip-checks",
+        issue_number=1,
+        pull_request_number=None,
+        capabilities=capabilities,
+        policy_version="carter-omp/v1",
+        authorized_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_task_mirrors_trigger_capabilities_into_bindings(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator-granted extras on the trigger reach the host-tool gates.
+
+    `/allow-skip-checks` adds SKIP_CHECKS to the trigger only; if bindings were
+    rebuilt from `capabilities_for(task_kind)` the pre-publish gates would
+    never see it and the documented bypass stays unreachable.
+    """
+    from carter_omp.capabilities import ISSUE_RUN_CAPABILITIES, Capability
+
+    inputs, _bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    granted = ISSUE_RUN_CAPABILITIES | {Capability.SKIP_CHECKS}
+    inputs.trigger = _trigger(capabilities=granted)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(worker, "_build_prompt", lambda *args, **kwargs: "prompt")
+
+    def fake_run_rpc_blocking(
+        _inputs: worker.TaskInputs,
+        *,
+        task_kind: str,
+        prompt: str,
+        bindings: worker.ToolBindings,
+        directive: worker.DirectiveInfo | None = None,
+    ) -> str:
+        del task_kind, prompt, directive
+        captured["capabilities"] = bindings.capabilities
+        return "ok"
+
+    monkeypatch.setattr(worker, "_run_rpc_blocking", fake_run_rpc_blocking)
+
+    result = await worker.run_task(task_kind="handle_comment", inputs=inputs)
+
+    assert result == "ok"
+    assert captured["capabilities"] == granted
+
+
+@pytest.mark.asyncio
+async def test_run_task_falls_back_to_task_profile_without_trigger(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy/manual paths with no TriggerContext keep the task-kind profile."""
+    from carter_omp.capabilities import PR_REVIEW_CAPABILITIES
+
+    inputs, _bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    inputs.workspace.branch = "review/pr-7"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(worker, "_build_prompt", lambda *args, **kwargs: "prompt")
+
+    def fake_run_rpc_blocking(
+        _inputs: worker.TaskInputs,
+        *,
+        task_kind: str,
+        prompt: str,
+        bindings: worker.ToolBindings,
+        directive: worker.DirectiveInfo | None = None,
+    ) -> str:
+        del task_kind, prompt, directive
+        captured["capabilities"] = bindings.capabilities
+        return "ok"
+
+    monkeypatch.setattr(worker, "_run_rpc_blocking", fake_run_rpc_blocking)
+
+    result = await worker.run_task(task_kind="review_pr", inputs=inputs)
+
+    assert result == "ok"
+    assert captured["capabilities"] == PR_REVIEW_CAPABILITIES
+
+
 @pytest.mark.asyncio
 async def test_run_rpc_passes_continue_when_session_jsonl_present(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=True)

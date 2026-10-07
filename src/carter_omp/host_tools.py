@@ -1537,9 +1537,10 @@ def _build_release_retag(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 # ---------- gh_push_branch ----------
+# trace:v1 id=impl.host-tools-push-branch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
-        bindings.require(Capability.PUSH_BRANCH, "gh_push_branch", args)
+        _enforce_impl_authorization(bindings, "gh_push_branch", args, action="push branch")
         if bindings.review_mode:
             msg = "refusing to push: PR review worktrees are read-only."
             _audit(bindings, "gh_push_branch", args, error=msg)
@@ -1583,7 +1584,7 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
 def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
     # trace:v1 id=impl.host-tools-open-pr-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
-        bindings.require(Capability.OPEN_PR, "gh_open_pr", args)
+        _enforce_impl_authorization(bindings, "gh_open_pr", args, action="open PR")
         if bindings.review_mode:
             msg = "refusing to open PR: PR review tasks are read-only."
             _audit(bindings, "gh_open_pr", args, error=msg)
@@ -2159,6 +2160,9 @@ def _build_search_commits(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 _PRIMARY_TYPES = ("bug", "enhancement", "question", "proposal", "documentation", "wontfix", "invalid", "duplicate")
+#: Classifications that may publish without a maintainer go-ahead; every other
+#: class needs `impl_authorized`, a durable authorized event, or an existing PR.
+_AUTO_PR_CLASSIFICATIONS = frozenset({"bug", "documentation"})
 _PRIORITIES = ("prio:p0", "prio:p1", "prio:p2", "prio:p3")
 _FUNCTIONAL = ("agent", "tool", "tui", "cli", "prompting", "sdk", "auth", "setup", "ux", "providers")
 _PLATFORMS = ("platform:linux", "platform:macos", "platform:windows", "platform:wsl")
@@ -2167,6 +2171,7 @@ _PR_TYPES = ("feat", "fix", "docs", "refactor", "perf", "test", "chore", "ci", "
 _CLOSING_ISSUE_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", re.IGNORECASE)
 
 
+# trace:v1 id=impl.host-tools-impl-authorization work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _enforce_impl_authorization(
     bindings: ToolBindings,
     tool_name: str,
@@ -2174,12 +2179,13 @@ def _enforce_impl_authorization(
     *,
     action: str,
 ) -> None:
-    """Refuse publishing unless the run holds an explicit capability.
+    """Refuse first publish on issue classes that require maintainer authorization.
 
-    Classification is an LLM output and never an authority source. Only the
-    trusted trigger's capabilities (via `bindings.require`) authorize
-    publishing; `impl_authorized` and the durable authorized-event record
-    remain as workflow signals but cannot grant what capabilities deny.
+    Classification is an LLM output and never an authority source; the
+    capability check below comes first and no workflow signal can grant what
+    capabilities deny. `bug`/`documentation` issues publish from the trigger
+    that queued the run; every other class also needs `impl_authorized`, a
+    durable authorized event, or an existing PR.
     """
     bindings.require(Capability.PUSH_BRANCH if "push" in action else Capability.OPEN_PR, tool_name, args)
     if bindings.impl_authorized:
@@ -2187,9 +2193,14 @@ def _enforce_impl_authorization(
     if bindings.db.has_authorized_impl_event(bindings.issue_key):
         return
     row = bindings.db.get_issue(bindings.issue_key)
-    if row is not None and row.pr_number is not None:
-        return
-    classification = row.classification if row is not None else None
+    if row is not None:
+        if row.pr_number is not None:
+            return
+        classification = row.classification
+        if classification in _AUTO_PR_CLASSIFICATIONS:
+            return
+    else:
+        classification = None
     classification_phrase = f"classified `{classification}`" if classification else "not classified"
     msg = (
         f"refusing to {action}: issue #{_require_issue(bindings).number} is {classification_phrase}; "

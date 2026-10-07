@@ -70,9 +70,9 @@ run started are fetched with the `fetch_issue_thread` host tool.
 `@carter-omp <directive>` in a comment, requiring BOTH authorized `sender.id`
 AND an exact bot mention (token-boundary, case-insensitive;
 `@carter-omp-evil` does not match). The remaining text becomes the trusted
-operator directive. Small control commands: `status`, `stop`, `review`,
-`resume`, `release-fix`. `stop` cancels without a model turn; `status` answers
-from the DB.
+operator directive. Control commands answered without a model turn: `status`
+(answers from the DB) and `stop` (cancels). Every other directive — including
+`review`, `resume`, and `release-fix` — starts a normal model run.
 
 ## What does NOT trigger
 
