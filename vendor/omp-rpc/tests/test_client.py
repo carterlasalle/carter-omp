@@ -5,22 +5,31 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import textwrap
 import threading
 import time
 import unittest
+from unittest import mock
 
 from omp_rpc import (
     AgentEndEvent,
+    HostTool,
+    HostToolCompletedEvent,
     RpcClient,
     RpcCommandError,
     RpcConcurrencyError,
     RpcError,
     host_tool,
 )
-from omp_rpc.client import _RpcFrameDecoder
+
+from omp_rpc.client import (
+    _RpcFrameDecoder,
+    _process_group_id,
+    _terminate_process_group,
+)
 
 
 FAKE_SERVER = textwrap.dedent(
@@ -454,6 +463,37 @@ FAKE_SERVER = textwrap.dedent(
                             "type": "host_tool_call",
                             "id": "host-call-2",
                             "toolCallId": "toolu_write_1",
+                            "toolName": "echo_host",
+                            "arguments": {"message": "hello"},
+                        }
+                    ),
+                    flush=True,
+                )
+                continue
+            if message == "needs eval host tool":
+                # The eval bridge runs session tools in-process under a
+                # synthetic call id; the only transport tool event on the wire
+                # is the enclosing `eval` call.
+                print(json.dumps({"type": "agent_start"}), flush=True)
+                host_event_tool_call_id = "toolu_eval_1"
+                host_event_tool_name = "eval"
+                print(
+                    json.dumps(
+                        {
+                            "type": "tool_execution_start",
+                            "toolCallId": "toolu_eval_1",
+                            "toolName": "eval",
+                            "args": {"language": "js", "code": "await tool.echo_host({message: 'hello'})"},
+                        }
+                    ),
+                    flush=True,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "type": "host_tool_call",
+                            "id": "host-call-3",
+                            "toolCallId": "js-echo_host-1",
                             "toolName": "echo_host",
                             "arguments": {"message": "hello"},
                         }
@@ -1092,6 +1132,62 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(end_events[0].tool_call_id, "toolu_write_1")
             self.assertEqual(end_events[0].result["content"][0]["text"], "host:hello")
 
+    def _echo_host_tool(self, execute) -> HostTool:
+        return host_tool(
+            name="echo_host",
+            description="Echo from the Python host process",
+            parameters={
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+                "additionalProperties": False,
+            },
+            execute=execute,
+        )
+
+    def test_eval_bridged_host_tool_reports_completion(self) -> None:
+        """An eval-bridged host tool is observable although no event names it.
+
+        The eval bridge dispatches with a synthetic call id, so the only
+        `tool_execution_end` on the wire is the enclosing `eval`. roboomp's
+        terminal-action gate missed `submit_pr_review` and its reminders
+        re-posted the review (oh-my-pi#13583).
+        """
+        completed: list[HostToolCompletedEvent] = []
+        with self.make_client(
+            custom_tools=(self._echo_host_tool(lambda args, _ctx: f"host:{args['message']}"),)
+        ) as client:
+            client.on_host_tool_completed(completed.append)
+            turn = client.prompt_and_wait("needs eval host tool", timeout=2.0)
+
+        end_names = [
+            event.tool_name
+            for event in turn.events
+            if getattr(event, "type", None) == "tool_execution_end"
+        ]
+        self.assertEqual(end_names, ["eval"])
+        self.assertEqual(
+            completed,
+            [HostToolCompletedEvent(tool_name="echo_host", tool_call_id="js-echo_host-1")],
+        )
+
+    def test_raising_host_tool_does_not_report_completion(self) -> None:
+        def reject(_args, _ctx) -> str:
+            raise RuntimeError("rejected: 422")
+
+        completed: list[HostToolCompletedEvent] = []
+        with self.make_client(custom_tools=(self._echo_host_tool(reject),)) as client:
+            client.on_host_tool_completed(completed.append)
+            turn = client.prompt_and_wait("needs eval host tool", timeout=2.0)
+
+        end_events = [
+            event
+            for event in turn.events
+            if getattr(event, "type", None) == "tool_execution_end"
+        ]
+        self.assertTrue(end_events[0].is_error)
+        self.assertEqual(completed, [])
+
     def test_extension_ui_round_trip(self) -> None:
         with self.make_client() as client:
             client.prompt("needs ui")
@@ -1685,6 +1781,201 @@ class TerminatesProcessGroupTests(unittest.TestCase):
             first,
             "grandchild kept running after stop() — process group leaked",
         )
+
+
+class _Survivor:
+    """A child that cannot be reaped until it is told to `exit()`.
+
+    Models a process whose pending SIGKILL only lands after it leaves
+    uninterruptible sleep: `poll()`/`wait()` report it alive until `exit()`
+    flips the state, and `terminate()`/`kill()` never change it on their own.
+    """
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.stdin = None
+        self.stdout = None
+        self.stderr = None
+        self._code: int | None = None
+
+    def exit(self) -> None:
+        self._code = 0
+
+    def poll(self) -> int | None:
+        return self._code
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self._code is None:
+            raise subprocess.TimeoutExpired(cmd="omp", timeout=timeout)
+        return self._code
+
+    def terminate(self) -> None:  # survivor ignores signals
+        pass
+
+    def kill(self) -> None:  # survivor ignores signals
+        pass
+
+
+class RetainsSurvivorTests(unittest.TestCase):
+    """Regression (#12767): teardown that cannot confirm death must report it,
+    retain the survivor, and stay re-reapable — never drop the only handle.
+
+    Before the fix `_terminate_process_group` swallowed both `wait()` timeouts
+    and returned nothing, and `stop()` nulled `_process`/`_pgid` unconditionally,
+    so a child stuck in uninterruptible sleep became unobservable and the second
+    `stop()` was a guaranteed no-op.
+    """
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+    def test_survivor_is_reported_retained_and_reaped_later(self) -> None:
+        survivor = _Survivor(pid=424242)
+        signals: list[tuple[int, int]] = []
+
+        def fake_killpg(pgid: int, sig: int) -> None:
+            signals.append((pgid, sig))
+            # Signal 0 probes group liveness; the group empties only once the
+            # survivor has actually exited.
+            if sig == 0 and survivor.poll() is not None:
+                raise ProcessLookupError()
+
+        client = RpcClient(command=[sys.executable, "-c", "pass"])
+        client._process = survivor  # type: ignore[assignment]
+        client._pgid = survivor.pid
+
+        with mock.patch("os.killpg", side_effect=fake_killpg):
+            # First stop(): survivor cannot be killed -> teardown reports failure,
+            # drops the live handle but keeps it observable as a survivor.
+            self.assertIs(client.stop(), False)
+            self.assertIsNone(client._process)
+            self.assertEqual(client.survivor_pids, (survivor.pid,))
+
+            # The second stop() (the one the `with` exit / cancel hook fires) must
+            # re-signal the group, not no-op.
+            signals.clear()
+            self.assertFalse(client.stop())
+            self.assertIn((survivor.pid, signal.SIGKILL), signals)
+            self.assertEqual(client.survivor_pids, (survivor.pid,))
+
+            # Once the child leaves uninterruptible sleep, reap() confirms it and
+            # clears the survivor — probing the group (signal 0) without sending
+            # TERM/KILL to a pgid that may already have been reused.
+            survivor.exit()
+            signals.clear()
+            self.assertTrue(client.reap())
+            self.assertEqual(signals, [(survivor.pid, 0)])
+            self.assertEqual(client.survivor_pids, ())
+
+    def test_restart_and_stop_keep_every_unreaped_survivor(self) -> None:
+        # `pgid=None` takes the leader-only teardown path, so the stuck fakes
+        # need no `os.killpg` mock and the test runs on every platform.
+        first = _Survivor(pid=424243)
+        second = _Survivor(pid=424244)
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", FAKE_SERVER],
+            startup_timeout=2.0,
+            request_timeout=2.0,
+        )
+        client._process = first  # type: ignore[assignment]
+        client._pgid = None
+        self.assertIs(client.stop(), False)
+        self.assertEqual(client.survivor_pids, (first.pid,))
+
+        # Restart with a healthy child: its own teardown succeeds, but the
+        # earlier child is still alive, so stop() must not report success or
+        # forget it.
+        client.start()
+        healthy = client._process
+        assert healthy is not None
+        self.assertIs(client.stop(), False)
+        self.assertIsNotNone(healthy.poll(), "healthy child survived stop()")
+        self.assertEqual(client.survivor_pids, (first.pid,))
+
+        # A second stuck child joins the first instead of overwriting it.
+        client._process = second  # type: ignore[assignment]
+        client._pgid = None
+        self.assertIs(client.stop(), False)
+        self.assertEqual(client.survivor_pids, (first.pid, second.pid))
+
+        first.exit()
+        self.assertIs(client.reap(), False)
+        self.assertEqual(client.survivor_pids, (second.pid,))
+        second.exit()
+        self.assertIs(client.reap(), True)
+        self.assertEqual(client.survivor_pids, ())
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+    def test_terminate_confirms_and_reaps_a_real_child(self) -> None:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        pgid = _process_group_id(proc)
+        self.assertIsNotNone(pgid)
+
+        self.assertTrue(_terminate_process_group(proc, pgid))
+        self.assertIsNotNone(proc.poll(), "child survived a confirmed teardown")
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+    def test_terminate_waits_for_killed_term_ignoring_grandchild(self) -> None:
+        # A grandchild that ignores SIGTERM outlives the first escalation step
+        # and dies only to SIGKILL, after the leader is already reaped. Killed
+        # members stay visible to `killpg(pgid, 0)` until init reaps them, so
+        # an immediate post-SIGKILL probe misreports a dying group as a
+        # survivor.
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        pid_file = os.path.join(work, "gc.pid")
+        grandchild = """trap '' TERM; echo $$ > "$1"; sleep 30 & wait"""
+        leader = textwrap.dedent(
+            f"""
+            import subprocess, time
+            subprocess.Popen(["sh", "-c", {grandchild!r}, "sh", {pid_file!r}])
+            time.sleep(30)
+            """
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", leader],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        pgid = _process_group_id(proc)
+        self.assertIsNotNone(pgid)
+        assert pgid is not None
+
+        def _kill_leaked_group() -> None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+        self.addCleanup(_kill_leaked_group)
+
+        # The pid file is written after the trap is installed, so SIGTERM is
+        # guaranteed to be ignored once it holds a pid.
+        grandchild_pid: int | None = None
+        deadline = time.monotonic() + 5.0
+        while grandchild_pid is None and time.monotonic() < deadline:
+            try:
+                with open(pid_file, encoding="utf-8") as f:
+                    grandchild_pid = int(f.read())
+            except (OSError, ValueError):
+                time.sleep(0.02)
+        self.assertIsNotNone(grandchild_pid, "grandchild never installed its trap")
+        assert grandchild_pid is not None
+
+        self.assertIs(_terminate_process_group(proc, pgid), True)
+        self.assertIsNotNone(proc.poll(), "leader survived a confirmed teardown")
+        with self.assertRaises(ProcessLookupError):
+            os.kill(grandchild_pid, 0)
 
 
 if __name__ == "__main__":

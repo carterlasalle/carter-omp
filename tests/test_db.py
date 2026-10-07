@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -730,3 +731,217 @@ def test_record_run_and_authorization_decision(tmp_path) -> None:
         assert dec["authorized"] == 1
     finally:
         db.close()
+
+
+def test_event_telemetry_round_trips_and_aggregates(db: Database) -> None:
+    """The console's spend surface: per-run rows in, sums and fallback share out."""
+
+    db.record_event(
+        delivery_id="run-a",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key=issue_key("octo/widget", 1),
+        payload={"i": 1},
+    )
+    db.record_event(
+        delivery_id="run-b",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key=issue_key("octo/widget", 2),
+        payload={"i": 2},
+    )
+    db.set_event_telemetry(
+        "run-a",
+        fallback_model=None,
+        duration_ms=1000,
+        cost_usd=0.25,
+        cache_cost_usd=0.05,
+        miss_tokens=100,
+        output_tokens=10,
+        cache_read_tokens=900,
+        cache_write_tokens=50,
+    )
+    db.set_event_telemetry(
+        "run-b",
+        fallback_model="openrouter/other",
+        duration_ms=2000,
+        cost_usd=0.75,
+        cache_cost_usd=0.15,
+        miss_tokens=200,
+        output_tokens=20,
+        cache_read_tokens=1800,
+        cache_write_tokens=100,
+    )
+    # A run that recorded nothing must not be averaged in as a zero-cost run.
+    db.record_event(
+        delivery_id="run-c",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key=issue_key("octo/widget", 3),
+        payload={"i": 3},
+    )
+
+    summary = db.telemetry_summary()
+    assert summary["runs"] == 2
+    assert summary["cost_usd"] == 1.0
+    assert summary["cache_cost_usd"] == 0.2
+    assert summary["miss_tokens"] == 300
+    assert summary["output_tokens"] == 30
+    assert summary["cache_read_tokens"] == 2700
+    assert summary["cache_write_tokens"] == 150
+    assert summary["fallback_runs"] == 1
+
+    runs = db.recent_run_telemetry(limit=10)
+    assert [r["delivery_id"] for r in runs] == ["run-b", "run-a"]
+    assert runs[0]["fallback_model"] == "openrouter/other"
+    assert runs[0]["cost_usd"] == 0.75
+
+    # Window arithmetic: the runs were written with finished_at set by
+    # `set_event_telemetry` (now), so a window ending in the past excludes them.
+    assert db.telemetry_summary(since=iso_seconds_ago(-60))["runs"] == 0
+
+
+def test_worker_records_run_telemetry_on_the_event_row(db: Database) -> None:
+    """`_record_run_telemetry` is what the spend aggregates and footer read."""
+    from types import SimpleNamespace
+
+    from carter_omp import worker
+    from carter_omp.host_tools import RunStats
+
+    db.record_event(
+        delivery_id="run-w",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key=issue_key("octo/widget", 4),
+        payload={"i": 4},
+    )
+    stats = RunStats(model="opencode-go/muse-spark-1.3-contributor", started_monotonic=time.monotonic())
+    stats.note_answered_model("openrouter", "fallback-model")
+    stats.add_usage(
+        {
+            "input": 10,
+            "output": 5,
+            "cacheRead": 100,
+            "cacheWrite": 7,
+            "cost": {"total": 0.4, "cacheRead": 0.1},
+        }
+    )
+    inputs = SimpleNamespace(db=db, delivery_id="run-w")
+    bindings = SimpleNamespace(stats=stats)
+
+    worker._record_run_telemetry(inputs, bindings)
+
+    row = db.recent_run_telemetry(limit=1)[0]
+    assert row["delivery_id"] == "run-w"
+    assert row["fallback_model"] == "openrouter/fallback-model"
+    assert row["cost_usd"] == 0.4
+    assert row["cache_cost_usd"] == 0.1
+    assert row["tokens_miss"] == 10
+    assert row["tokens_out"] == 5
+    assert row["tokens_cache_read"] == 100
+    assert row["tokens_cache_write"] == 7
+    assert row["duration_ms"] is not None and row["duration_ms"] >= 0
+
+    # Best-effort: no stats at all must never raise into a run.
+    worker._record_run_telemetry(inputs, SimpleNamespace(stats=None))
+
+
+def test_pending_events_orders_by_backoff_and_only_queues(db: Database) -> None:
+    for delivery in ("later", "now", "done"):
+        db.record_event(
+            delivery_id=delivery,
+            event_type="issues",
+            repo="octo/widget",
+            issue_key=issue_key("octo/widget", 1),
+            payload={"i": 1},
+        )
+    assert db.claim_next_event() is not None  # "later" is oldest by received_at
+    assert db.schedule_retry("later", delay_seconds=600, error="boom")
+    claimed = db.claim_next_event()
+    assert claimed is not None and claimed.delivery_id == "now"
+    db.mark_event("now", "done")
+    db.mark_event("done", "done")
+
+    # Only the backoff row is still queued; it sorts last against a fresh
+    # delivery because its `available_at` is 10 minutes out.
+    db.record_event(
+        delivery_id="fresh",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key=issue_key("octo/widget", 2),
+        payload={"i": 2},
+    )
+    pending = db.pending_events(limit=10)
+    assert [row["delivery_id"] for row in pending] == ["fresh", "later"]
+    assert pending[1]["available_at"] is not None
+
+
+def test_dead_letter_events_respects_the_retry_budget(db: Database) -> None:
+    for delivery, attempts in (("burned", 3), ("one-left", 2)):
+        db.record_event(
+            delivery_id=delivery,
+            event_type="issues",
+            repo="octo/widget",
+            issue_key=issue_key("octo/widget", 1),
+            payload={"i": 1},
+        )
+        for attempt in range(attempts):
+            claimed = db.claim_next_event()
+            assert claimed is not None and claimed.delivery_id == delivery
+            assert claimed.attempts == attempt + 1
+            if attempt + 1 < attempts:
+                # A failed row is terminal; retrying goes through the backoff path.
+                assert db.schedule_retry(delivery, delay_seconds=0, error=f"{delivery} died")
+        db.mark_event(delivery, "failed", error=f"{delivery} died")
+
+    dead = db.dead_letter_events(max_attempts=3, limit=10)
+    assert [row["delivery_id"] for row in dead] == ["burned"]
+    assert dead[0]["attempts"] == 3
+    assert dead[0]["last_error"] == "burned died"
+
+
+def test_issue_index_status_reports_rows_prs_and_watermark(db: Database) -> None:
+    from carter_omp.github_client import IssueIndexEntry
+
+    for number, is_pr in ((1, False), (2, False), (3, True)):
+        db.upsert_issue_index(
+            IssueIndexEntry(
+                repo="octo/widget",
+                number=number,
+                is_pull_request=is_pr,
+                title=f"t{number}",
+                body="",
+                state="open",
+                state_reason="",
+                merged_at="",
+                author="alice",
+                labels=(),
+                comments=0,
+                created_at="2026-01-01T00:00:00Z",
+                updated_at=f"2026-01-0{number}T00:00:00Z",
+                html_url=f"https://github.com/octo/widget/{number}",
+            )
+        )
+    db.set_issue_index_watermark("octo/widget", "2026-02-01T00:00:00Z")
+
+    rows = db.issue_index_status()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["repo"], row["rows"], row["pull_requests"]) == ("octo/widget", 3, 1)
+    assert row["newest_issue_at"] == "2026-01-03T00:00:00Z"
+    assert row["last_synced"] == "2026-02-01T00:00:00Z"
+
+
+def test_self_report_fingerprint_round_trip(db: Database) -> None:
+    """A filed report is remembered immediately, so the next run appends.
+
+    GitHub's issue list needs seconds to show a just-created issue; the DB is
+    what makes back-to-back reports converge on one issue.
+    """
+    assert db.self_report_fingerprint("abc") is None
+    db.record_self_report("abc", issue_number=41, url="https://x/41", title="t")
+    assert db.self_report_fingerprint("abc") == 41
+    # Recording again updates in place (same fingerprint → same issue).
+    db.record_self_report("abc", issue_number=41, url="https://x/41", title="t2")
+    assert db.self_report_fingerprint("abc") == 41
+    assert db.self_report_fingerprint("other") is None

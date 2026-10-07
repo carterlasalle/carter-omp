@@ -9,6 +9,7 @@ CARTER_OMP_TRIGGER_MODE=strict
 CARTER_OMP_TRIGGER_LABEL=carter-omp
 CARTER_OMP_MENTION_TRIGGERS=true
 CARTER_OMP_LABEL_TRIGGERS=true
+CARTER_OMP_ASSIGN_TRIGGERS=true
 CARTER_OMP_AUTO_ISSUE_TRIAGE=false
 CARTER_OMP_AUTO_PR_REVIEW=false
 CARTER_OMP_AUTO_COMMENT_FOLLOWUPS=false
@@ -26,6 +27,7 @@ CARTER_OMP_QUESTION_AUTOCLOSE_ENABLED=false
 | `CARTER_OMP_TRIGGER_LABEL` | `carter-omp` | The label name that acts as the one-shot button. Only the signed `labeled` event from an authorized sender counts — the label merely existing on an issue means nothing. Other values (`carter-omp:running`, `:done`, …) are state indicators and never trigger. |
 | `CARTER_OMP_MENTION_TRIGGERS` | `true` | Master switch for `@carter-omp <directive>` comments. `false` disables mention triggers even from Carter. Requires authorized `sender.id` AND an exact bot mention. |
 | `CARTER_OMP_LABEL_TRIGGERS` | `true` | Master switch for label triggers. `false` disables label triggers even from Carter. |
+| `CARTER_OMP_ASSIGN_TRIGGERS` | `true` | Master switch for assignment triggers: an authorized sender assigning **the bot itself** queues the same work a label would. Assigning a human never triggers. |
 | `CARTER_OMP_AUTO_ISSUE_TRIAGE` | `false` | When `true`, every opened/reopened issue auto-queues triage with no explicit trigger. Ambient behavior — keep `false` in production. Startup refuses `strict` + `true`. |
 | `CARTER_OMP_AUTO_PR_REVIEW` | `false` | When `true`, every opened/reopened/ready PR auto-queues a review. Ambient behavior — keep `false` in production. Startup refuses `strict` + `true`. |
 | `CARTER_OMP_AUTO_COMMENT_FOLLOWUPS` | `false` | When `true`, ordinary follow-up comments resume the session without a mention. Ambient behavior — keep `false` in production. Startup refuses `strict` + `true`. |
@@ -43,21 +45,43 @@ the bot consumes it (remove → `carter-omp:running` → terminal state label).
 Only `carter-omp` triggers. `carter-omp:running`, `carter-omp:done`,
 `carter-omp:needs-input`, `carter-omp:failed` are state indicators.
 
+## Assign trigger
+<!-- trace:v1 id=doc.triggers-assign work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0 -->
+
+Assigning the bot (`carter-omp[bot]`) to an issue or PR queues the same work
+the label would: issue assignment → `triage_issue`, PR assignment → review or
+resume. It needs an authorized `sender.id` too, and the check is on the
+`assigned` event's assignee — assigning a human is never a trigger, and
+`unassigned` never is. Disable with `CARTER_OMP_ASSIGN_TRIGGERS=false`.
+
+## Thread context
+<!-- trace:v1 id=doc.triggers-thread-context work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0 -->
+
+Label, assign, and mention runs carry the issue's **whole comment thread
+inline** in the prompt (issue body + every comment, chronological). The
+mention run excludes the comment that triggered it — that one is quoted
+separately — and re-fetches nothing, so a run sees the reporter's follow-ups
+where the real repro steps usually live. PR runs inline the thread the same
+way, including review comments and reviews. New comments posted *after* the
+run started are fetched with the `fetch_issue_thread` host tool.
+
 ## Mention trigger
 
 `@carter-omp <directive>` in a comment, requiring BOTH authorized `sender.id`
 AND an exact bot mention (token-boundary, case-insensitive;
 `@carter-omp-evil` does not match). The remaining text becomes the trusted
-operator directive. Small control commands: `status`, `stop`, `review`,
-`resume`, `release-fix`. `stop` cancels without a model turn; `status` answers
-from the DB.
+operator directive. Control commands answered without a model turn: `status`
+(answers from the DB) and `stop` (cancels the running run(s) for that same
+issue). Every other directive — including `review`, `resume`, and
+`release-fix` — starts a normal model run.
 
 ## What does NOT trigger
 
 Issue opened/reopened, PR opened/reopened/ready_for_review/synchronized,
-unlabeled comments, review comments without mention, reviewer-bot comments,
-workflow runs — all `state=skipped` (`explicit_trigger_required`,
-`mention_required`, etc.) with no model invocation.
+assigning a *human*, `unassigned`, unlabeled comments, review comments without
+mention, reviewer-bot comments, workflow runs — all `state=skipped`
+(`explicit_trigger_required`, `mention_required`, `assignee_not_bot`, etc.)
+with no model invocation.
 
 ## Routing table
 
@@ -65,9 +89,11 @@ workflow runs — all `state=skipped` (`explicit_trigger_required`,
 |---|---|
 | `issues.opened/reopened` | index only, skip |
 | `issues.labeled` (trigger, authorized) | queue `triage_issue`/resume |
+| `issues.assigned` (bot assignee, authorized) | queue `triage_issue`/resume |
 | `issue_comment.created` (mention, authorized) | queue `handle_comment`/bootstrap |
 | `pull_request.opened/reopened/ready_for_review` | index only, skip |
 | `pull_request.labeled` (trigger, authorized) | queue `review_pr` (or resume bot PR) |
+| `pull_request.assigned` (bot assignee, authorized) | queue `review_pr` (or resume bot PR) |
 | `pull_request_review_comment.created` (mention, authorized) | queue `handle_review`/review-only |
 | `pull_request.closed` / `issues.closed` | deterministic cleanup, no model |
 | `workflow_run.completed` | skip (release repair via explicit `@carter-omp release-fix` only) |

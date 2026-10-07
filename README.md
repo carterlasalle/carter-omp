@@ -49,6 +49,8 @@ GitHub is untrusted input. The signed webhook's `sender.id` and `repository.id` 
 | Search | Issue/commit search, reviewer requests, thread context with provenance |
 | Sessions | Persistent per-issue transcripts (`--continue` resume), crash recovery, durable SQLite queue, per-issue serialization |
 | Operations | Dashboard with trigger/actor/decision/capability columns, audited host-tool actions, cancellation, model/thinking overrides |
+| Spend + telemetry | Per-run model/duration/cost/tokens recorded by the worker, aggregated per day/week/all-time in the console's **System** view; every bot-authored GitHub text (comments, PR bodies, review bodies) carries the model/duration/cost footer |
+| Self-report | Friction the bot hits in the harness itself (a tool rejecting a valid call, a misleading error, a gate that blocked work) is filed with `report_pain_point` as a deduped, labelled issue on `CARTER_OMP_SELF_REPORT_REPO` — the destination and provenance are host-side, so the model never picks the repo |
 | Release repair | Elevated default-branch/tag capabilities via explicit `@carter-omp release-fix` only |
 
 ## Quick start
@@ -114,7 +116,7 @@ Full sequence with App wiring and secret mounts: [Setup](docs/setup.md).
 2. Carter reviews it. To run the agent, add the `carter-omp` label — or comment `@carter-omp investigate this but don't change code yet`.
 3. The agent triages, reproduces, edits, tests, pushes a `carter-omp/*` branch, opens a PR, and comments back.
 4. Later: `@carter-omp go ahead and implement it`. On its PR: `@carter-omp address the latest review comments` — same session resumes, same branch, review text as context, Carter's comment as the authoritative directive.
-5. Small control commands: `@carter-omp status` (DB answer, no model), `@carter-omp stop` (cancel without a model turn), `@carter-omp review` / `resume` / `release-fix`.
+5. Control commands answered without a model turn: `@carter-omp status` (DB answer) and `@carter-omp stop` (cancels that issue's running run). Anything else after the mention — `review`, `resume`, `release-fix`, … — is an ordinary directive the agent runs.
 
 ## Safety model
 <!-- trace:v1 id=doc.readme-safety-model work=WORK-CO-Q8Z1HJJJ -->
@@ -126,7 +128,7 @@ carter-omp intentionally makes unauthorized paths inert:
 - Capabilities are fixed per run by trusted routing code; the model cannot request more, and subagents inherit (never escalate).
 - Host tools are bound to the current thread/branch/repo; the proxy re-checks repo, thread, branch namespace, and action on every call.
 - Repository content (issues, diffs, `AGENTS.md`, test output, CI logs) is untrusted task data — it cannot grant permissions or override `TriggerContext`.
-- Secrets never reach the agent: the proxy holds the GitHub credential, the runner env is scrubbed, containers run non-root with dropped capabilities and no Docker socket.
+- Secrets never reach the agent: the proxy holds the GitHub credential, the runner env is scrubbed, agent/test subprocesses run as unprivileged slot users, containers drop all capabilities but the minimum needed to demote them, and no Docker socket is mounted.
 
 The normative threat model is in [Security](docs/security.md). Trigger semantics are in [Triggers](docs/triggers.md). Architectural decisions are indexed in [docs/adrs/](docs/adrs/).
 

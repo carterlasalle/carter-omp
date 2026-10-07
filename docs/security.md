@@ -36,9 +36,9 @@ rights, `main` mutation, check bypass, or cross-issue/repo actions.
 |---|---|
 | Prompt injection | `<authorization-boundary>` prompt section; capabilities fixed by host; unexposed tools; proxy re-checks |
 | Unauthorized compute trigger | Strict router: only exact authorized label/mention queues; everything else `state=skipped` before the queue |
-| Unauthorized GitHub write | `bindings.require()` on every side-effect tool; proxy enforces repo/thread/branch/action; App installation tokens scoped per repo |
+| Unauthorized GitHub write | `bindings.require()` on every side-effect tool; the proxy independently enforces repo, capability, the run's branch namespace (`carter-omp/<hex>/`) and both threads the run owns (originating issue + the PR it opened); App installation tokens scoped per repo |
 | Cross-repo confused deputy | `repository.id` allowlist at router + proxy; push/PR tools pin trigger repo |
-| Cross-issue confused deputy | Comment/label tools bound to current thread; push requires workspace branch |
+| Cross-issue confused deputy | Comment/label tools bound to the run's own threads; push requires a branch inside the run's namespace |
 | Credential exfiltration | Expanded `_SCRUBBED_ENV_KEYS`; credential sidecar; agent env never holds PAT/App key/webhook secret/HMAC |
 | Malicious test/package code | Dependency install + tests + agent bash share the credential-free sandbox; non-root runner; dropped capabilities |
 | Network pivoting | Orchestrator/runner/proxy segmentation; per-repo network policy; RFC1918/link-local/metadata blocks (operator config) |

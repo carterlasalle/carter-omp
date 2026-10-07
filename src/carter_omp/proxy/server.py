@@ -49,7 +49,7 @@ from carter_omp.git_ops import (
 from carter_omp.git_ops import (
     push_release as git_push_release,
 )
-from carter_omp.github_client import GitHubClient, GitHubError
+from carter_omp.github_client import GitHubClient, GitHubError, file_self_report
 from carter_omp.proxy_hmac import HEADER_RUN_TOKEN, HEADER_SIGNATURE, HEADER_TIMESTAMP, verify
 from carter_omp.run_token import RunToken, verify_run_token
 from carter_omp.sandbox import _safe_directory_env, _slot_subprocess_kwargs
@@ -231,12 +231,33 @@ def _resolve_token(cfg: Settings) -> str:
     return cfg.github_token.get_secret_value()
 
 
+# trace:v1 id=impl.proxy-installation-for work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _installation_for(provider: Any, cfg: Settings, repo: str) -> int:
+    """Installation id serving `repo`, resolved from the repo itself.
+
+    A deployment can serve several orgs, each with its own App installation;
+    the configured id(s) are only a fallback for when the lookup fails.
+    """
+    try:
+        return int(provider.installation_for_repo(repo))
+    except Exception as exc:
+        fallback = cfg.github_installation_id
+        if fallback is None:
+            raise
+        log.warning(
+            "installation lookup failed; using the configured id",
+            extra={"repo": repo, "err": str(exc)[:160]},
+        )
+        return fallback
+
+
+# trace:v1 id=impl.proxy-resolve-git-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def _resolve_git_token(cfg: Settings, repo: str) -> str:
     """Token for authenticated git operations, preferring the App provider."""
     provider = getattr(cfg, "_app_token_provider", None)
-    if provider is not None and cfg.github_installation_id is not None:
+    if provider is not None:
         try:
-            return provider.token_for_repo(installation_id=cfg.github_installation_id, repo=repo)
+            return provider.token_for_repo(installation_id=_installation_for(provider, cfg, repo), repo=repo)
         except Exception as exc:
             log.warning("app token for git failed, PAT fallback", extra={"repo": repo, "err": str(exc)[:200]})
     return _resolve_token(cfg)
@@ -254,11 +275,36 @@ def _scoped_client(request: Request, repo: str) -> GitHubClient:
 
     cfg: Settings = request.app.state.settings
     provider: AppTokenProvider | None = getattr(request.app.state, "app_token_provider", None)
-    if provider is None or cfg.github_installation_id is None:
+    if provider is None:
         return request.app.state.github
-    token = provider.token_for_repo(installation_id=cfg.github_installation_id, repo=repo)
+    token = provider.token_for_repo(installation_id=_installation_for(provider, cfg, repo), repo=repo)
     transport = getattr(request.app.state.github, "_transport", None)
     return GitHubClient(token, transport=transport)
+
+
+# trace:v1 id=impl.proxy-shared-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _shared_token(settings: Settings, provider: Any) -> str:
+    """Token for the proxy's shared (unscoped) client.
+
+    App mode: the configured installation id when set, else the installation
+    serving the first allowlisted repo (a deployment may configure no id at
+    all). PAT mode: the static token.
+    """
+    if provider is not None:
+        installation = settings.github_installation_id
+        if installation is None:
+            for repo in sorted(settings.repo_allowlist):
+                try:
+                    installation = int(provider.installation_for_repo(repo))
+                    break
+                except Exception as exc:
+                    log.warning(
+                        "installation lookup for the shared client failed",
+                        extra={"repo": repo, "err": str(exc)[:160]},
+                    )
+        if installation is not None:
+            return provider.token_unscoped(installation_id=installation)
+    return _resolve_token(settings)
 
 
 def _resolve_hmac_key(cfg: Settings) -> bytes:
@@ -324,14 +370,53 @@ def _require_run_repo(token: RunToken, repo: str) -> None:
         raise HTTPException(403, "run token repo mismatch")
 
 
+# trace:v1 id=impl.proxy-run-branch-namespace work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _run_branch_namespace(branch: str) -> str | None:
+    """`carter-omp/<hex>/…` → `carter-omp/<hex>`, else None.
+
+    `<hex>` identifies one workspace/run. A sanctioned rename
+    (`classify_issue(branch_slug=…)` → `rename_workspace_branch`) keeps that
+    segment and only swaps the slug, so namespace identity survives a rename
+    while still separating one run's branches from another's.
+    """
+    parts = branch.split("/")
+    if len(parts) >= 3 and parts[0] == "carter-omp" and parts[1]:
+        return f"{parts[0]}/{parts[1]}"
+    return None
+
+
+# trace:v1 id=impl.proxy-require-run-thread work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _require_run_thread(token: RunToken, number: int) -> None:
-    if token.issue is not None and token.issue != number:
+    """Accept the originating issue OR the PR this run opened.
+
+    Both threads belong to the same authorized run; a token pinned to the
+    issue alone rejects every follow-up (review request, reply, label edit) on
+    the PR the run just created.
+    """
+    allowed = {n for n in (token.issue, token.pull_request) if n is not None}
+    if allowed and number not in allowed:
         raise HTTPException(403, "run token thread mismatch")
 
 
+# trace:v1 id=impl.proxy-require-run-branch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _require_run_branch(token: RunToken, branch: str) -> None:
-    if token.branch is not None and token.branch != branch:
-        raise HTTPException(403, "run token branch mismatch")
+    """Accept the token's branch or another branch in the same run namespace.
+
+    The exact branch is pinned at mint time, but a run may legitimately rename
+    its own workspace branch (classify_issue branch_slug) — the rename keeps
+    `carter-omp/<hex>/`, so the namespace is the real boundary. Failures name
+    both accepted scopes so a caller can see what was expected instead of
+    guessing.
+    """
+    if token.branch is None or branch == token.branch:
+        return
+    token_namespace = _run_branch_namespace(token.branch)
+    if token_namespace is not None and _run_branch_namespace(branch) == token_namespace:
+        return
+    raise HTTPException(
+        403,
+        f"run token branch mismatch: {branch!r} is outside {token_namespace or token.branch!r}",
+    )
 
 
 def _require_push_namespace(branch: str) -> None:
@@ -504,10 +589,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         # per-request scoped client refreshes it later); PAT mode uses the
         # static token. No GITHUB_TOKEN is required in App mode.
         provider = getattr(settings, "_app_token_provider", None)
-        if provider is not None and settings.github_installation_id is not None:
-            app.state.github = GitHubClient(provider.token_unscoped(installation_id=settings.github_installation_id))
-        else:
-            app.state.github = GitHubClient(_resolve_token(settings))
+        app.state.github = GitHubClient(_shared_token(settings, provider))
         app.state.settings = settings
         yield
 
@@ -847,6 +929,49 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         except GitHubError as exc:
             return _gh_error_response(exc)
         return JSONResponse(_serialize(pr))
+
+    # trace:v1 id=impl.src-carter-omp-proxy-server.create-proxy-app work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
+    @app.post("/gh/v1/self-report")
+    async def self_report_endpoint(request: Request) -> JSONResponse:
+        """File a friction report against the harness repo.
+
+        The run token proves *which* run is reporting and carries the
+        capability; the destination comes from the proxy's own config and the
+        origin from the token, so neither is model-controlled. The deployment's
+        trigger label is attached so reports land in the operator's normal
+        queue (the repo's own `carter-omp` label).
+        """
+        data = await _json_body(request)
+        cfg: Settings = request.app.state.settings
+        token = _require_run_token(request, cfg)
+        _require_run_cap(token, "report_upstream")
+        target = cfg.self_report_repo.strip()
+        if not target:
+            raise HTTPException(404, "self-reporting is not configured")
+        _enforce_repo_scope(cfg, target)
+        title = _require_str(data.get("title"), "title")
+        body = _require_str(data.get("body"), "body")
+        severity = str(data.get("severity") or "medium").lower()
+        if severity not in ("low", "medium", "high"):
+            raise HTTPException(400, "severity must be low, medium or high")
+        raw_issue = data.get("issue_number")
+        issue_number = _require_int(raw_issue, "issue_number") if raw_issue is not None else None
+        origin = f"`{token.repo}#{token.issue}` · run `{token.run_id}`"
+        github = _scoped_client(request, target)
+        try:
+            result = await file_self_report(
+                github,
+                repo=target,
+                title=title,
+                body=body,
+                severity=severity,
+                provenance=origin,
+                issue_number=issue_number,
+                extra_labels=[cfg.trigger_label] if cfg.trigger_label else [],
+            )
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse(result)
 
     @app.post("/gh/v1/request_reviewers")
     async def request_reviewers(request: Request) -> JSONResponse:

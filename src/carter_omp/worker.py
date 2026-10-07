@@ -19,11 +19,14 @@ import logging
 import os
 import shutil
 import threading
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from omp_rpc import (
+    HostToolCompletedEvent,
     MessageUpdateEvent,
     RpcClient,
     RpcError,
@@ -306,6 +309,20 @@ def _build_extra_env(settings: Settings) -> dict[str, str]:
     # (x-omp-app) so broker-side per-client burn tracking shows `carter_omp`
     # instead of an anonymous gateway client.
     env["OMP_APP_NAME"] = "carter_omp"
+    # Repo lifecycle scripts must not touch SHARED git metadata: husky's
+    # `prepare` runs `git config core.hooksPath`, which rewrites the pool's
+    # `.git/config` as the invoking slot's uid:gid and locks every other slot
+    # out of that repo mid-run (`fatal: unable to access '.git/config'`).
+    # Git hooks are useless in a sandboxed worktree anyway.
+    env["HUSKY"] = "0"
+    env["HUSKY_SKIP_INSTALL"] = "1"
+    # omp's bash tool allocates a PTY by default. In this harness the child
+    # occasionally dies mid-turn with `EPIPE: broken pipe, write` from Bun's
+    # stream teardown (observed right after bash/edit tool calls, exit 1, no
+    # cancel or timeout involved), which fails the event and re-runs the whole
+    # task. Nothing here is interactive, so run bash without a PTY — omp's own
+    # escape hatch for non-interactive/daemon contexts.
+    env["PI_NO_PTY"] = "1"
     if _AGENT_HOME.is_dir():
         env["HOME"] = str(_AGENT_HOME)
     return env
@@ -314,6 +331,10 @@ def _build_extra_env(settings: Settings) -> dict[str, str]:
 _TERMINAL_TRIAGE_TOOLS: frozenset[str] = frozenset({"gh_open_pr", "mark_unable_to_reproduce", "abort_task"})
 _TERMINAL_REVIEW_TOOLS: frozenset[str] = frozenset({"submit_pr_review", "abort_task"})
 _TERMINAL_RELEASE_TOOLS: frozenset[str] = frozenset({"release_retag", "abort_task"})
+# A mention's deliverable *is* the reply: without it the human is left with a
+# run that consumed tokens and said nothing (see the 2026-10-07 run on
+# personal_website#64, which ended after todo/bash calls with no comment).
+_TERMINAL_COMMENT_TOOLS: frozenset[str] = frozenset({"gh_post_comment", "abort_task"})
 _PR_REQUIRING_CLASSIFICATIONS: frozenset[str] = frozenset({"bug", "documentation"})
 
 
@@ -322,6 +343,7 @@ def _task_timeout(settings: Settings, task_kind: str) -> float:
     return settings.release_task_timeout_seconds if task_kind == "handle_release_ci" else settings.task_timeout_seconds
 
 
+# trace:v1 id=impl.worker-needs-completion-reminder work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _needs_completion_reminder(
     *,
     task_kind: str,
@@ -336,6 +358,8 @@ def _needs_completion_reminder(
         return not (tools_called & _TERMINAL_REVIEW_TOOLS)
     if task_kind == "handle_release_ci":
         return not (tools_called & _TERMINAL_RELEASE_TOOLS)
+    if task_kind == "handle_comment":
+        return not (tools_called & _TERMINAL_COMMENT_TOOLS)
     if task_kind != "triage_issue":
         return False
     row = inputs.db.get_issue(bindings.issue_key)
@@ -364,6 +388,7 @@ def _probe_workspace_dirty(workspace: Workspace, slot_uid: int | None) -> DirtyS
         return DirtyState(uncommitted=0, unpushed=0, summary="")
 
 
+# trace:v1 id=impl.worker-drive-turn work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _drive_turn(
     client: RpcClient,
     initial_prompt: str,
@@ -433,6 +458,13 @@ def _drive_turn(
             elif task_kind == "review_pr":
                 assert inputs.issue is not None
                 reminder = persona.review_completion_reminder(
+                    repo=inputs.repo,
+                    issue=inputs.issue,
+                    workspace=inputs.workspace,
+                )
+            elif task_kind == "handle_comment":
+                assert inputs.issue is not None
+                reminder = persona.comment_completion_reminder(
                     repo=inputs.repo,
                     issue=inputs.issue,
                     workspace=inputs.workspace,
@@ -519,6 +551,22 @@ def _has_prior_session(session_dir: Path) -> bool:
         return False
 
 
+# trace:v1 id=impl.worker-run-token-ttl work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _run_token_ttl(settings: Settings) -> int:
+    """Seconds a per-run proxy token must stay valid.
+
+    The token is minted once per run and used by every mutation in it, so it
+    has to outlive the whole task budget — not one round-trip. An expired
+    token 401s every push/comment/PR for the rest of the run, which is how a
+    run can end with the work committed and nothing published.
+    """
+    return int(
+        max(settings.task_timeout_seconds, settings.release_task_timeout_seconds)
+        + settings.task_timeout_hard_grace_seconds
+        + 300.0
+    )
+
+
 # trace:v1 id=impl.worker-attach-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
     """Mint a per-run proxy token and scope the GitHub client to it.
@@ -526,6 +574,13 @@ def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
     ToolBindings is frozen, so the scoped clients are attached via
     object.__setattr__. Without a TriggerContext (legacy/manual paths) the
     shared HMAC-only clients are left untouched.
+
+    The mint happens *before* the agent runs, but the run's identity does not
+    exist yet: `classify_issue(branch_slug=…)` renames the workspace branch and
+    the run opens its own PR later. The proxy pins both, so a token minted once
+    would 403 the run's own push/PR/review-request (issue #14). `bindings
+    .refresh_run_token` re-mints from the live branch/PR and re-scopes both
+    clients; the tools that change either call it.
     """
     from carter_omp.github_events import TriggerContext
     from carter_omp.proxy_client import GitHubProxyClient, ProxyGitTransport
@@ -538,20 +593,48 @@ def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
     if key is None:
         return
     thread = trigger.pull_request_number if trigger.pull_request_number is not None else trigger.issue_number
-    token = mint_run_token(
-        key=key.get_secret_value().encode("utf-8"),
-        run_id=trigger.run_id,
-        repo_id=trigger.repository_id,
-        repo=trigger.repository_full_name,
-        issue=thread,
-        workspace=None,
-        branch=inputs.workspace.branch,
-        capabilities=frozenset(c.value for c in trigger.capabilities),
-    )
-    if isinstance(inputs.github, GitHubProxyClient):
-        object.__setattr__(bindings, "github", inputs.github.with_run_token(token))
-    if isinstance(inputs.git_transport, ProxyGitTransport):
-        object.__setattr__(bindings, "git_transport", inputs.git_transport.with_run_token(token))
+    secret = key.get_secret_value().encode("utf-8")
+    capabilities = frozenset(c.value for c in trigger.capabilities)
+    ttl_seconds = _run_token_ttl(inputs.settings)
+    # Live claims, not a snapshot: `refresh` mutates these and re-mints.
+    claims: dict[str, str | int | None] = {
+        "branch": inputs.workspace.branch,
+        "pull_request": trigger.pull_request_number,
+    }
+
+    # trace:v1 id=impl.worker-run-token-apply work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def _apply(token: str) -> None:
+        if isinstance(inputs.github, GitHubProxyClient):
+            object.__setattr__(bindings, "github", inputs.github.with_run_token(token))
+        if isinstance(inputs.git_transport, ProxyGitTransport):
+            object.__setattr__(bindings, "git_transport", inputs.git_transport.with_run_token(token))
+
+    # trace:v1 id=impl.worker-run-token-mint work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def mint() -> str:
+        return mint_run_token(
+            key=secret,
+            run_id=trigger.run_id,
+            repo_id=trigger.repository_id,
+            repo=trigger.repository_full_name,
+            issue=thread,
+            pull_request=claims["pull_request"] if isinstance(claims["pull_request"], int) else None,
+            workspace=None,
+            branch=claims["branch"] if isinstance(claims["branch"], str) else None,
+            capabilities=capabilities,
+            ttl_seconds=ttl_seconds,
+        )
+
+    # trace:v1 id=impl.worker-run-token-refresh work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def refresh_run_token(branch: str | None, pull_request: int | None) -> None:
+        """Re-mint with the run's current branch/PR and re-scope both clients."""
+        if branch is not None:
+            claims["branch"] = branch
+        if pull_request is not None:
+            claims["pull_request"] = pull_request
+        _apply(mint())
+
+    _apply(mint())
+    object.__setattr__(bindings, "refresh_run_token", refresh_run_token)
 
 
 # trace:v1 id=impl.worker-pickup-ack work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
@@ -571,7 +654,7 @@ async def _ack_pickup_reaction(inputs: TaskInputs, bindings: ToolBindings) -> No
     try:
         if trigger.trigger_kind == "mention" and trigger.trigger_object_id is not None:
             await bindings.github.add_comment_reaction(trigger.repository_full_name, trigger.trigger_object_id, "eyes")
-        elif trigger.trigger_kind == "label":
+        elif trigger.trigger_kind in ("label", "assign"):
             number = trigger.issue_number or trigger.pull_request_number
             if number is None:
                 return
@@ -580,6 +663,7 @@ async def _ack_pickup_reaction(inputs: TaskInputs, bindings: ToolBindings) -> No
         log.debug("pickup ack failed", extra={"delivery": inputs.delivery_id, "err": str(exc)[:120]})
 
 
+# trace:v1 id=impl.worker-build-prompt work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
 def _build_prompt(
     task_kind: str,
     inputs: TaskInputs,
@@ -607,7 +691,7 @@ def _build_prompt(
                 workspace=inputs.workspace,
                 directive=directive,
             )
-        return persona.kickoff(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace)
+        return persona.kickoff(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace, thread=thread)
     if task_kind == "review_pr":
         assert inputs.issue is not None
         assert pr is not None
@@ -670,6 +754,113 @@ def _build_prompt(
     raise ValueError(f"unknown task kind: {task_kind!r}")
 
 
+# trace:v1 id=impl.worker-agent-stalled work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+class AgentStalledError(TimeoutError):
+    """The agent stopped emitting events for longer than the silence budget.
+
+    A `TimeoutError` subclass so callers that already treat a timed-out turn as
+    transient keep working — but the message names the silence, because a bare
+    "timed out waiting for agent_end" reads as "still working" when in fact
+    nothing had happened for half an hour.
+    """
+
+
+# trace:v1 id=impl.worker-agent-activity-watch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+class _AgentActivityWatch:
+    """Restartable deadline on agent *silence*.
+
+    `prompt_and_wait` bounds the whole turn; nothing bounded silence, so a hung
+    provider stream (no message deltas, no tool events) burned the full task
+    budget and each retry repeated it — 2026-10-07, an issue comment on
+    `carterlasalle/scc#21` spent four 40-minute attempts, ~32 of those minutes
+    silent, and the traceback only ever said `Timed out waiting for
+    agent_end`. Every agent event re-arms the watch; on expiry the turn is
+    stopped and the failure names how long the silence lasted and what the
+    last event was.
+
+    `clock` and `interval` are injectable and `check()` is the whole loop body,
+    so the behaviour is testable without sleeping; `seconds <= 0` disables it.
+    """
+
+    # trace:v1 id=impl.worker-activity-watch-init work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def __init__(
+        self,
+        *,
+        seconds: float,
+        on_stall: Callable[[], None],
+        clock: Callable[[], float] = time.monotonic,
+        interval: float | None = None,
+    ) -> None:
+        self._seconds = seconds
+        self._on_stall = on_stall
+        self._clock = clock
+        # Poll often enough that a short budget still fires promptly, but never
+        # busier than 5s in production (the budget is minutes there).
+        self._interval = interval if interval is not None else min(5.0, max(seconds / 3.0, 0.01))
+        self._lock = threading.Lock()
+        self._last_at = clock()
+        self._last_kind = "turn start"
+        self._fired = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    # trace:v1 id=impl.worker-activity-watch-enabled work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @property
+    def enabled(self) -> bool:
+        return self._seconds > 0
+
+    # trace:v1 id=impl.worker-activity-watch-fired work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @property
+    def fired(self) -> bool:
+        return self._fired.is_set()
+
+    # trace:v1 id=impl.worker-activity-watch-touch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def touch(self, kind: str) -> None:
+        with self._lock:
+            self._last_at = self._clock()
+            self._last_kind = kind
+
+    # trace:v1 id=impl.worker-activity-watch-reason work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def reason(self) -> str:
+        with self._lock:
+            silent = self._clock() - self._last_at
+            kind = self._last_kind
+        return f"no agent activity for {int(silent)}s (last event: {kind})"
+
+    # trace:v1 id=impl.worker-agent-activity-check work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def check(self) -> bool:
+        """Fire once the silence exceeds the budget. Also the watcher's loop body."""
+        if self.fired or not self.enabled:
+            return self.fired
+        with self._lock:
+            silent = self._clock() - self._last_at
+        if silent < self._seconds:
+            return False
+        self._fired.set()
+        try:
+            self._on_stall()
+        except Exception:  # noqa: BLE001 — the caller still reports the stall
+            log.exception("stall stop failed")
+        return True
+
+    # trace:v1 id=impl.worker-activity-watch-start work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def start(self) -> None:
+        if not self.enabled:
+            return
+        self._thread = threading.Thread(target=self._watch, name="agent-activity-watch", daemon=True)
+        self._thread.start()
+
+    # trace:v1 id=impl.worker-activity-watch-stop work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def stop(self) -> None:
+        self._stop.set()
+
+    # trace:v1 id=impl.worker-activity-watch-watch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def _watch(self) -> None:
+        while not self._stop.wait(self._interval):
+            if self.check():
+                return
+
+
 # trace:v1 id=impl.worker-rpc-blocking work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _run_rpc_blocking(
     inputs: TaskInputs,
@@ -686,12 +877,11 @@ def _run_rpc_blocking(
 
     def _on_tool_end(event: ToolExecutionEndEvent) -> None:
         tool_name = event.tool_name
-        # `tool_name` is transport-normalized by omp_rpc: an xd:// device
-        # dispatch (`write xd://submit_pr_review`) reports the host tool that
-        # ran, so terminal-action detection can match on host-tool names. A
-        # failed execution (`is_error`) does not count as reaching the
-        # terminal action — a rejected submit must still trigger the
-        # completion reminder.
+        # `tool_name` is transport-normalized by omp_rpc for top-level and
+        # xd:// device dispatches, but an eval-bridged host tool only surfaces
+        # as the enclosing `eval`; terminal-action detection therefore relies
+        # on `_on_host_tool_completed`. A failed execution (`is_error`) does
+        # not count — a rejected submit must still trigger the reminder.
         ok = event.result is not None and not event.is_error
         if ok:
             tools_called.add(tool_name)
@@ -702,6 +892,17 @@ def _run_rpc_blocking(
                 "tool": tool_name,
                 "ok": ok,
             },
+        )
+
+    # trace:v1 id=impl.worker-host-tool-completed work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def _on_host_tool_completed(event: HostToolCompletedEvent) -> None:
+        # Fires for every dispatch path (top-level, `write xd://X`, eval
+        # bridge) once the host tool's `execute()` returned, so a terminal
+        # action reached from inside `eval` still ends the task (#13583).
+        tools_called.add(event.tool_name)
+        log.info(
+            "host_tool_completed",
+            extra={"issue": bindings.issue_key, "tool": event.tool_name},
         )
 
     def _on_msg(event: MessageUpdateEvent) -> None:
@@ -718,6 +919,12 @@ def _run_rpc_blocking(
     host_tools.ensure_workspace_dependencies(bindings)
     resuming = _has_prior_session(bindings.workspace.session_dir)
     extra_args: tuple[str, ...] = ("--continue",) if resuming else ()
+    # Repo-provided extension/hook code (`<repo>/.omp/hooks/pre|post/*.ts`) is
+    # discovered from the workspace and executed in-process by omp. Our runs
+    # need none of it — every GitHub side effect goes through host tools — and
+    # a PR could otherwise run arbitrary code inside the agent, so keep ambient
+    # discovery off.
+    extra_args += ("--no-extensions",)
     overlay = _write_fallback_chains(settings)
     if overlay is not None:
         extra_args += ("--config", str(overlay))
@@ -773,6 +980,13 @@ def _run_rpc_blocking(
             bot_login=inputs.settings.bot_login,
         )
 
+    # Telemetry for the GitHub message footer: which model ran, how long it has
+    # been going, and what it has cost so far (accumulated from the
+    # `message_end` usage events below), so any comment or PR body can report
+    # all three.
+    stats = host_tools.RunStats(model=chosen_model, started_monotonic=time.monotonic())
+    object.__setattr__(bindings, "stats", stats)
+
     with RpcClient(
         executable=settings.omp_command,
         cwd=bindings.workspace.repo_dir,
@@ -822,7 +1036,39 @@ def _run_rpc_blocking(
         try:
             client.install_headless_ui()
             client.on_tool_execution_end(_on_tool_end)
+            client.on_host_tool_completed(_on_host_tool_completed)
             client.on_message_update(_on_msg)
+
+            # trace:v1 id=impl.worker-on-message-end work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+            def _on_message_end(event: Any) -> None:
+                message = getattr(event, "message", None)
+                if not isinstance(message, Mapping) or message.get("role") != "assistant":
+                    return
+                stats.add_usage(message.get("usage"))
+                # Ground truth for the footer: omp silently switches providers
+                # when the configured one fails, so the answering model comes
+                # from the message, not from our own pick.
+                stats.note_answered_model(message.get("provider"), message.get("model"))
+
+            def _on_fallback_applied(event: Any) -> None:
+                from_model = getattr(event, "from_model", None)
+                to_model = getattr(event, "to_model", None)
+                log.warning(
+                    "model fallback applied",
+                    extra={"issue": bindings.issue_key, "task": task_kind, "from": from_model, "to": to_model},
+                )
+                if isinstance(to_model, str) and to_model:
+                    stats.fallback_model = to_model
+
+            def _on_fallback_succeeded(event: Any) -> None:
+                log.info(
+                    "model fallback succeeded",
+                    extra={"issue": bindings.issue_key, "task": task_kind, "model": getattr(event, "model", None)},
+                )
+
+            client.on_message_end(_on_message_end)
+            client.on_retry_fallback_applied(_on_fallback_applied)
+            client.on_retry_fallback_succeeded(_on_fallback_succeeded)
 
             phases = persona.seed_phases(task_kind)
             if phases:
@@ -868,6 +1114,28 @@ def _run_rpc_blocking(
                 "rpc_start",
                 extra={"issue": bindings.issue_key, "task": task_kind, "branch": bindings.workspace.branch},
             )
+
+            # Silence detection. `hard_timeout` below bounds the whole turn;
+            # this bounds *silence*, because a hung provider stream otherwise
+            # looks like work until the budget runs out and every retry repeats
+            # it (see `_AgentActivityWatch`). Any agent event re-arms it.
+            # trace:v1 id=impl.worker-activity-watch-on-stall work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+            def _on_stall() -> None:
+                log.warning(
+                    "rpc_stalled",
+                    extra={"issue": bindings.issue_key, "task": task_kind, "reason": watch.reason()},
+                )
+                try:
+                    # Same kill path as the hard timeout / operator cancel: stops
+                    # the child and unblocks `_wait_for_agent_end`.
+                    _cancel_hook()
+                except Exception:
+                    log.exception("stall stop failed", extra={"issue": bindings.issue_key, "task": task_kind})
+
+            watch = _AgentActivityWatch(seconds=settings.task_stall_seconds, on_stall=_on_stall)
+            client.on_event(lambda event: watch.touch(event.type))
+            watch.start()
+
             hard_timeout_seconds = _task_timeout(settings, task_kind) + settings.task_timeout_hard_grace_seconds
             hard_timeout_fired = threading.Event()
 
@@ -898,9 +1166,18 @@ def _run_rpc_blocking(
                 )
                 if turn is None:
                     return None
+            except BaseException as exc:
+                # The stall kill surfaces as an RPC error; report the silence
+                # instead, which is the actionable fact.
+                if watch.fired:
+                    raise AgentStalledError(watch.reason()) from exc
+                raise
             finally:
                 hard_timer.cancel()
+                watch.stop()
             assert turn is not None  # returned above when None; narrows for LSP
+            if watch.fired:
+                raise AgentStalledError(watch.reason())
             if hard_timeout_fired.is_set():
                 raise TimeoutError("omp task exceeded hard timeout")
             if turn.assistant_message is not None:
@@ -951,6 +1228,18 @@ async def run_task(
             expected_sha=release_row.current_sha,
             default_branch=inputs.release.default_branch,
         )
+    # The trigger is the authoritative capability record minted by trusted
+    # routing code, and it is already the source for the run token's scopes.
+    # Bindings must mirror that exact set: operator-granted extras (notably
+    # SKIP_CHECKS from `/allow-skip-checks`) live only on the trigger, so
+    # building from `capabilities_for(task_kind)` would silently drop them and
+    # leave the pre-publish gates unreachable. Legacy/manual paths without a
+    # trigger keep the task-kind profile.
+    from carter_omp.github_events import TriggerContext
+
+    capabilities = (
+        inputs.trigger.capabilities if isinstance(inputs.trigger, TriggerContext) else capabilities_for(task_kind)
+    )
     bindings = ToolBindings(
         db=inputs.db,
         github=inputs.github,
@@ -965,7 +1254,7 @@ async def run_task(
         inbound_thread_number=pr_number,
         inbound_is_pr=pr_number is not None,
         review_mode=review_mode,
-        capabilities=capabilities_for(task_kind),
+        capabilities=capabilities,
         trigger=inputs.trigger,
         impl_authorized=bool(directive is not None and directive.authorizes_impl),
         slot_uid=inputs.slot_uid,
@@ -997,19 +1286,77 @@ async def run_task(
         )
     except BaseException:
         # Failed/aborted task: NEVER capture, the artifacts may be inconsistent
-        # with the source state and would poison the cache.
+        # with the source state and would poison the cache. Telemetry is still
+        # recorded: a failed run spent real money, and that spend is exactly
+        # what the console needs to show.
+        _record_run_telemetry(inputs, bindings)
         raise
     else:
         await asyncio.to_thread(_capture_natives_cache, inputs)
-        await _consume_trigger_label(inputs)
+        await _consume_trigger_label(inputs, bindings)
+        _record_run_telemetry(inputs, bindings)
+        _record_agent_abort(inputs, bindings)
         return result
 
 
-async def _consume_trigger_label(inputs: TaskInputs) -> None:
+# trace:v1 id=impl.worker-record-run-telemetry work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _record_run_telemetry(inputs: TaskInputs, bindings: ToolBindings) -> None:
+    """Persist the run's telemetry (spend, tokens, fallback) on its event row.
+
+    Best-effort observability: a missing or failing write must never change the
+    run's outcome, and it never raises.
+    """
+    stats = bindings.stats
+    if stats is None:
+        return
+    try:
+        inputs.db.set_event_telemetry(
+            inputs.delivery_id,
+            fallback_model=stats.fallback_model,
+            duration_ms=int(stats.elapsed_seconds() * 1000),
+            cost_usd=stats.cost_usd,
+            cache_cost_usd=stats.cost_cache_usd,
+            miss_tokens=stats.miss_tokens,
+            output_tokens=stats.output_tokens,
+            cache_read_tokens=stats.cache_read_tokens,
+            cache_write_tokens=stats.cache_write_tokens,
+        )
+    except Exception as exc:  # noqa: BLE001 — observability must never fail a run
+        log.debug(
+            "run telemetry write failed",
+            extra={"delivery": inputs.delivery_id, "err": str(exc)[:120]},
+        )
+
+
+# trace:v1 id=impl.worker-record-agent-abort work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _record_agent_abort(inputs: TaskInputs, bindings: ToolBindings) -> None:
+    """Mark the delivery failed when the agent pulled its own plug.
+
+    `abort_task` is a legitimate stop ("needs info", "harness fault"), but it
+    used to leave the delivery marked `done`, so a run that published nothing
+    still looked green in `status`/dashboards and nobody went looking. Record
+    the agent's own reason instead. Terminal — nothing auto-retries, because a
+    30-minute task is not worth blind-retrying; the operator re-triggers.
+    """
+    abort = bindings.abort
+    if abort is None or not abort.triggered:
+        return
+    reason = (abort.reason or "no reason given").strip()[:500]
+    inputs.db.mark_event(inputs.delivery_id, "failed", error=f"agent aborted: {reason}")
+    log.warning(
+        "event marked failed",
+        extra={"delivery": inputs.delivery_id, "issue": bindings.issue_key, "reason": reason[:200]},
+    )
+
+
+# trace:v1 id=impl.worker-consume-trigger-label work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+async def _consume_trigger_label(inputs: TaskInputs, bindings: ToolBindings) -> None:
     """Consume the one-shot trigger label after an authorized label run.
 
     Remove `trigger_label`, add `<label>:running` at start is handled by
     queue state; here we mark terminal state via labels best-effort.
+    Must use `bindings.github`: the proxy's label endpoints require the
+    per-run token, so the unscoped `inputs.github` client 401s.
     Failures are swallowed: labels are UX, never the security boundary
     (replay uses the stored TriggerContext, never current labels).
     """
@@ -1025,10 +1372,10 @@ async def _consume_trigger_label(inputs: TaskInputs) -> None:
     if number is None:
         return
     try:
-        await inputs.github.remove_issue_label(trigger.repository_full_name, number, label)
-        await inputs.github.add_issue_labels(trigger.repository_full_name, number, [f"{label}:running"])
-    except Exception:
-        log.debug("trigger label consume failed", extra={"delivery": inputs.delivery_id})
+        await bindings.github.remove_issue_label(trigger.repository_full_name, number, label)
+        await bindings.github.add_issue_labels(trigger.repository_full_name, number, [f"{label}:running"])
+    except Exception as exc:
+        log.warning("trigger label consume failed", extra={"delivery": inputs.delivery_id, "err": str(exc)[:120]})
 
 
 def _capture_natives_cache(inputs: TaskInputs) -> None:

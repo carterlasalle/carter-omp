@@ -20,7 +20,17 @@ from carter_omp.server import create_app
 
 # Runtime/timestamp fields vary every run; normalize them so the live payload
 # can be compared against (or regenerated into) a byte-stable committed fixture.
-_VOLATILE_TS_KEYS = {"received_at", "started_at", "last_tool_ts", "updated_at"}
+_VOLATILE_TS_KEYS = {
+    "received_at",
+    "started_at",
+    "last_tool_ts",
+    "updated_at",
+    "finished_at",
+    "ended_at",
+    "available_at",
+    "newest_issue_at",
+    "last_synced",
+}
 _FIXED_TS = "2024-01-01T00:00:00+00:00"
 _UPDATE_ENV = "CARTER_OMP_UPDATE_STATUS_CONTRACT"
 
@@ -202,6 +212,7 @@ def test_status_contract(settings: Settings) -> None:
             "issues",
             "releases",
             "recent_events",
+            "system",
         }
         assert set(data.keys()) == expected_keys
 
@@ -247,8 +258,65 @@ def test_status_contract(settings: Settings) -> None:
                     "last_error",
                 }
 
+        # check the console's system block: queue visibility, spend buckets and
+        # the run rows all have a stable shape (the dashboard renders them
+        # directly; a renamed key is a blank card, not an error).
+        system = data["system"]
+        assert set(system.keys()) == {"queue", "index", "runs", "spend"}
+        assert set(system["queue"].keys()) == {"pending", "dead_letters", "retry_budget"}
+        pending_row = next(row for row in system["queue"]["pending"] if row["delivery_id"] == "queued-x")
+        assert set(pending_row.keys()) == {
+            "delivery_id",
+            "event_type",
+            "repo",
+            "issue_key",
+            "attempts",
+            "received_at",
+            "available_at",
+        }
+        for bucket in system["spend"].values():
+            assert set(bucket.keys()) == {
+                "runs",
+                "cost_usd",
+                "cache_cost_usd",
+                "miss_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "fallback_runs",
+            }
+        for row in system["runs"]:
+            assert set(row.keys()) == {
+                "delivery_id",
+                "event_type",
+                "repo",
+                "issue_key",
+                "state",
+                "attempts",
+                "ended_at",
+                "model",
+                "fallback_model",
+                "duration_ms",
+                "cost_usd",
+                "cache_cost_usd",
+                "tokens_miss",
+                "tokens_out",
+                "tokens_cache_read",
+                "tokens_cache_write",
+                "last_error",
+            }
+        for row in system["index"]:
+            assert set(row.keys()) == {
+                "repo",
+                "rows",
+                "pull_requests",
+                "newest_issue_at",
+                "last_synced",
+            }
+
         # check runtime:
         assert data["runtime"]["repo_allowlist"] == ["octo/widget"]
+        assert data["runtime"]["model_pool"] == [data["runtime"]["model"]]
 
         # Compare the normalized payload against the committed fixture. Normal
         # pytest runs assert equality; regenerate only when CARTER_OMP_UPDATE_STATUS_CONTRACT=1.

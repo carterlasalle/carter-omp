@@ -134,6 +134,7 @@ def _overlapped(watermark: str) -> str:
     return (parsed - _SYNC_OVERLAP).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# trace:v1 id=impl.issue-index-sync work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 class IssueIndexSync:
     """Background reconciler for the local issue index.
 
@@ -199,9 +200,22 @@ class IssueIndexSync:
             except TimeoutError:
                 continue
 
+    # trace:v1 id=impl.issue-index-sync-repos work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def repos(self) -> tuple[str, ...]:
+        """Repos to reconcile: the explicit allowlist plus every indexed repo.
+
+        Owner scope (`CARTER_OMP_REPO_OWNERS`) authorizes repos that are not in
+        `CARTER_OMP_REPO_ALLOWLIST`, and there is no bounded way to enumerate
+        them here — so a repo joins this set the first time a webhook ingests
+        it. Reconcile then keeps it fresh, including after downtime.
+        """
+        known = self._db.issue_index_repos()
+        return tuple(sorted(set(self._settings.repo_allowlist) | set(known)))
+
+    # trace:v1 id=impl.issue-index-sync-tick work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     async def tick(self) -> None:
-        """Reconcile every allowlisted repo once."""
-        for repo in self._settings.repo_allowlist:
+        """Reconcile every repo in scope once."""
+        for repo in self.repos():
             try:
                 await self.sync_repo(repo)
             except GitHubError as exc:

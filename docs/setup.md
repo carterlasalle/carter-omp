@@ -233,6 +233,49 @@ and refuses (non-zero exit) on any mismatch. Do not proceed with failures.
    each repo ID and restart.
 3. Re-run `doctor` after every identity change.
 
+## 10. Adding another account or organization
+
+One command, plus one click in the browser:
+
+```bash
+carter-omp add-org <org-or-user>     # resolves the installation id, edits .env
+docker compose up -d                 # env-only change — no rebuild
+```
+
+`add-org` prints the App's install link first; if the App is not installed on
+that account yet it stops there, so the loop is: **click install → re-run
+`add-org` → restart.**
+
+What it changes (and what you'd otherwise do by hand):
+
+| Value | Why |
+|---|---|
+| `CARTER_OMP_REPO_OWNERS` += the login | every repo the account owns — present and future — is in scope for triggers, the search index, and the dashboard picker |
+| `CARTER_OMP_GITHUB_INSTALLATION_ID` += its installation id | the orchestrator admits webhooks only from installations listed here; the proxy resolves per-repo tokens from the repo itself, so nothing else changes |
+
+Manual equivalents, if you prefer: install from the App's **Install App**
+button (`https://github.com/settings/apps/<slug>` → *Install App*, then pick the
+account and repos), and read the id from the URL you land on —
+`https://github.com/settings/installations/<id>` — or
+`https://github.com/organizations/<org>/settings/installations/<id>`.
+(`gh api .../installation` does **not** work with a user token; that endpoint
+needs an App JWT, which is what `add-org` mints.)
+
+Three things stay true across accounts:
+
+- **Humans:** only IDs in `CARTER_OMP_AUTHORIZED_USER_IDS` can trigger
+  (label/mention/assign). Add the new account's maintainers if they should be
+  able to. `CARTER_OMP_MAINTAINER_LOGINS` is separate — it decides whose
+  directive may authorize *implementation* (opening a PR).
+- **Labels:** `carter-omp` must exist in each repo you intend to label-trigger
+  (create it once per repo; the bot never applies its own trigger label).
+  Mentions and assigning the bot need no label.
+- **Everything else** — trigger semantics, model + fallback chain, rate limits,
+  capabilities, thread context — is deployment-wide and unchanged.
+
+Finish with `docker compose exec carter-omp carter-omp doctor` (it prints the
+allowlist, owners, installation ids, and both model selectors).
+
 ## Reference
 
 <!-- trace:v1 id=doc.setup-reference work=WORK-CO-Q8Z1HJJJ -->

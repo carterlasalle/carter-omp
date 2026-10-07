@@ -9,6 +9,7 @@ real omp subprocess; that's covered by the integration smoke test.
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 
 import pytest
@@ -21,7 +22,7 @@ from carter_omp.cancellation import (
 )
 from carter_omp.config import Settings
 from carter_omp.db import Database, EventRow
-from carter_omp.queue import WorkerPool
+from carter_omp.queue import WorkerPool, cancel_running_for_issue
 from carter_omp.slot_pool import SlotPool
 
 
@@ -93,11 +94,13 @@ async def test_cancel_fires_hook_armed_by_worker(settings: Settings, db: Databas
 
     worker = asyncio.create_task(fake_worker())
     try:
-        # Give the worker a tick to register.
-        for _ in range(20):
-            await asyncio.sleep(0)
-            if row.delivery_id in pool._cancel_hooks:  # noqa: SLF001 — test inspecting state
-                break
+        # Wait for the worker's thread to arm the hook before firing. A fixed
+        # number of event-loop ticks is not enough: registration runs in a
+        # thread, and `--cov` line tracing starves it, so bound the wait by a
+        # deadline instead of a tick count.
+        deadline = time.monotonic() + 5.0
+        while row.delivery_id not in pool._cancel_hooks and time.monotonic() < deadline:  # noqa: SLF001
+            await asyncio.sleep(0.01)
         assert row.delivery_id in pool._cancel_hooks  # noqa: SLF001
 
         assert await pool.cancel_event(row.delivery_id) is True
@@ -306,3 +309,29 @@ async def test_run_event_reaps_slot_before_release(
     assert stored is not None
     assert stored.state == "done"
     assert order == [("reap", 2001), ("release", 2001)]
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_for_issue_only_touches_that_issue(settings: Settings, db: Database) -> None:
+    """`@bot stop` on one issue must not cancel any other issue's run."""
+    pool = _make_pool(settings, db)
+    for delivery, key in (("run-a", "octo/widget#4"), ("run-b", "octo/widget#9")):
+        db.record_event(
+            delivery_id=delivery,
+            event_type="issue_comment",
+            repo="octo/widget",
+            issue_key=key,
+            payload={"action": "created"},
+        )
+    assert db.claim_next_event() is not None
+    assert db.claim_next_event() is not None
+
+    fired: list[str] = []
+    pool._arm_cancel("run-a", lambda: fired.append("run-a"))  # noqa: SLF001
+    pool._arm_cancel("run-b", lambda: fired.append("run-b"))  # noqa: SLF001
+
+    cancelled = await cancel_running_for_issue(db, pool, "octo/widget#4")
+
+    assert cancelled == ["run-a"]
+    assert fired == ["run-a"]
+    assert "run-b" not in pool._cancelled  # noqa: SLF001

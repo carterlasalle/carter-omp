@@ -6,14 +6,16 @@ import asyncio
 import logging
 import os
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
+from typing import Any, Protocol
 
 from carter_omp import tasks
 from carter_omp.cancellation import clear_current_event, set_current_event
 from carter_omp.config import Settings
-from carter_omp.db import Database, EventRow, IssueState
+from carter_omp.db import INACTIVE_EVENT_STATES, Database, EventRow, IssueRow, IssueState, issue_key
 from carter_omp.github_backend import GitHubBackend
+from carter_omp.github_client import GitHubError
 from carter_omp.sandbox import GitTransport, SandboxManager, _reap_slot
 from carter_omp.slot_pool import SlotPool
 
@@ -21,19 +23,24 @@ log = logging.getLogger(__name__)
 
 # Deterministic control commands: handled without running another model turn.
 # `stop` cancels via the cancellation channel; `status` answers from the DB.
-_CONTROL_COMMANDS = ("status", "stop", "review", "resume", "release-fix")
+# Only commands with a real deterministic handler belong here — `review`,
+# `resume`, and `release-fix` are ordinary directives (model runs), so listing
+# them as control commands would promise a no-model answer the queue cannot give.
+_CONTROL_COMMANDS = ("status", "stop")
 
 
+# trace:v1 id=impl.queue-control-command work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _control_command(body: str | None) -> str | None:
     """Return the control command in an authorized directive body, if any."""
     if not isinstance(body, str):
         return None
-    first = body.strip().split("\n", 1)[0].strip().lower()
+    first = body.strip().split("\n", 1)[0].strip().lower().rstrip("?!.,:;")
     return first if first in _CONTROL_COMMANDS else None
 
 
-def _handle_control_command(pool: WorkerPool, row: EventRow) -> bool:
-    """Execute deterministic control commands synchronously. Returns True if handled."""
+# trace:v1 id=impl.queue-control-command-dispatch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+async def _handle_control_command(pool: WorkerPool, row: EventRow) -> bool:
+    """Execute deterministic control commands. Returns True if handled."""
     raw = row.payload.get("_carter_omp_directive")
     if not isinstance(raw, dict):
         return False
@@ -41,26 +48,134 @@ def _handle_control_command(pool: WorkerPool, row: EventRow) -> bool:
     command = _control_command(body if isinstance(body, str) else None)
     if command is None:
         return False
+    if command == "status":
+        await _post_status(pool, row)
+        return True
     if command == "stop":
-        import asyncio as _asyncio
-
         try:
-            loop = _asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
             return False
         target = row.issue_key or row.delivery_id
-        loop.create_task(_cancel_issue_runs(pool, target, row.delivery_id))
+        loop.create_task(cancel_running_for_issue(pool.db, pool, target, except_delivery=row.delivery_id))
         return True
     return False
 
 
-async def _cancel_issue_runs(pool: WorkerPool, target: str, except_delivery: str) -> None:
-    """Cancel running events for the same issue (but not this command itself)."""
-    del target
-    for delivery_id in list(pool._cancel_hooks):
-        if delivery_id != except_delivery:
-            with suppress(Exception):
-                await pool.cancel_event(delivery_id)
+class _CancelEventPool(Protocol):
+    async def cancel_event(self, delivery_id: str) -> bool: ...
+
+
+# trace:v1 id=impl.queue-cancel-running-for-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+async def cancel_running_for_issue(
+    db: Database,
+    pool: _CancelEventPool,
+    issue_key: str | None,
+    *,
+    except_delivery: str | None = None,
+) -> list[str]:
+    """Cancel every running event on `issue_key`, returning the delivery ids hit.
+
+    Scoping to a single issue is what keeps `@bot stop` from killing unrelated
+    runs. Running rows are discovered through the DB rather than `_cancel_hooks`:
+    a run that has not armed its hook yet is still cancellable, because
+    `cancel_event` records the request and `_arm_cancel` fires it late.
+    """
+    if not issue_key:
+        return []
+    running = await asyncio.to_thread(db.list_running_events)
+    cancelled: list[str] = []
+    for entry in running:
+        delivery_id = str(entry.get("delivery_id") or "")
+        if not delivery_id or delivery_id == except_delivery:
+            continue
+        if entry.get("issue_key") != issue_key:
+            continue
+        await pool.cancel_event(delivery_id)
+        cancelled.append(delivery_id)
+    return cancelled
+
+
+# trace:v1 id=impl.queue-status-answer work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+async def _post_status(pool: WorkerPool, row: EventRow) -> None:
+    """Answer `@bot status` from the database — no model turn."""
+    issue = row.payload.get("issue")
+    number = issue.get("number") if isinstance(issue, Mapping) else None
+    repo = row.repo
+    if not repo or not isinstance(number, int):
+        log.info("status: missing repo/number", extra={"delivery": row.delivery_id})
+        return
+    key = row.issue_key or issue_key(repo, number)
+    body = _status_comment(
+        key=key,
+        issue_row=pool.db.get_issue(key),
+        latest=pool.db.latest_event_for_issue(key, exclude_delivery=row.delivery_id),
+    )
+    try:
+        await pool.github.post_comment(repo, number, body)
+    except GitHubError as exc:
+        log.warning("status comment failed", extra={"key": key, "err": str(exc)})
+
+
+def _status_comment(*, key: str, issue_row: IssueRow | None, latest: EventRow | None) -> str:
+    """Render the deterministic `status` answer from persisted rows."""
+    lines = [f"**carter-omp status** — `{key}`", ""]
+    if issue_row is None:
+        lines.append("No run recorded for this issue yet.")
+    else:
+        lines.append(f"- Issue state: `{issue_row.state}`")
+        if issue_row.branch:
+            lines.append(f"- Branch: `{issue_row.branch}`")
+        if issue_row.pr_number is not None:
+            lines.append(f"- Pull request: #{issue_row.pr_number}")
+        if issue_row.classification:
+            lines.append(f"- Classification: `{issue_row.classification}`")
+        lines.append(f"- Updated: {issue_row.updated_at}")
+    if latest is not None:
+        detail = f"- Last event: `{latest.event_type}` — `{latest.state}`"
+        if latest.last_error:
+            detail += f" ({latest.last_error})"
+        lines.append(detail)
+    return "\n".join(lines)
+
+
+#: Task coroutines that share the dispatcher's call signature.
+_SHARED_SIGNATURE_TASKS = frozenset(
+    {
+        "triage_issue",
+        "handle_release_ci",
+        "handle_pr_conversation",
+        "handle_comment",
+        "review_pr",
+        "handle_review",
+    }
+)
+
+
+# trace:v1 id=impl.queue-legacy-task work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+def _legacy_task_for(event: str, action: str, payload: Mapping[str, Any]) -> str | None:
+    """Fallback task mapping for rows queued before the routed task was stored.
+
+    Every queued webhook event carries `_carter_omp_task` (the task `route`
+    assigned it). This covers manual triage and rows already queued across an
+    upgrade, and keeps the pre-task-routing action mapping for them.
+    """
+    if event == "issues" and action in ("opened", "reopened", "labeled"):
+        return "triage_issue"
+    if event == "workflow_run" and action == "completed":
+        return "handle_release_ci"
+    if event == "issue_comment" and action == "created":
+        issue = payload.get("issue") or {}
+        return "handle_pr_conversation" if "pull_request" in issue else "handle_comment"
+    if event == "pull_request" and action in ("opened", "reopened", "ready_for_review", "labeled"):
+        return "review_pr"
+    if event == "pull_request_review_comment" and action == "created":
+        return "handle_review"
+    if event == "issues" and action == "closed":
+        return "cleanup_workspace"
+    if event == "pull_request" and action == "closed":
+        return "cleanup_workspace"
+    return None
 
 
 # trace:v1 id=impl.queue-pool work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
@@ -405,33 +520,48 @@ class WorkerPool:
         if reclaimed:
             log.info("workspace caches reclaimed", extra={"key": row.issue_key})
 
+    # trace:v1 id=impl.queue-dispatch-and-mark work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     async def _dispatch_and_mark(self, row: EventRow, *, slot_uid: int | None = None) -> None:
-        if _handle_control_command(self, row):
+        if await _handle_control_command(self, row):
             self.db.mark_event(row.delivery_id, "done")
             return
         await self._dispatch(row, slot_uid=slot_uid)
         if row.delivery_id in self._cancelled:
             self.db.mark_event(row.delivery_id, "failed", error="cancelled by operator")
-        else:
-            self.db.mark_event(row.delivery_id, "done")
+            return
+        latest = self.db.get_event(row.delivery_id)
+        if latest is not None and latest.state in INACTIVE_EVENT_STATES:
+            # The worker already recorded a terminal outcome (the agent aborted
+            # mid-run with a reason). Do not overwrite diagnosis with success.
+            return
+        self.db.mark_event(row.delivery_id, "done")
 
     # trace:v1 id=impl.queue-dispatch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
     async def _dispatch(self, row: EventRow, *, slot_uid: int | None = None) -> None:
         event = row.event_type
         action = str(row.payload.get("action") or "")
+        # Dispatch on the task `route` assigned and the webhook stored with the
+        # event, not on a re-derived `(event, action)` mapping — the two drifted
+        # apart and an authorized `assigned` trigger silently no-op'd.
+        task = row.payload.get("_carter_omp_task")
+        if not isinstance(task, str) or not task:
+            task = _legacy_task_for(event, action, row.payload)
         log.info(
             "dispatch",
             extra={
                 "event": event,
                 "action": action,
+                "task": task,
                 "delivery": row.delivery_id,
                 "key": row.issue_key,
                 "attempts": row.attempts,
                 "recovered": row.attempts >= 2,
             },
         )
-        if event == "issues" and action in ("opened", "reopened", "labeled"):
-            await tasks.triage_issue(
+        if task in _SHARED_SIGNATURE_TASKS:
+            # Resolve through the module at call time so tests can monkeypatch
+            # `carter_omp.tasks` entry points.
+            await getattr(tasks, task)(
                 settings=self.settings,
                 db=self.db,
                 github=self.github,
@@ -442,86 +572,20 @@ class WorkerPool:
                 attempts=row.attempts,
                 slot_uid=slot_uid,
             )
-        elif event == "workflow_run" and action == "completed":
-            await tasks.handle_release_ci(
-                settings=self.settings,
-                db=self.db,
-                github=self.github,
-                sandbox=self.sandbox,
-                git_transport=self.git_transport,
-                payload=row.payload,
-                delivery_id=row.delivery_id,
-                attempts=row.attempts,
-                slot_uid=slot_uid,
-            )
-        elif event == "issue_comment" and action == "created":
-            issue = row.payload.get("issue") or {}
-            if "pull_request" in issue:
-                await tasks.handle_pr_conversation(
-                    settings=self.settings,
-                    db=self.db,
-                    github=self.github,
-                    sandbox=self.sandbox,
-                    git_transport=self.git_transport,
-                    payload=row.payload,
-                    delivery_id=row.delivery_id,
-                    attempts=row.attempts,
-                    slot_uid=slot_uid,
-                )
-            else:
-                await tasks.handle_comment(
-                    settings=self.settings,
-                    db=self.db,
-                    github=self.github,
-                    sandbox=self.sandbox,
-                    git_transport=self.git_transport,
-                    payload=row.payload,
-                    delivery_id=row.delivery_id,
-                    attempts=row.attempts,
-                    slot_uid=slot_uid,
-                )
-        elif event == "pull_request" and action in ("opened", "reopened", "ready_for_review", "labeled"):
-            await tasks.review_pr(
-                settings=self.settings,
-                db=self.db,
-                github=self.github,
-                sandbox=self.sandbox,
-                git_transport=self.git_transport,
-                payload=row.payload,
-                delivery_id=row.delivery_id,
-                attempts=row.attempts,
-                slot_uid=slot_uid,
-            )
-        elif event == "pull_request_review_comment" and action == "created":
-            await tasks.handle_review(
-                settings=self.settings,
-                db=self.db,
-                github=self.github,
-                sandbox=self.sandbox,
-                git_transport=self.git_transport,
-                payload=row.payload,
-                delivery_id=row.delivery_id,
-                attempts=row.attempts,
-                slot_uid=slot_uid,
-            )
-        elif event == "issues" and action == "closed":
-            await tasks.cleanup_workspace(
-                db=self.db,
-                sandbox=self.sandbox,
-                payload=row.payload,
-                target_state="closed",
-            )
-        elif event == "pull_request" and action == "closed":
-            pr = row.payload.get("pull_request") or {}
-            target_state: IssueState = "merged" if bool(pr.get("merged")) else "closed"
+            return
+        if task == "cleanup_workspace":
+            target_state: IssueState = "closed"
+            if event == "pull_request":
+                pr = row.payload.get("pull_request") or {}
+                target_state = "merged" if bool(pr.get("merged")) else "closed"
             await tasks.cleanup_workspace(
                 db=self.db,
                 sandbox=self.sandbox,
                 payload=row.payload,
                 target_state=target_state,
             )
-        else:
-            log.info("no-op dispatch", extra={"event": event, "action": action})
+            return
+        log.info("no-op dispatch", extra={"event": event, "action": action, "task": task})
 
 
 __all__ = ["WorkerPool"]

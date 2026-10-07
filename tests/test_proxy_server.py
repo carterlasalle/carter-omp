@@ -169,6 +169,7 @@ def _run_token(
     repo: str = "octo/widget",
     repo_id: int = 1,
     issue: int | None = 1,
+    pull_request: int | None = None,
     branch: str | None = None,
     capabilities: set[str] | frozenset[str] | None = None,
     key: bytes | None = None,
@@ -183,6 +184,7 @@ def _run_token(
         repo_id=repo_id,
         repo=repo,
         issue=issue,
+        pull_request=pull_request,
         branch=branch,
         capabilities=capabilities or {"comment", "label", "push_branch", "open_pr", "request_review", "review_pr"},
         now=(_time.time() - 3600) if expired else None,
@@ -1732,7 +1734,7 @@ async def test_proxy_prefers_app_mode_when_configured(tmp_path: Path, monkeypatc
     cfg = _build_settings(tmp_path)
     object.__setattr__(cfg, "github_app_id", "123")
     object.__setattr__(cfg, "github_app_private_key_file", key_file)
-    object.__setattr__(cfg, "github_installation_id", 9)
+    object.__setattr__(cfg, "github_installation_ids_raw", "9,10")
     object.__setattr__(cfg, "github_token", None)
     app = _build_app(cfg)
     assert getattr(app.state, "app_token_provider", None) is None  # lifespan not run in tests
@@ -1780,3 +1782,44 @@ async def test_add_issue_reaction(proxy_settings: Settings) -> None:
         )
     assert resp.status_code == 200, resp.text
     assert seen == [{"body": {"content": "eyes"}}]
+
+
+async def test_app_token_provider_resolves_installation_per_repo() -> None:
+    """A deployment serves several orgs and each App installation has its own
+    id, so the id must come from the repo — static config cannot cover both."""
+    import subprocess
+
+    from carter_omp.app_auth import AppTokenProvider
+
+    key = subprocess.run(["openssl", "genrsa", "2048"], capture_output=True, text=True, check=True).stdout
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req.url.path)
+        if req.url.path == "/repos/otherorg/site/installation":
+            return httpx.Response(200, json={"id": 77})
+        raise AssertionError(req.url.path)
+
+    provider = AppTokenProvider(app_id="123", private_key_pem=key, transport=httpx.MockTransport(handler))
+
+    assert provider.installation_for_repo("otherorg/site") == 77
+    assert provider.installation_for_repo("otherorg/site") == 77  # cached
+    assert seen == ["/repos/otherorg/site/installation"]
+
+
+def test_installation_for_prefers_the_repo_and_falls_back_to_config(proxy_settings: Settings) -> None:
+    from carter_omp.proxy.server import _installation_for
+
+    class _Provider:
+        def __init__(self, value: int | None) -> None:
+            self.value = value
+
+        def installation_for_repo(self, repo: str) -> int:
+            del repo
+            if self.value is None:
+                raise RuntimeError("lookup failed")
+            return self.value
+
+    object.__setattr__(proxy_settings, "github_installation_ids_raw", "42")
+    assert _installation_for(_Provider(7), proxy_settings, "octo/widget") == 7
+    assert _installation_for(_Provider(None), proxy_settings, "octo/widget") == 42

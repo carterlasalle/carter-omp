@@ -274,3 +274,30 @@ def test_release_todo_phases_end_in_retag() -> None:
     phases = persona.seed_phases("handle_release_ci")
     assert [phase["name"] for phase in phases] == ["Diagnose", "Fix", "Retag"]
     assert phases[-1]["tasks"][-1] == "Call release_retag and end the turn"
+
+
+def test_kickoff_renders_every_comment_inline() -> None:
+    """Label-triggered triage must see the whole thread without a tool call."""
+    thread = (
+        ThreadMessage(kind="comment", author="alice", body="fails on macOS 15", created_at="2026-10-01T00:00:00Z"),
+        ThreadMessage(kind="comment", author="bob", body="also fails on Linux", created_at="2026-10-02T00:00:00Z"),
+    )
+
+    out = persona.kickoff(repo=_Repo(), issue=_Issue(), workspace=_Workspace(), thread=thread)
+
+    assert "fails on macOS 15" in out
+    assert "also fails on Linux" in out
+    assert "@alice" in out and "@bob" in out
+    assert "## Comments on this issue" in out
+
+
+def test_system_prompts_prune_tracelayer() -> None:
+    """The sandbox has no `trace` binary by design; a repo's TraceLayer hooks
+    must not become a gate the agent burns time trying to satisfy (its
+    `uv run trace` fallback hangs ~180s per call and aborts runs)."""
+    for out in (
+        persona.system_append(repo=_Repo(), issue=_Issue(), workspace=_Workspace(), bot_login="carter-omp"),
+        persona.system_append_pr_review(repo=_Repo(), issue=_Issue(), workspace=_Workspace(), bot_login="carter-omp"),
+    ):
+        assert "TraceLayer (`trace`) is absent by design" in out
+        assert "NEVER install, run, or wait on it" in out

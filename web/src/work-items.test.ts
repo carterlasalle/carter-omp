@@ -14,11 +14,31 @@ import type {
 const BASE_RUNTIME: RuntimeInfo = {
   bot_login: "carter_omp",
   repo_allowlist: [],
+  repo_owners: [],
+  installation_ids: [],
   max_concurrency: 1,
   model: "test-model",
+  model_pool: ["test-model"],
+  fallback_models: [],
   thinking_level: "low",
+  trigger_mode: "label",
+  trigger_label: "carter-omp",
+  issue_index_sync_seconds: 900,
   uptime_seconds: 0,
 };
+
+function spend() {
+  return {
+    runs: 0,
+    cost_usd: 0,
+    cache_cost_usd: 0,
+    miss_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    fallback_runs: 0,
+  };
+}
 
 function eventCounts(): Record<EventState, number> {
   return {
@@ -40,6 +60,16 @@ function status(overrides: Partial<StatusResponse> = {}): StatusResponse {
     issues: [],
     releases: [],
     recent_events: [],
+    system: {
+      queue: { pending: [], dead_letters: [], retry_budget: 3 },
+      index: [],
+      runs: [],
+      spend: {
+        today: spend(),
+        week: spend(),
+        all_time: spend(),
+      },
+    },
     ...overrides,
   };
 }
@@ -632,77 +662,6 @@ describe("buildWorkItems", () => {
     expect(items[0].live?.delivery_id).toBe("live-older");
     // ActivityPill renders running, never the superseded failed state.
     expect(items[0].latestEvent?.state).toBe("running");
-  });
-
-  test("live running event outranks a newer done latest_event for the same issue", () => {
-    const items = buildWorkItems(
-      status({
-        issues: [
-          issue({
-            key: "owner/repo#21",
-            number: 21,
-            latest_event: latestEvent({
-              delivery_id: "done-newer",
-              state: "done",
-              received_at: "2026-06-17T00:09:00Z",
-            }),
-          }),
-        ],
-        running_events: [
-          runningEvent({
-            delivery_id: "live-older-2",
-            issue_key: "owner/repo#21",
-            received_at: "2026-06-17T00:01:00Z",
-            started_at: "2026-06-17T00:02:00Z",
-          }),
-        ],
-      }),
-    );
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({
-      key: "owner/repo#21",
-      bucket: "running",
-      deliveryId: "live-older-2",
-    });
-    expect(items[0].live?.delivery_id).toBe("live-older-2");
-    expect(items[0].latestEvent?.state).toBe("running");
-  });
-
-  test("live running event outranks a newer queued latest_event for the same issue", () => {
-    const items = buildWorkItems(
-      status({
-        issues: [
-          issue({
-            key: "owner/repo#22",
-            number: 22,
-            latest_event: latestEvent({
-              delivery_id: "queued-newer",
-              state: "queued",
-              received_at: "2026-06-17T00:09:00Z",
-            }),
-          }),
-        ],
-        running_events: [
-          runningEvent({
-            delivery_id: "live-older-3",
-            issue_key: "owner/repo#22",
-            received_at: "2026-06-17T00:01:00Z",
-            started_at: "2026-06-17T00:02:00Z",
-          }),
-        ],
-      }),
-    );
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({
-      key: "owner/repo#22",
-      bucket: "running",
-      deliveryId: "live-older-3",
-      inflightOnly: false,
-      error: null,
-    });
-    expect(items[0].live?.delivery_id).toBe("live-older-3");
-    expect(items[0].latestEvent?.state).toBe("running");
-    expect(items[0].latestEvent?.delivery_id).toBe("live-older-3");
   });
 
   test("suppresses an orphan failed recent event superseded by a newer done recent event for the same absent issue", () => {

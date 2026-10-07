@@ -3,10 +3,12 @@ import { createEffect, createSignal, type JSX, Show } from "solid-js";
 import { activeView } from "../../view";
 import { Activity } from "../views/Activity";
 import { Operations } from "../views/Operations";
+import { System } from "../views/System";
 import { Triage } from "../views/Triage";
 import { Rail } from "./Rail";
 import { TopBar } from "./TopBar";
 
+// trace:v1 id=impl.web-src-components-shell-shell.shell work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
 export function Shell(): JSX.Element {
   const [drawerOpen, setDrawerOpen] = createSignal(false);
 
@@ -63,6 +65,9 @@ export function Shell(): JSX.Element {
             </div>
             <div class="rmp-view rmp-view-enter" style={{ display: viewDisplay("triage") }}>
               <Triage />
+            </div>
+            <div class="rmp-view rmp-view-enter" style={{ display: viewDisplay("system") }}>
+              <System />
             </div>
           </div>
         </main>

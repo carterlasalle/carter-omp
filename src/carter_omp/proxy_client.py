@@ -111,22 +111,28 @@ class GitHubProxyClient:
         base_url: str,
         hmac_key: str | bytes,
         transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
-        timeout: float = 30.0,
+        timeout: float | httpx.Timeout = 30.0,
         run_token: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._key = hmac_key.encode("utf-8") if isinstance(hmac_key, str) else hmac_key
         self._transport = transport
-        self._timeout = httpx.Timeout(timeout, connect=10.0)
+        self._timeout = timeout if isinstance(timeout, httpx.Timeout) else httpx.Timeout(timeout, connect=10.0)
         self._run_token = run_token
 
+    # trace:v1 id=impl.proxy-client-run-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def with_run_token(self, run_token: str | None) -> GitHubProxyClient:
-        """Return a copy of this client carrying a per-run authorization token."""
+        """Return a copy of this client carrying a per-run authorization token.
+
+        Carries the whole ``httpx.Timeout`` through: the per-run client must
+        keep the configured read budget (default 30 s), not collapse to the
+        10 s connect timeout.
+        """
         return GitHubProxyClient(
             base_url=self._base_url,
             hmac_key=self._key,
             transport=self._transport,
-            timeout=self._timeout.connect or 30.0,
+            timeout=self._timeout,
             run_token=run_token,
         )
 
@@ -340,6 +346,29 @@ class GitHubProxyClient:
         )
         return _pr_from(data)
 
+    # trace:v1 id=impl.src-carter-omp-proxy-client.git-hub-proxy-client work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
+    async def self_report(
+        self,
+        *,
+        repo: str,
+        title: str,
+        body: str,
+        severity: str,
+        provenance: str = "",
+        issue_number: int | None = None,
+    ) -> Mapping[str, Any]:
+        """File a friction report against the harness repo.
+
+        `repo` and `provenance` are ignored here on purpose: the proxy takes the
+        destination from its own config and the origin from the run token, so a
+        report cannot be redirected or misattributed by the caller.
+        """
+        del repo, provenance
+        payload: dict[str, Any] = {"title": title, "body": body, "severity": severity}
+        if issue_number is not None:
+            payload["issue_number"] = issue_number
+        return await self._request("POST", "/gh/v1/self-report", json_body=payload)
+
     async def request_reviewers(
         self,
         *,
@@ -468,13 +497,13 @@ class ProxyGitTransport:
         base_url: str,
         hmac_key: str | bytes,
         transport: httpx.BaseTransport | None = None,
-        timeout: float = 120.0,
+        timeout: float | httpx.Timeout = 120.0,
         run_token: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._key = hmac_key.encode("utf-8") if isinstance(hmac_key, str) else hmac_key
         self._transport = transport
-        self._timeout = httpx.Timeout(timeout, connect=10.0)
+        self._timeout = timeout if isinstance(timeout, httpx.Timeout) else httpx.Timeout(timeout, connect=10.0)
         self._run_token = run_token
 
     _TRANSIENT_RETRY_DELAYS = (2.0, 5.0, 15.0)
@@ -488,12 +517,18 @@ class ProxyGitTransport:
 
     # trace:v1 id=impl.transport-run-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def with_run_token(self, run_token: str | None) -> ProxyGitTransport:
-        """Return a copy of this transport carrying a per-run authorization token."""
+        """Return a copy of this transport carrying a per-run authorization token.
+
+        Carries the whole ``httpx.Timeout`` through: the per-run transport must
+        keep the 120 s clone/push read budget, not collapse to the 10 s connect
+        timeout (which made every push slower than 10 s time out, and ``_post``
+        re-send work the proxy had already performed).
+        """
         return ProxyGitTransport(
             base_url=self._base_url,
             hmac_key=self._key,
             transport=self._transport,
-            timeout=self._timeout.connect or 120.0,
+            timeout=self._timeout,
             run_token=run_token,
         )
 

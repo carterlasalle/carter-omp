@@ -8,15 +8,17 @@ import solid from "vite-plugin-solid";
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Vite writes the bundle into `web/dist/`. After the rollup stage finishes we
-// fan the output out into the Python package directory (`src/static/`)
-// so FastAPI can mount it directly. Done in a Vite plugin so both `yarn build`
-// and the Docker `web-builder` stage produce an installable layout
-// without any extra shell glue.
+// fan the output out into the Python package directory (`src/carter_omp/static/`)
+// so FastAPI can mount it directly — that is the path `dashboard.static_dir()`
+// resolves to (`Path(__file__).parent / "static"`) and the one the Docker
+// `web-builder` stage copies into. Done in a Vite plugin so both `yarn build`
+// and the Docker build produce an installable layout without extra shell glue.
 const outDir = path.resolve(dirname, "dist");
-const staticDir = path.resolve(dirname, "..", "src", "static");
+const staticDir = path.resolve(dirname, "..", "src", "carter_omp", "static");
 
 const PRESERVED_FILES: ReadonlySet<string> = new Set([".gitkeep"]);
 
+// trace:v1 id=impl.web-vite-static-bundle work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 function syncStaticBundle(): Plugin {
   return {
     name: "carter_omp-sync-static",

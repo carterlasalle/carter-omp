@@ -42,7 +42,7 @@ from carter_omp.manual_triage import (
 )
 from carter_omp.natives_cache import NativesCache
 from carter_omp.proxy_client import GitHubProxyClient, ProxyGitTransport
-from carter_omp.queue import WorkerPool
+from carter_omp.queue import WorkerPool, _control_command, cancel_running_for_issue
 from carter_omp.sandbox import SandboxManager
 
 log = logging.getLogger(__name__)
@@ -96,6 +96,7 @@ class _IssueBrowseCacheEntry:
     fetched_at: float
 
 
+# trace:v1 id=impl.issue-browse-cache work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 class _IssueBrowseCache:
     """In-process cache for the dashboard's GitHub issue browser.
 
@@ -137,14 +138,15 @@ class _IssueBrowseCache:
             self._entries[key] = entry
             return entry, False
 
+    # trace:v1 id=impl.issue-browse-cache-apply-webhook work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     async def apply_webhook(
         self,
         *,
         event_type: str,
         payload: Mapping[str, Any],
-        allowlist: frozenset[str],
+        in_scope: Callable[[str], bool],
     ) -> None:
-        mutation = _issue_cache_mutation(event_type, payload, allowlist)
+        mutation = _issue_cache_mutation(event_type, payload, in_scope)
         if mutation is None:
             return
         repo, number, summary = mutation
@@ -203,15 +205,16 @@ def _issue_summary_from_payload(repo: str, issue: Mapping[str, Any]) -> IssueSum
     )
 
 
+# trace:v1 id=impl.issue-cache-mutation work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def _issue_cache_mutation(
     event_type: str,
     payload: Mapping[str, Any],
-    allowlist: frozenset[str],
+    in_scope: Callable[[str], bool],
 ) -> tuple[str, int, IssueSummary | None] | None:
     if event_type not in {"issues", "issue_comment"}:
         return None
     repo = _repo_full_name(payload)
-    if repo is None or repo.lower() not in allowlist:
+    if repo is None or not in_scope(repo):
         return None
     issue = payload.get("issue")
     if not isinstance(issue, Mapping):
@@ -444,13 +447,14 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         await issue_cache.apply_webhook(
             event_type=x_github_event,
             payload=payload,
-            allowlist=cfg.repo_allowlist,
+            in_scope=cfg.allows,
         )
         # Keep the local search index fresh from every delivery that carries an
-        # issue/PR object — including ones the router will skip.
+        # issue/PR object — including ones the router will skip. `cfg.allows`
+        # (not the exact allowlist) so owner-scoped repos get indexed too.
         if x_github_event in ("issues", "issue_comment") or x_github_event.startswith("pull_request"):
             repo_full = str((payload.get("repository") or {}).get("full_name") or "")
-            if repo_full and repo_full in cfg.repo_allowlist:
+            if repo_full and cfg.allows(repo_full):
                 try:
                     issue_index.ingest_webhook_payload(db, repo_full, x_github_event, payload)
                 except Exception:
@@ -474,7 +478,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             policy=cfg.trigger_policy,
             allowed_repo_ids=cfg.allowed_repo_ids or None,
             allowed_repo_owners=cfg.allowed_repo_owners or None,
-            installation_id=cfg.github_installation_id,
+            installation_ids=cfg.github_installation_ids or None,
             delivery_id=x_github_delivery,
         )
 
@@ -520,6 +524,13 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         if decision.trigger is not None:
             payload = dict(payload)
             payload["_carter_omp_trigger"] = decision.trigger.to_record()
+        # trace:v1 id=impl.server-store-routed-task work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+        # Persist the routed task so the durable queue dispatches on it instead of
+        # re-deriving `(event, action)` — the two mappings had drifted, dropping
+        # the authorized `assigned` trigger as a no-op.
+        if decision.should_queue and decision.task is not None:
+            payload = dict(payload)
+            payload["_carter_omp_task"] = decision.task
 
         _record_decision_and_run(db, x_github_event, payload, x_github_delivery, decision)
 
@@ -535,6 +546,40 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 last_error=decision.reason,
             )
             return JSONResponse({"delivery": x_github_delivery, "state": "skipped"}, status_code=202)
+
+        # Deterministic control commands must not be serialised behind the run
+        # they control: `claim_next_event` refuses to claim a queued event whose
+        # issue already has a `running` row, so a queued `stop` could never
+        # reach its own issue (and would outlive it). Act on it at ingress.
+        pool: _AppPool = bag["pool"]
+        if _control_command(decision.directive_body) == "stop":
+            inserted = db.record_event(
+                delivery_id=x_github_delivery,
+                event_type=x_github_event,
+                repo=decision.repo,
+                issue_key=decision.issue_key,
+                payload=payload,
+                state="done",
+            )
+            if not inserted:
+                log.info("duplicate", extra={"event": x_github_event, "delivery": x_github_delivery})
+                return JSONResponse({"delivery": x_github_delivery, "state": "done"}, status_code=202)
+            cancelled_deliveries = await cancel_running_for_issue(
+                db, pool, decision.issue_key, except_delivery=x_github_delivery
+            )
+            log.info(
+                "stop",
+                extra={
+                    "event": x_github_event,
+                    "delivery": x_github_delivery,
+                    "key": decision.issue_key,
+                    "cancelled": cancelled_deliveries,
+                },
+            )
+            return JSONResponse(
+                {"delivery": x_github_delivery, "state": "done", "cancelled": cancelled_deliveries},
+                status_code=202,
+            )
 
         # Per-user rate limiting. Lifecycle events (cleanup) carry no submitter
         # and are not gated. For everything user-driven, atomically record the
@@ -593,7 +638,6 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             state="queued",
         )
         if inserted:
-            pool: _AppPool = bag["pool"]
             pool.wake()
             log.info(
                 "queued", extra={"event": x_github_event, "delivery": x_github_delivery, "key": decision.issue_key}
@@ -658,7 +702,12 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         capped = max(1, min(int(limit), 100))
         github: GitHubBackend = bag["github"]
         issue_cache: _IssueBrowseCache = bag["issue_browse_cache"]
-        repos = tuple(sorted(cfg.repo_allowlist | {f"{o}/*" for o in cfg.allowed_repo_owners}))
+        db: Database = bag["db"]
+        # Owner scope has no enumerable repo list here, so browse the explicit
+        # allowlist plus every repo the local index already knows — owner-scoped
+        # repos enter it through webhook ingest. A literal `owner/*` pattern is
+        # not a valid `/repos/{repo}/issues` path; it only produced a 404 row.
+        repos = tuple(sorted(cfg.repo_allowlist | set(db.issue_index_repos())))
         if not repos:
             return {"issues": [], "errors": [], "repos": [], "cache": {"hit": False, "fetched_at": time.time()}}
 
@@ -690,7 +739,6 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         )
         # `processed` is not cached: a freshly-triaged issue must immediately
         # disappear from the "fresh issues" filter on the next dashboard refresh.
-        db: Database = bag["db"]
         processed = frozenset(db.processed_issue_keys(make_issue_key(s.repo, s.number) for s in entry.issues))
         return _issue_browse_payload(entry=entry, cache_hit=cache_hit, processed_keys=processed)
 
@@ -865,6 +913,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         token = cfg.replay_token.get_secret_value() if cfg.replay_token else None
         return HTMLResponse(render_index(token))
 
+    # trace:v1 id=impl.server-api-status work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @app.get("/api/status")
     async def api_status(request: Request) -> dict[str, Any]:
         bag = request.app.state.bag
@@ -873,6 +922,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         pool: _AppPool = bag["pool"]
         started = float(bag.get("started_at") or time.time())
 
+        # trace:v1 id=impl.server-status-collect work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
         def _collect() -> dict[str, Any]:
             # All SQLite reads run off the event loop. The dashboard polls this
             # every 3s, and the queries (200 issues + per-issue latest events +
@@ -963,6 +1013,24 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                     }
                     for r in events_rows
                 ],
+                # Everything the console needs beyond work items: what is
+                # waiting and when it fires, what died for good, what the runs
+                # cost (per model, with the fallback share), and how fresh the
+                # search index is.
+                "system": {
+                    "queue": {
+                        "pending": db.pending_events(limit=20),
+                        "dead_letters": db.dead_letter_events(max_attempts=cfg.event_max_retries, limit=20),
+                        "retry_budget": cfg.event_max_retries,
+                    },
+                    "index": db.issue_index_status(),
+                    "runs": db.recent_run_telemetry(limit=12),
+                    "spend": {
+                        "today": db.telemetry_summary(since=iso_seconds_ago(86400)),
+                        "week": db.telemetry_summary(since=iso_seconds_ago(7 * 86400)),
+                        "all_time": db.telemetry_summary(),
+                    },
+                },
             }
 
         collected = await asyncio.to_thread(_collect)
@@ -971,9 +1039,16 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             "runtime": {
                 "bot_login": cfg.bot_login,
                 "repo_allowlist": sorted(cfg.repo_allowlist),
+                "repo_owners": sorted(cfg.allowed_repo_owners),
+                "installation_ids": sorted(cfg.github_installation_ids),
                 "max_concurrency": cfg.max_concurrency,
                 "model": cfg.model,
+                "model_pool": list(cfg.model_pool),
+                "fallback_models": list(cfg.fallback_models),
                 "thinking_level": cfg.thinking_level,
+                "trigger_mode": cfg.trigger_mode,
+                "trigger_label": cfg.trigger_label,
+                "issue_index_sync_seconds": cfg.issue_index_sync_seconds,
                 "uptime_seconds": max(0.0, time.time() - started),
             },
             "inflight": inflight,

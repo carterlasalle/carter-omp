@@ -7,6 +7,7 @@ reproduction transcript store, or the orchestrator's bookkeeping.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -47,6 +49,12 @@ _PRE_PR_FIX_COMMAND = ("bun", "run", "fix")
 _PRE_PR_CHECK_COMMAND = ("bun", "check")
 _PRE_PR_TEST_COMMAND = ("bun", "run", "test")
 _BUN_INSTALL_COMMAND = ("bun", "install", "--frozen-lockfile", "--ignore-scripts")
+# `--frozen-lockfile` is bun-lockfile-only. bun can import an npm/yarn/pnpm
+# lockfile, but that path has to write its own `bun.lock`, and the migrated
+# lock is removed afterwards so the pre-publish dirty check still passes.
+_BUN_INSTALL_IMPORTED_LOCK_COMMAND = ("bun", "install", "--ignore-scripts")
+_BUN_LOCKFILES = ("bun.lock", "bun.lockb")
+_IMPORTABLE_LOCKFILES = ("package-lock.json", "yarn.lock", "pnpm-lock.yaml")
 _BUN_INSTALL_TIMEOUT_SECONDS = 300.0
 _REPO_COMMAND_SCRUBBED_ENV_KEYS: tuple[str, ...] = (
     "GITHUB_TOKEN",
@@ -70,6 +78,125 @@ _PRE_PR_TEST_TIMEOUT_SECONDS = 3600.0
 _DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
+# trace:v1 id=impl.host-tools-format-duration work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _format_duration(seconds: float) -> str:
+    total = int(max(0.0, seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m{total % 60:02d}s"
+    return f"{total // 3600}h{(total % 3600) // 60:02d}m"
+
+
+# trace:v1 id=impl.host-tools-format-tokens work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _format_tokens(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
+
+
+# trace:v1 id=impl.host-tools-run-stats work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+@dataclass(slots=True)
+class RunStats:
+    """Per-run telemetry appended to the bot's GitHub messages.
+
+    The worker fills this in (model + monotonic start at launch, spend
+    accumulated from `message_end` usage events); `gh_post_comment` and
+    `gh_open_pr` render it as a footer so a reader can see which model wrote
+    the message, how long the run had been going, and what it had cost.
+    """
+
+    model: str
+    started_monotonic: float
+    # Set when omp switched providers mid-run (or when a message names a model
+    # other than the configured one): the footer then names both, so a reader
+    # never mistakes the configured model for the one that answered.
+    fallback_model: str | None = None
+    cost_usd: float = 0.0
+    cost_cache_usd: float = 0.0
+    # `input` is the uncached bucket (a cache miss); `cacheRead`/`cacheWrite`
+    # are the cached buckets — omp reports them separately per message.
+    miss_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+
+    # trace:v1 id=impl.run-stats-elapsed work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def elapsed_seconds(self) -> float:
+        return max(0.0, time.monotonic() - self.started_monotonic)
+
+    @staticmethod
+    def _number(value: Any) -> float | None:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        return None
+
+    # trace:v1 id=impl.run-stats-answered work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def note_answered_model(self, provider: str | None, model: str | None) -> None:
+        """Record which model actually answered a message.
+
+        Ground truth beats configuration: omp switches providers when the
+        configured one fails, and a footer naming only the configured model
+        would then be wrong about who wrote the message.
+        """
+        if not model:
+            return
+        selector = f"{provider}/{model}" if provider else model
+        if selector != self.model and self.fallback_model is None:
+            self.fallback_model = selector
+
+    # trace:v1 id=impl.run-stats-add-usage work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def add_usage(self, usage: Mapping[str, Any] | None) -> None:
+        """Accumulate one assistant message's tokens + spend (USD)."""
+        if not isinstance(usage, Mapping):
+            return
+        for key, attr in (
+            ("input", "miss_tokens"),
+            ("output", "output_tokens"),
+            ("cacheRead", "cache_read_tokens"),
+            ("cacheWrite", "cache_write_tokens"),
+        ):
+            amount = self._number(usage.get(key))
+            if amount:
+                setattr(self, attr, getattr(self, attr) + int(amount))
+        cost = usage.get("cost")
+        if not isinstance(cost, Mapping):
+            return
+        total = self._number(cost.get("total"))
+        if total:
+            self.cost_usd += total
+        cached = self._number(cost.get("cacheRead"))
+        if cached:
+            self.cost_cache_usd += cached
+
+    # trace:v1 id=impl.run-stats-footer work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def footer(self) -> str:
+        """Markdown footer: model (with fallback), wall clock, spend, usage."""
+        cost = f"${self.cost_usd:.4f}" if self.cost_usd < 1 else f"${self.cost_usd:.2f}"
+        model = f"`{self.model}`"
+        if self.fallback_model and self.fallback_model != self.model:
+            model += f" → `{self.fallback_model}`"
+        headline = [model, _format_duration(self.elapsed_seconds()), cost]
+        usage: list[str] = []
+        if self.miss_tokens:
+            usage.append(f"miss {_format_tokens(self.miss_tokens)}")
+        if self.output_tokens:
+            usage.append(f"out {_format_tokens(self.output_tokens)}")
+        if self.cache_read_tokens or self.cache_write_tokens:
+            usage.append(
+                f"cache r {_format_tokens(self.cache_read_tokens)} w {_format_tokens(self.cache_write_tokens)}"
+            )
+        if self.cost_cache_usd:
+            usage.append(f"cache ${self.cost_cache_usd:.4f}")
+        lines = ["<sub>" + " · ".join(headline) + "</sub>"]
+        if usage:
+            lines.append("<sub>" + " · ".join(usage) + "</sub>")
+        return "\n\n---\n" + "\n".join(lines)
+
+
+# trace:v1 id=impl.host-tools-abort-controller work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 @dataclass(slots=True)
 class AbortController:
     """Mutable handoff between the `abort_task` host tool and the worker.
@@ -79,7 +206,8 @@ class AbortController:
     thread-safe terminator (the same one used for queue cancellation and the
     hard-timeout watchdog), and inspects `triggered` after `prompt_and_wait`
     unblocks to decide whether the resulting `RpcError` is an intentional
-    abort (swallow, mark event `done`) vs an actual failure (propagate).
+    abort (swallow the error; the worker records the delivery as failed with
+    this `reason`, so an abort is visible) vs an actual failure (propagate).
     """
 
     triggered: bool = False
@@ -110,6 +238,7 @@ class ReleaseToolContext:
     default_branch: str
 
 
+# trace:v1 id=impl.host-tools-bindings work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 @dataclass(slots=True, frozen=True)
 class ToolBindings:
     """Per-task closure that the host tools capture."""
@@ -155,6 +284,15 @@ class ToolBindings:
     # without a live RpcClient.
     abort: AbortController | None = None
     release: ReleaseToolContext | None = None
+    # Per-run telemetry for the message footer; None outside a real run.
+    stats: RunStats | None = None
+    # Re-mint the per-run proxy token from the run's *current* branch/PR.
+    # The token is minted before the agent starts, but the run's identity
+    # changes mid-flight (classify_issue renames the workspace branch; the
+    # run opens its own PR), and the proxy pins what the token covers. Tools
+    # that change either call this so the token never lags reality.
+    # `None` in tests / legacy paths with no run token.
+    refresh_run_token: Callable[[str | None, int | None], None] | None = None
 
     @property
     def issue_key(self) -> str:
@@ -349,6 +487,26 @@ def _format_process_output(stdout: Any, stderr: Any) -> str:
     )
 
 
+# trace:v1 id=impl.host-tools-install-command work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _install_command(repo_dir: Path) -> tuple[tuple[str, ...], Path | None] | None:
+    """Pick the dependency install for a checkout, plus a lockfile to clean up.
+
+    The image ships bun only (no node/npm/yarn), and bun resolves
+    `package-lock.json`/`yarn.lock`/`pnpm-lock.yaml` on import. That import
+    writes `bun.lock`, which the pre-publish dirty check would then see as an
+    untracked change, so the caller removes it when we created it. Returns None
+    when there is no lockfile to install from.
+    """
+    if not (repo_dir / "package.json").is_file():
+        return None
+    if any((repo_dir / name).is_file() for name in _BUN_LOCKFILES):
+        return _BUN_INSTALL_COMMAND, None
+    if any((repo_dir / name).is_file() for name in _IMPORTABLE_LOCKFILES):
+        return _BUN_INSTALL_IMPORTED_LOCK_COMMAND, repo_dir / "bun.lock"
+    return None
+
+
+# trace:v1 id=impl.host-tools-workspace-deps work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
     """Bootstrap ``node_modules`` so the agent can resolve workspace packages.
 
@@ -370,7 +528,8 @@ def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
     slot-owned env as the other repo-owned bun commands (``bun run fix`` /
     ``bun check``).
 
-    Skips non-bun repos. Otherwise runs unconditionally on every launch
+    Installs for any lockfile bun can read (bun, npm, yarn, pnpm). Runs
+    unconditionally on every launch
     (including ``--continue`` resumes): a frozen install verifies an intact
     tree in ~20ms and re-links anything missing, so a previous install that
     timed out or crashed half-way self-heals instead of being skipped forever
@@ -379,10 +538,13 @@ def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
     logged and swallowed — the agent can still install itself or report the gap.
     """
     repo_dir = bindings.workspace.repo_dir
-    if not (repo_dir / "package.json").is_file() or not (repo_dir / "bun.lock").is_file():
+    install = _install_command(repo_dir)
+    if install is None:
         return
+    command, migrated_lock = install
+    lock_existed = migrated_lock is not None and migrated_lock.exists()
     try:
-        proc = _run_repo_command(bindings, _BUN_INSTALL_COMMAND, timeout=_BUN_INSTALL_TIMEOUT_SECONDS)
+        proc = _run_repo_command(bindings, command, timeout=_BUN_INSTALL_TIMEOUT_SECONDS)
     except FileNotFoundError:
         log.warning("bun_install bootstrap skipped: bun not on PATH", extra={"issue": bindings.issue_key})
         return
@@ -399,7 +561,15 @@ def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
             },
         )
         return
-    log.info("bun_install bootstrap ok", extra={"issue": bindings.issue_key})
+    if migrated_lock is not None and not lock_existed:
+        # `bun install` imported the repo's npm/yarn/pnpm lockfile and left a
+        # bun lockfile behind; drop it so the tree stays clean for the gates.
+        with suppress(OSError):
+            migrated_lock.unlink()
+    log.info(
+        "dependency bootstrap ok",
+        extra={"issue": bindings.issue_key, "command": " ".join(command)},
+    )
 
 
 def _run_pre_publish_bun_fix(
@@ -690,8 +860,130 @@ def _schedule_autoclose(bindings: ToolBindings, *, comment_id: int, hours: float
     return close_at
 
 
+# ---------- telemetry footer ----------
+# trace:v1 id=impl.host-tools-footer-suffix work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _footer_suffix(bindings: ToolBindings) -> str:
+    """Telemetry footer for any bot-authored GitHub text.
+
+    Empty outside a real run (no stats on the bindings). Applied at every
+    surface that publishes text on the bot's behalf — comments, PR bodies and
+    review bodies — so a reader always sees which model wrote it, how long it
+    took, and what it cost.
+    """
+    stats = bindings.stats
+    return "" if stats is None else stats.footer()
+
+
+# ---------- report_pain_point ----------
+# trace:v1 id=impl.host-tools-report-pain-point work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
+    """File a friction report against the harness repo (see the proxy endpoint).
+
+    The model describes what went wrong; the *destination* comes from
+    `CARTER_OMP_SELF_REPORT_REPO` and the provenance from the run token, so a
+    report can never be redirected at another repo or misattributed. Dedupe
+    (exact title, `[bot-report]` marker) happens on the GitHub side, so a
+    repeated fault appends evidence instead of filing another issue.
+    """
+
+    # trace:v1 id=impl.host-tools-report-pain-point-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+        bindings.require(Capability.REPORT_UPSTREAM, "report_pain_point", args)
+        settings = bindings.settings
+        target = (settings.self_report_repo if settings is not None else "").strip()
+        title = args.get("title")
+        details = args.get("details")
+        area = args.get("area")
+        severity = str(args.get("severity") or "medium").lower()
+        if not isinstance(title, str) or not title.strip():
+            _raise_command("report_pain_point requires a non-empty 'title'.")
+        if not isinstance(details, str) or not details.strip():
+            _raise_command("report_pain_point requires 'details': what you expected and what happened.")
+        if severity not in ("low", "medium", "high"):
+            _raise_command("report_pain_point severity must be low, medium or high.")
+        if not target:
+            msg = "report_pain_point is disabled: CARTER_OMP_SELF_REPORT_REPO is empty."
+            _audit(bindings, "report_pain_point", args, error=msg)
+            _raise_command(msg)
+        headline = title.strip()[:200]
+        if isinstance(area, str) and area.strip():
+            headline = f"{area.strip()[:40]}: {headline}"[:200]
+        where = [
+            f"**Task:** `{bindings.repo.full_name}`",
+            f"**Workspace branch:** `{bindings.workspace.branch}`",
+        ]
+        if bindings.issue is not None:
+            where.insert(0, f"**Working on:** `{bindings.issue_key}`")
+        body = f"{details.strip()}\n\n### Where\n" + "\n".join(f"- {line}" for line in where)
+        # Fingerprint the headline so the next run that hits the same fault
+        # appends to the existing report instead of filing a duplicate: the
+        # orchestrator's DB is consistent immediately, while GitHub's issue
+        # list needs several seconds to show a just-created issue.
+        fingerprint = hashlib.sha256(headline.casefold().encode("utf-8")).hexdigest()[:32]
+        known = bindings.db.self_report_fingerprint(fingerprint)
+        try:
+            result = _run_coro(
+                bindings.loop,
+                bindings.github.self_report(
+                    repo=target,
+                    title=headline,
+                    body=body,
+                    severity=severity,
+                    provenance=f"`{bindings.repo.full_name}` · branch `{bindings.workspace.branch}`",
+                    issue_number=known,
+                ),
+            )
+        except GitHubError as exc:
+            _audit(bindings, "report_pain_point", args, error=str(exc))
+            _raise_command(f"could not file the report: {exc.status} {exc.message}")
+        result = dict(result)
+        number = result.get("number")
+        if known is None and isinstance(number, int):
+            bindings.db.record_self_report(
+                fingerprint,
+                issue_number=number,
+                url=str(result.get("url") or ""),
+                title=headline,
+            )
+        _audit(bindings, "report_pain_point", args, result=result)
+        return json.dumps(result, indent=2)
+
+    return host_tool(
+        name="report_pain_point",
+        description=persona.host_tool_description("report_pain_point"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("report_pain_point", "title"),
+                },
+                "details": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("report_pain_point", "details"),
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "default": "medium",
+                    "description": persona.host_tool_parameter_description("report_pain_point", "severity"),
+                },
+                "area": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("report_pain_point", "area"),
+                },
+            },
+            "required": ["title", "details"],
+            "additionalProperties": False,
+        },
+        execute=execute,
+    )
+
+
 # ---------- gh_post_comment ----------
+# trace:v1 id=impl.host-tools-post-comment work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
+    # trace:v1 id=impl.host-tools-post-comment-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         bindings.require(Capability.COMMENT, "gh_post_comment", args)
         body = args.get("body")
@@ -707,6 +999,7 @@ def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
         body_to_post = body
         if schedule_close is not None:
             body_to_post = f"{body.rstrip()}\n\n{persona.question_autoclose_suffix(schedule_close)}"
+        body_to_post = f"{body_to_post.rstrip()}{_footer_suffix(bindings)}"
         try:
             comment = _run_coro(
                 bindings.loop,
@@ -1244,9 +1537,10 @@ def _build_release_retag(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 # ---------- gh_push_branch ----------
+# trace:v1 id=impl.host-tools-push-branch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
-        bindings.require(Capability.PUSH_BRANCH, "gh_push_branch", args)
+        _enforce_impl_authorization(bindings, "gh_push_branch", args, action="push branch")
         if bindings.review_mode:
             msg = "refusing to push: PR review worktrees are read-only."
             _audit(bindings, "gh_push_branch", args, error=msg)
@@ -1286,9 +1580,11 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 # ---------- gh_open_pr ----------
+# trace:v1 id=impl.host-tools-open-pr work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
+    # trace:v1 id=impl.host-tools-open-pr-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
-        bindings.require(Capability.OPEN_PR, "gh_open_pr", args)
+        _enforce_impl_authorization(bindings, "gh_open_pr", args, action="open PR")
         if bindings.review_mode:
             msg = "refusing to open PR: PR review tasks are read-only."
             _audit(bindings, "gh_open_pr", args, error=msg)
@@ -1315,6 +1611,8 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
                 "GitHub auto-closes the issue when the PR merges. Put it at the end of the "
                 "Verification section per the template."
             )
+        # Same footer as comments: which model, how long, what it cost.
+        body = f"{body.rstrip()}{_footer_suffix(bindings)}"
         _run_pre_publish_bun_fix(bindings, args, tool_name="gh_open_pr", stage="open PR")
         _run_pre_publish_bun_check(bindings, args, tool_name="gh_open_pr", stage="open PR")
         # Last and slowest: the suite runs against the tree that is actually
@@ -1341,6 +1639,17 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
             _raise_command(f"GitHub rejected PR: {exc.status} {exc.message}")
         bindings.db.set_issue_pr(bindings.issue_key, pr.number)
         bindings.db.set_issue_state(bindings.issue_key, "opened")
+        # The run owns this PR thread now (review requests, replies, label
+        # edits). The token was minted with the originating issue only, so
+        # re-mint before anything tries to touch the PR.
+        if bindings.refresh_run_token is not None:
+            try:
+                bindings.refresh_run_token(None, pr.number)
+            except Exception as exc:  # noqa: BLE001 — PR is open; the token only widens follow-ups
+                log.warning(
+                    "run token refresh after PR open failed",
+                    extra={"issue": bindings.issue_key, "pr": pr.number, "err": str(exc)[:200]},
+                )
         needs_info_label_cleared = _remove_needs_info_label(bindings) if was_needs_info else False
         artifact = bindings.workspace.artifacts_dir / "pr.json"
         artifact.write_text(
@@ -1499,7 +1808,9 @@ def _build_repro_record(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 # ---------- mark_unable_to_reproduce ----------
+# trace:v1 id=impl.host-tools-mark-unable work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_mark_unable(bindings: ToolBindings) -> HostTool[Any, Any]:
+    # trace:v1 id=impl.host-tools-mark-unable-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         diagnosis = args.get("diagnosis")
         needed = args.get("info_needed")
@@ -1511,6 +1822,7 @@ def _build_mark_unable(bindings: ToolBindings) -> HostTool[Any, Any]:
             diagnosis=diagnosis,
             info_needed=needed,
         )
+        body = f"{body.rstrip()}{_footer_suffix(bindings)}"
         try:
             comment = _run_coro(
                 bindings.loop,
@@ -1848,6 +2160,9 @@ def _build_search_commits(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 _PRIMARY_TYPES = ("bug", "enhancement", "question", "proposal", "documentation", "wontfix", "invalid", "duplicate")
+#: Classifications that may publish without a maintainer go-ahead; every other
+#: class needs `impl_authorized`, a durable authorized event, or an existing PR.
+_AUTO_PR_CLASSIFICATIONS = frozenset({"bug", "documentation"})
 _PRIORITIES = ("prio:p0", "prio:p1", "prio:p2", "prio:p3")
 _FUNCTIONAL = ("agent", "tool", "tui", "cli", "prompting", "sdk", "auth", "setup", "ux", "providers")
 _PLATFORMS = ("platform:linux", "platform:macos", "platform:windows", "platform:wsl")
@@ -1856,6 +2171,7 @@ _PR_TYPES = ("feat", "fix", "docs", "refactor", "perf", "test", "chore", "ci", "
 _CLOSING_ISSUE_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", re.IGNORECASE)
 
 
+# trace:v1 id=impl.host-tools-impl-authorization work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _enforce_impl_authorization(
     bindings: ToolBindings,
     tool_name: str,
@@ -1863,12 +2179,13 @@ def _enforce_impl_authorization(
     *,
     action: str,
 ) -> None:
-    """Refuse publishing unless the run holds an explicit capability.
+    """Refuse first publish on issue classes that require maintainer authorization.
 
-    Classification is an LLM output and never an authority source. Only the
-    trusted trigger's capabilities (via `bindings.require`) authorize
-    publishing; `impl_authorized` and the durable authorized-event record
-    remain as workflow signals but cannot grant what capabilities deny.
+    Classification is an LLM output and never an authority source; the
+    capability check below comes first and no workflow signal can grant what
+    capabilities deny. `bug`/`documentation` issues publish from the trigger
+    that queued the run; every other class also needs `impl_authorized`, a
+    durable authorized event, or an existing PR.
     """
     bindings.require(Capability.PUSH_BRANCH if "push" in action else Capability.OPEN_PR, tool_name, args)
     if bindings.impl_authorized:
@@ -1876,9 +2193,14 @@ def _enforce_impl_authorization(
     if bindings.db.has_authorized_impl_event(bindings.issue_key):
         return
     row = bindings.db.get_issue(bindings.issue_key)
-    if row is not None and row.pr_number is not None:
-        return
-    classification = row.classification if row is not None else None
+    if row is not None:
+        if row.pr_number is not None:
+            return
+        classification = row.classification
+        if classification in _AUTO_PR_CLASSIFICATIONS:
+            return
+    else:
+        classification = None
     classification_phrase = f"classified `{classification}`" if classification else "not classified"
     msg = (
         f"refusing to {action}: issue #{_require_issue(bindings).number} is {classification_phrase}; "
@@ -2204,7 +2526,9 @@ def _filter_anchorable_comments(staged: list[Any], files: list[PullRequestFileIn
     return anchorable, dropped
 
 
+# trace:v1 id=impl.host-tools-submit-pr-review work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
+    # trace:v1 id=impl.host-tools-submit-pr-review-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         _require_review_mode(bindings, "submit_pr_review", args)
         body = args.get("body")
@@ -2229,7 +2553,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                 commit_id = pr.head_sha or None
             except GitHubError:
                 commit_id = None
-        body = body.strip()
+        body = f"{body.strip()}{_footer_suffix(bindings)}"
         dropped: list[Any] = []
         if staged:
             try:
@@ -2411,11 +2735,13 @@ def _build_set_issue_labels(bindings: ToolBindings) -> HostTool[Any, Any]:
     )
 
 
+# trace:v1 id=impl.host-tools-classify-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
     """Triage step. Pick a primary type, optional priority/functional/provider/platform,
     apply labels on GitHub, persist the primary type in sqlite, and signal which workflow
     branch the agent should follow."""
 
+    # trace:v1 id=impl.host-tools-classify-issue-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         existing = bindings.db.get_issue(bindings.issue_key)
         if bindings.inbound_is_pr:
@@ -2505,6 +2831,17 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
                 # refactor of that helper still surfaces the mismatch.
                 _raise_command("classify_issue internal: branch rename inconsistent.")
             bindings.db.set_issue_branch(bindings.issue_key, renamed_to)
+            # The run token pinned the pre-rename branch at mint time; the
+            # proxy re-checks it on every push/PR. Hand it the branch the run
+            # is actually on now, or publishing 403s after the work is done.
+            if bindings.refresh_run_token is not None:
+                try:
+                    bindings.refresh_run_token(renamed_to, None)
+                except Exception as exc:  # noqa: BLE001 — publishing still works via the run namespace
+                    log.warning(
+                        "run token refresh after rename failed",
+                        extra={"issue": bindings.issue_key, "branch": renamed_to, "err": str(exc)[:200]},
+                    )
 
         try:
             applied = _run_coro(
@@ -2615,6 +2952,8 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
         tools.append(_build_open_pr(bindings))
     if Capability.REQUEST_REVIEW in caps:
         tools.append(_build_request_review(bindings))
+    if Capability.REPORT_UPSTREAM in caps:
+        tools.append(_build_report_pain_point(bindings))
     if Capability.READ_GITHUB in caps:
         tools += [_build_release_ci_status(bindings), _build_release_job_log(bindings)]
     if Capability.UPDATE_DEFAULT_BRANCH in caps and Capability.MOVE_RELEASE_TAG in caps:

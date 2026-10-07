@@ -20,9 +20,16 @@ export type ReleaseState = "awaiting_ci" | "fixing" | "green" | "failed" | "supe
 export interface RuntimeInfo {
   bot_login: string;
   repo_allowlist: string[];
+  repo_owners: string[];
+  installation_ids: number[];
   max_concurrency: number;
   model: string;
+  model_pool: string[];
+  fallback_models: string[];
   thinking_level: string;
+  trigger_mode: string;
+  trigger_label: string;
+  issue_index_sync_seconds: number;
   uptime_seconds: number;
 }
 
@@ -110,6 +117,84 @@ export interface StatusResponse {
   issues: IssueRow[];
   releases: ReleaseRow[];
   recent_events: RecentEvent[];
+  system: SystemInfo;
+}
+
+// ── System / telemetry (the "state of everything" surface) ────────────────
+
+/** A queued event and when its next attempt fires (`available_at` = backoff). */
+export interface PendingEvent {
+  delivery_id: string;
+  event_type: string;
+  repo: string | null;
+  issue_key: string | null;
+  attempts: number;
+  received_at: string;
+  available_at: string | null;
+}
+
+/** A failed event that burned its whole retry budget — terminal, needs eyes. */
+export interface DeadLetterEvent extends PendingEvent {
+  finished_at: string | null;
+  last_error: string | null;
+  model: string | null;
+  fallback_model: string | null;
+}
+
+/** One run's telemetry, as recorded by the worker when the run ended. */
+export interface RunTelemetry {
+  delivery_id: string;
+  event_type: string;
+  repo: string | null;
+  issue_key: string | null;
+  state: EventState;
+  attempts: number;
+  ended_at: string;
+  model: string | null;
+  fallback_model: string | null;
+  duration_ms: number | null;
+  cost_usd: number | null;
+  cache_cost_usd: number | null;
+  tokens_miss: number | null;
+  tokens_out: number | null;
+  tokens_cache_read: number | null;
+  tokens_cache_write: number | null;
+  last_error: string | null;
+}
+
+/** Aggregated spend/tokens over one window. */
+export interface SpendBucket {
+  runs: number;
+  cost_usd: number;
+  cache_cost_usd: number;
+  miss_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  fallback_runs: number;
+}
+
+export interface IndexStatusRow {
+  repo: string;
+  rows: number;
+  pull_requests: number;
+  newest_issue_at: string;
+  last_synced: string;
+}
+
+export interface SystemInfo {
+  queue: {
+    pending: PendingEvent[];
+    dead_letters: DeadLetterEvent[];
+    retry_budget: number;
+  };
+  index: IndexStatusRow[];
+  runs: RunTelemetry[];
+  spend: {
+    today: SpendBucket;
+    week: SpendBucket;
+    all_time: SpendBucket;
+  };
 }
 
 // Log entries carry arbitrary structured extras. We expose the known fields

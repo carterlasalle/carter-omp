@@ -113,14 +113,21 @@ def _trigger_from_payload(payload: Mapping[str, Any]) -> object | None:
         return None
 
 
+# trace:v1 id=impl.thread-fetch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
 async def _fetch_thread(
     github: GitHubBackend,
     repo: str,
     number: int,
     *,
     is_pr: bool,
+    include_body: bool = True,
+    exclude_comment_id: int | None = None,
 ) -> tuple[ThreadMessage, ...]:
     """Pull the full conversation thread (body + comments + reviews) for `number`.
+
+    `include_body=False` is for prompts that already print the body verbatim
+    (the triage kickoff), and `exclude_comment_id` drops the comment the run
+    was triggered by when the prompt quotes it separately.
 
     Best-effort: any sub-fetch that fails is logged + dropped so a stale
     review-comments endpoint doesn't block the directive from running.
@@ -129,23 +136,26 @@ async def _fetch_thread(
 
     # 1. The issue / PR body itself. Use get_issue (issues endpoint also
     #    returns PRs in GitHub's data model).
-    try:
-        item = await github.get_issue(repo, number)
-        if item.body and item.body.strip():
-            messages.append(
-                ThreadMessage(
-                    kind="pr_body" if is_pr else "issue_body",
-                    author=item.author or "",
-                    body=item.body,
-                    created_at="",  # not exposed by IssueInfo
+    if include_body:
+        try:
+            item = await github.get_issue(repo, number)
+            if item.body and item.body.strip():
+                messages.append(
+                    ThreadMessage(
+                        kind="pr_body" if is_pr else "issue_body",
+                        author=item.author or "",
+                        body=item.body,
+                        created_at="",  # not exposed by IssueInfo
+                    )
                 )
-            )
-    except GitHubError as exc:
-        log.warning("thread body fetch failed", extra={"repo": repo, "n": number, "err": str(exc)})
+        except GitHubError as exc:
+            log.warning("thread body fetch failed", extra={"repo": repo, "n": number, "err": str(exc)})
 
     # 2. Conversation comments (issue OR PR conversation).
     try:
         for c in await github.list_comments(repo, number):
+            if exclude_comment_id is not None and c.id == exclude_comment_id:
+                continue
             messages.append(
                 ThreadMessage(
                     kind="comment",
@@ -482,6 +492,7 @@ async def handle_release_ci(
     log.info("release conclusion ignored", extra={"key": key, "conclusion": conclusion})
 
 
+# trace:v1 id=impl.tasks-triage-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
 async def triage_issue(
     *,
     settings: Settings,
@@ -563,9 +574,13 @@ async def triage_issue(
         natives_cache=sandbox.natives_cache,
         trigger=_trigger_from_payload(payload),
     )
-    await run_task(task_kind="triage_issue", inputs=inputs)
+    # Label triggers carry the whole comment thread by default; the kickoff
+    # template already prints the body, so only comments are inlined.
+    thread = await _fetch_thread(github, repo.full_name, issue.number, is_pr=False, include_body=False)
+    await run_task(task_kind="triage_issue", inputs=inputs, thread=thread)
 
 
+# trace:v1 id=impl.src-carter-omp-tasks.review-pr work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
 async def review_pr(
     *,
     settings: Settings,
@@ -642,7 +657,27 @@ async def review_pr(
         trigger=_trigger_from_payload(payload),
     )
     await run_task(task_kind="review_pr", inputs=inputs, pr_number=pr_number, pr=pr)
+    # A review is one-shot; `reviewing` means "a review run is in flight". Left
+    # set, it outlived the run and every later mention on the PR was dropped
+    # (personal_website#64) while the dashboard showed a review that never
+    # finished. `opened` keeps the PR addressable — the review worktree stays
+    # review-mode, so follow-ups reply without pushing.
+    db.set_issue_state(key, "opened")
     return
+
+
+# trace:v1 id=impl.tasks-record-skip work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _record_skip(db: Database, delivery_id: str, reason: str) -> None:
+    """Record a deliberate drop so the console says `skipped: <reason>`.
+
+    The queue marks a delivery `done` whenever a task handler returns normally,
+    so a bare `return` made a dropped trigger look successful: a mention the
+    bot ignored showed as `done` in 5ms and the operator could not tell it
+    apart from one that ran (personal_website#64). `skipped` is terminal for
+    the queue and still retryable by hand.
+    """
+    log.info("skip", extra={"delivery": delivery_id, "reason": reason})
+    db.mark_event(delivery_id, "skipped", error=reason)
 
 
 # trace:v1 id=impl.tasks-comment-ack work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
@@ -666,7 +701,7 @@ async def handle_comment(
     clone_url = repo.clone_url
     if existing is None:
         if directive is None:
-            log.info("skip: comment on unknown issue", extra={"key": key})
+            _record_skip(db, delivery_id, "comment_on_unknown_issue")
             return
         # Maintainer summon on an untriaged issue: bootstrap a row + workspace,
         # then route through triage-with-directive so the agent classifies
@@ -761,7 +796,16 @@ async def handle_comment(
             trigger=_trigger_from_payload(payload),
         )
         directive = await _attach_thread(github, directive, repo.full_name, issue.number, is_pr=False)
-        await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive)
+        # Mention triggers get the whole thread too, minus this
+        # comment (the prompt quotes it separately).
+        thread = await _fetch_thread(
+            github,
+            repo.full_name,
+            issue.number,
+            is_pr=False,
+            exclude_comment_id=comment.id,
+        )
+        await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive, thread=thread)
         return
 
     workspace = await _run_workspace_op(
@@ -791,7 +835,16 @@ async def handle_comment(
         trigger=_trigger_from_payload(payload),
     )
     directive = await _attach_thread(github, directive, repo.full_name, issue.number, is_pr=False)
-    await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive)
+    # Mention triggers get the whole thread too, minus this
+    # comment (the prompt quotes it separately).
+    thread = await _fetch_thread(
+        github,
+        repo.full_name,
+        issue.number,
+        is_pr=False,
+        exclude_comment_id=comment.id,
+    )
+    await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive, thread=thread)
 
 
 async def handle_review(
@@ -918,7 +971,7 @@ async def handle_pr_conversation(
     issue_payload = payload.get("issue") or {}
     pr_number = issue_payload.get("number")
     if not repo_full or not isinstance(pr_number, int):
-        log.info("skip: pr-conversation missing repo/number")
+        _record_skip(db, delivery_id, "pr_conversation_missing_repo_number")
         return
     issue_row, pr_info = await _resolve_issue_row_for_pr(
         db=db,
@@ -928,11 +981,12 @@ async def handle_pr_conversation(
     )
     if issue_row is None:
         if pr_info is None or not _can_handle_pr_directly(settings=settings, repo_full=repo_full, pr=pr_info):
+            _record_skip(db, delivery_id, "pr_conversation_unowned_pr")
             return
     directive = _directive_from_payload(payload)
-    if issue_row is not None and issue_row.state == "reviewing":
-        log.info("skip: incoming PR conversation unsupported", extra={"key": issue_row.key, "pr": pr_number})
-        return
+    # A reviewed PR stays addressable: the review worktree is read-only
+    # (review_mode), so a follow-up mention can reply but never push. Dropping
+    # these outright left the author's replies unanswered (#64).
     if issue_row is not None and issue_row.state in ("merged", "closed", "abandoned"):
         if directive is None:
             log.info("skip: pr-conversation on finalized issue", extra={"key": issue_row.key, "state": issue_row.state})
@@ -975,6 +1029,7 @@ async def handle_pr_conversation(
         issue = await github.get_issue(repo_full, issue_number)
     except GitHubError as exc:
         log.warning("pr-conversation fetch failed", extra={"err": str(exc)})
+        _record_skip(db, delivery_id, "pr_conversation_fetch_failed")
         return
     clone_url = repo.clone_url
     existing_branch: str | None
@@ -988,8 +1043,12 @@ async def handle_pr_conversation(
             None if directive and issue_row.state == "reproducing" and issue_row.branch is None else issue_row.branch
         )
         if existing_branch is None and not (directive and issue_row.state == "reproducing"):
-            log.info("skip: pr-conversation PR missing branch mapping", extra={"repo": repo_full, "pr": pr_number})
+            _record_skip(db, delivery_id, "pr_conversation_missing_branch")
             return
+    # Review worktrees are detached at the PR head and read-only: re-point them
+    # at the *current* head so a re-review is not answered from a stale
+    # checkout. Owned branches are left untouched (local commits must survive).
+    review_workspace = bool(existing_branch and existing_branch.startswith("review/pr-"))
     workspace = await _run_workspace_op(
         sandbox.ensure_workspace,
         repo=repo.full_name,
@@ -997,7 +1056,8 @@ async def handle_pr_conversation(
         title=issue.title,
         clone_url=clone_url,
         default_branch=repo.default_branch,
-        existing_branch=existing_branch,
+        pr_head=pr_number if review_workspace else None,
+        existing_branch=None if review_workspace else existing_branch,
         author_name=settings.resolved_author_name,
         author_email=settings.git_author_email,
         slot_uid=slot_uid,

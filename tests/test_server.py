@@ -16,7 +16,7 @@ from carter_omp.config import Settings, reset_settings_cache
 from carter_omp.dashboard import tail_jsonl
 from carter_omp.db import Database, close_database, get_database, issue_key
 from carter_omp.github_backend import GitHubBackend
-from carter_omp.github_client import GitHubClient
+from carter_omp.github_client import GitHubClient, IssueIndexEntry
 from carter_omp.manual_triage import InvalidIssueRef, ManualTriageTimeout, await_terminal_state, parse_issue_ref
 from carter_omp.proxy_client import ProxyGitTransport
 from carter_omp.sandbox import LocalGitTransport, SandboxManager
@@ -57,6 +57,32 @@ class _PausedPoolFactory:
         git_transport: ProxyGitTransport,
     ) -> _PausedPool:
         pool = _PausedPool()
+        self.pools.append(pool)
+        return pool
+
+
+class _RecordingPool(_PausedPool):
+    """Paused pool that records which deliveries the handler asked to cancel."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelled: list[str] = []
+
+    async def cancel_event(self, delivery_id: str) -> bool:
+        self.cancelled.append(delivery_id)
+        return True
+
+
+class _RecordingPoolFactory(_PausedPoolFactory):
+    def __call__(
+        self,
+        settings: Settings,
+        db: Database,
+        github: GitHubBackend,
+        sandbox: SandboxManager,
+        git_transport: ProxyGitTransport,
+    ) -> _RecordingPool:
+        pool = _RecordingPool()
         self.pools.append(pool)
         return pool
 
@@ -1691,6 +1717,53 @@ def test_webhook_directive_on_unknown_issue_is_queued_with_metadata(env, monkeyp
     assert directive == {"body": "please refactor X", "author": "can1357", "pragmas": [], "authorizes_impl": True}
 
 
+def test_webhook_stop_cancels_only_its_own_issue_while_in_flight(settings: Settings) -> None:
+    """`@bot stop` on issue #4 cancels #4's running run and nothing else.
+
+    The stop must also take effect while #4 is still running: the durable queue
+    refuses to claim any event whose issue already has a running row, so a
+    queued stop could never reach the run it was posted on.
+    """
+    db = get_database(settings.sqlite_path)
+    for delivery_id, number in (("run-a", 4), ("run-b", 9)):
+        db.record_event(
+            delivery_id=delivery_id,
+            event_type="issue_comment",
+            repo="octo/widget",
+            issue_key=issue_key("octo/widget", number),
+            payload={"action": "created"},
+        )
+    assert db.claim_next_event() is not None
+    assert db.claim_next_event() is not None  # both are now `running` on distinct issues
+
+    factory = _RecordingPoolFactory()
+    app = create_app(settings, pool_factory=factory)
+    with TestClient(app) as client:
+        resp = _post_issue_comment(
+            client,
+            delivery="stop-4",
+            user="carterlasalle",
+            number=4,
+            body="@carter_omp-bot stop",
+            association="OWNER",
+        )
+        pool = factory.pools[0]
+
+    assert resp.status_code == 202
+    assert resp.json() == {"delivery": "stop-4", "state": "done", "cancelled": ["run-a"]}
+    assert pool.cancelled == ["run-a"]
+
+    stop_row = db.get_event("stop-4")
+    assert stop_row is not None
+    assert stop_row.state == "done"  # handled at ingress, never left queued behind #4
+    # The unrelated run is untouched.
+    run_a = db.get_event("run-a")
+    run_b = db.get_event("run-b")
+    assert run_a is not None and run_a.state == "running"
+    assert run_b is not None and run_b.state == "running"
+    close_database()
+
+
 def test_webhook_directive_authorizes_deployed_app_login_without_author_association(
     monkeypatch: pytest.MonkeyPatch, env
 ) -> None:
@@ -2637,6 +2710,12 @@ class _StubGithubForTriage:
             raise self._closing_prs
         return self._closing_prs
 
+    async def list_comments(self, repo: str, number: int) -> list[object]:
+        """Empty thread: these tests cover the closing-PR guard and workspace
+        lifecycle, not prompt content."""
+        del repo, number
+        return []
+
 
 async def test_triage_issue_skips_when_a_closing_pr_already_exists(
     settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
@@ -3127,3 +3206,122 @@ def test_exact_explicit_trigger_guarantee(env: dict[str, str], monkeypatch: pyte
         assert resp.status_code == 202
         assert resp.json()["state"] == "queued", resp.json()
     close_database()
+
+
+def test_webhook_stores_the_routed_task(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A queued event carries the task `route` assigned, for `_dispatch` to run.
+
+    Regression for #9: an authorized `issues.assigned` trigger was queued but
+    the row carried no task, so `_dispatch`'s `(event, action)` mapping dropped
+    it as a no-op and marked the delivery `done`.
+    """
+    cfg = _strict_settings(monkeypatch, env)
+    app = _create_app(cfg)
+    with TestClient(app) as client:
+        payload = {
+            "action": "assigned",
+            "assignee": {"login": "carter_omp-bot", "id": 4242, "type": "Bot"},
+            "issue": {"number": 4, "title": "crash on save", "user": {"login": "carterlasalle"}},
+            "repository": _repo(),
+            "installation": _installation(),
+            "sender": _sender(12345678, "carterlasalle"),
+        }
+        resp = _post(client, event="issues", delivery="assign-1", payload=payload)
+        assert resp.status_code == 202
+        assert resp.json()["state"] == "queued", resp.json()
+    db = get_database(cfg.sqlite_path)
+    try:
+        row = db.get_event("assign-1")
+        assert row is not None
+        assert row.payload["_carter_omp_task"] == "triage_issue"
+    finally:
+        close_database()
+
+
+def test_owner_scoped_repo_webhook_is_indexed(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repo admitted by `CARTER_OMP_REPO_OWNERS` (never listed in the exact
+    allowlist) must reach the local index — otherwise `gh_search_issues` is
+    blind on every repo the owner adds after setup."""
+    monkeypatch.setenv("CARTER_OMP_REPO_OWNERS", "carterlasalle")
+    reset_settings_cache()
+    cfg = Settings()  # type: ignore[call-arg]
+    cfg.ensure_paths()
+    app = _create_app(cfg)
+    with TestClient(app) as client:
+        payload = {
+            "action": "opened",
+            "issue": {
+                "number": 601,
+                "title": "owner scoped ingest",
+                "body": "indexed through the owner scope",
+                "state": "open",
+                "user": {"login": "alice"},
+                "author_association": "NONE",
+            },
+            "repository": {"full_name": "carterlasalle/personal_website"},
+        }
+        body = json.dumps(payload).encode()
+        resp = client.post(
+            "/webhook/github",
+            content=body,
+            headers=_signed_headers("test-webhook-secret", body, event="issues", delivery="own-1"),
+        )
+        assert resp.status_code == 202
+        db = get_database(cfg.sqlite_path)
+        rows = db.search_issue_index("carterlasalle/personal_website", keywords=("owner", "scope"))
+        known = db.issue_index_repos()
+    close_database()
+    assert [e.number for e in rows] == [601]
+    assert known == ("carterlasalle/personal_website",)
+
+
+def test_browse_repos_are_concrete_and_include_owner_scoped_repos(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner scope used to add a literal `owner/*` entry to the browse fan-out,
+    which is not a valid `/repos/{repo}/issues` path (guaranteed 404 row). The
+    picker now browses concrete repos: the allowlist plus indexed ones."""
+    token = _enable_replay(monkeypatch)
+    monkeypatch.setenv("CARTER_OMP_REPO_OWNERS", "carterlasalle")
+    reset_settings_cache()
+    cfg = Settings()  # type: ignore[call-arg]
+    cfg.ensure_paths()
+    db = get_database(cfg.sqlite_path)
+    db.upsert_issue_index(
+        IssueIndexEntry(
+            repo="carterlasalle/personal_website",
+            number=9,
+            is_pull_request=False,
+            title="seen via webhook",
+            body="",
+            state="open",
+            state_reason="",
+            merged_at="",
+            author="alice",
+            labels=(),
+            comments=0,
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+            html_url="https://example/9",
+        )
+    )
+    app = _create_app(cfg)
+    transport = _make_issues_handler(
+        {
+            "octo/widget": [_issue_payload(1, "from the allowlist")],
+            "carterlasalle/personal_website": [
+                _issue_payload(2, "from the owner scope", repo="carterlasalle/personal_website")
+            ],
+        },
+        expected_limit=20,
+    )
+    with TestClient(app) as client:
+        _install_github_mock(app, transport)
+        resp = client.get(
+            "/api/github/issues?state=open&limit=20",
+            headers={"X-CarterOmp-Replay-Token": token},
+        )
+    close_database()
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["repos"] == ["carterlasalle/personal_website", "octo/widget"]
+    assert body["errors"] == []
+    assert all("*" not in repo for repo in body["repos"])

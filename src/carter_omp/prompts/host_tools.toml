@@ -29,6 +29,17 @@ description = "Submit one GitHub PR review with all staged inline comments. Alwa
 body = "Markdown review summary. Required even when there are no inline comments."
 event = "Ignored except for schema compatibility; the orchestrator always sends `COMMENT`."
 
+# trace:v1 id=ops.host-tool-report-pain-point work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+[report_pain_point]
+description = "File a friction report about the *harness itself* against the carter-omp repo (the tool that rejected a valid call, the misleading error, the gate that blocked work for the wrong reason, the run that lost an hour to infrastructure). Opens one issue, labelled for triage, deduped by title so a repeat appends evidence instead of filing another. NEVER use it for defects in the repo you are working on — those are the job, not a report."
+
+# trace:v1 id=ops.host-tool-report-pain-point-parameters work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+[report_pain_point.parameters]
+title = "One-line, specific summary of the fault (imperative or noun phrase, e.g. `gh_push_branch rejects a renamed workspace branch`)."
+details = "Markdown: what you expected, what happened, the exact error text, and what you tried. Facts only; no speculation about internals you cannot see."
+severity = "`low` (annoyance), `medium` (default: wasted effort or a misleading failure), `high` (blocked publication or lost work)."
+area = "Optional short bucket: `harness`, `tool`, `gate`, `infra`, `docs`."
+
 [gh_post_comment]
 description = "Post a comment on the inbound thread (PR for PR conversations/reviews, originating issue otherwise). Pass `number` ONLY to post elsewhere."
 

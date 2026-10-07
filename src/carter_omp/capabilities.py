@@ -25,6 +25,12 @@ class Capability(StrEnum):
     OPEN_PR = "open_pr"
     REQUEST_REVIEW = "request_review"
 
+    # Any authorized run may file a friction report against the harness repo
+    # (the tool broke, the error was misleading, the timeout wasted an hour).
+    # Read-only w.r.t. the repo the run is working on; the proxy decides the
+    # destination from its own config, never from the model.
+    REPORT_UPSTREAM = "report_upstream"
+
     REVIEW_PR = "review_pr"
 
     SKIP_CHECKS = "skip_checks"
@@ -49,6 +55,7 @@ ISSUE_RUN_CAPABILITIES: frozenset[Capability] = frozenset(
         Capability.PUSH_BRANCH,
         Capability.OPEN_PR,
         Capability.REQUEST_REVIEW,
+        Capability.REPORT_UPSTREAM,
     }
 )
 
@@ -62,6 +69,7 @@ PR_REVIEW_CAPABILITIES: frozenset[Capability] = frozenset(
         Capability.COMMENT,
         Capability.REVIEW_PR,
         Capability.LABEL,
+        Capability.REPORT_UPSTREAM,
     }
 )
 
@@ -80,6 +88,7 @@ RELEASE_RUN_CAPABILITIES: frozenset[Capability] = frozenset(
         Capability.REQUEST_REVIEW,
         Capability.UPDATE_DEFAULT_BRANCH,
         Capability.MOVE_RELEASE_TAG,
+        Capability.REPORT_UPSTREAM,
     }
 )
 

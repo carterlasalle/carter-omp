@@ -168,9 +168,42 @@ def test_wrong_installation_skips() -> None:
         }
     )
     payload["installation"] = {"id": 1}
-    d = route("issues", payload, allowlist=ALLOWLIST, bot_login=BOT, policy=POLICY, installation_id=INSTALLATION_ID)
+    d = route(
+        "issues",
+        payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        policy=POLICY,
+        installation_ids=frozenset({INSTALLATION_ID}),
+    )
     assert not d.should_queue
     assert d.reason == "installation_not_authorized"
+
+
+def test_second_installation_of_the_same_app_is_admitted() -> None:
+    """A deployment serves several accounts/orgs; each App installation has its
+    own id, so every configured id must be admissible — otherwise a second org
+    can never trigger anything."""
+    other_installation = INSTALLATION_ID + 1
+    payload = _base(
+        {
+            "action": "labeled",
+            "label": {"name": "carter-omp"},
+            "issue": {"number": 4},
+            "sender": _sender("carterlasalle", OPERATOR_ID),
+        }
+    )
+    payload["installation"] = {"id": other_installation}
+    d = route(
+        "issues",
+        payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        policy=POLICY,
+        installation_ids=frozenset({INSTALLATION_ID, other_installation}),
+    )
+    assert d.should_queue
+    assert d.trigger is not None and d.trigger.installation_id == other_installation
 
 
 def test_issue_opened_never_queues() -> None:
@@ -413,3 +446,73 @@ def test_owner_scope_rejects_other_owners() -> None:
     )
     assert not d.should_queue
     assert d.reason == "repo not on allowlist"
+
+
+def test_assigning_the_bot_queues_triage() -> None:
+    d = _route(
+        "issues",
+        {
+            "action": "assigned",
+            "assignee": {"login": "carter-omp[bot]", "id": 4242, "type": "Bot"},
+            "issue": {"number": 4},
+            "sender": _sender("carterlasalle", OPERATOR_ID),
+        },
+    )
+    assert d.should_queue
+    assert d.task == "triage_issue"
+    assert d.trigger is not None
+    assert d.trigger.trigger_kind == "assign"
+    assert d.trigger.issue_number == 4
+    assert Capability.PUSH_BRANCH in d.trigger.capabilities
+
+
+def test_assigning_a_human_never_queues() -> None:
+    d = _route(
+        "issues",
+        {
+            "action": "assigned",
+            "assignee": {"login": "someone", "id": 999, "type": "User"},
+            "issue": {"number": 4},
+            "sender": _sender("carterlasalle", OPERATOR_ID),
+        },
+    )
+    assert not d.should_queue
+    assert d.reason == "assignee_not_bot"
+
+
+def test_assign_trigger_can_be_disabled() -> None:
+    policy = TriggerPolicy(
+        authorized_user_ids=frozenset({OPERATOR_ID}),
+        trigger_label="carter-omp",
+        assign_triggers=False,
+    )
+    d = route(
+        "issues",
+        _base(
+            {
+                "action": "assigned",
+                "assignee": {"login": "carter-omp[bot]", "id": 4242, "type": "Bot"},
+                "issue": {"number": 4},
+                "sender": _sender("carterlasalle", OPERATOR_ID),
+            }
+        ),
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        policy=policy,
+    )
+    assert not d.should_queue
+    assert d.reason == "assign_trigger_disabled"
+
+
+def test_unassigning_the_bot_never_queues() -> None:
+    d = _route(
+        "issues",
+        {
+            "action": "unassigned",
+            "assignee": {"login": "carter-omp[bot]", "id": 4242, "type": "Bot"},
+            "issue": {"number": 4},
+            "sender": _sender("carterlasalle", OPERATOR_ID),
+        },
+    )
+    assert not d.should_queue
+    assert d.reason == "explicit_trigger_required"

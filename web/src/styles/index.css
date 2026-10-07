@@ -1,3 +1,4 @@
+/* trace:v1 id=impl.web-styles work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP */
 @import "tailwindcss";
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -863,6 +864,20 @@ code,
 .rmp-nav-item-icon { flex-shrink: 0; display: inline-flex; }
 .rmp-nav-item-label { flex: 1; min-width: 0; }
 .rmp-nav-item-lock { flex-shrink: 0; display: inline-flex; color: var(--color-ink-400); }
+/* Dead-letter count on the System entry — terminal failures, not chores. */
+.rmp-nav-item-badge {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color: var(--color-err);
+  background: color-mix(in oklab, var(--color-err) 16%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-err) 34%, transparent);
+}
 
 /* Footer */
 .rmp-rail-footer {

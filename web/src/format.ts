@@ -3,6 +3,7 @@
 
 const DASH = "—";
 
+// trace:v1 id=impl.web-src-format.fmt-duration work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
 export function fmtDuration(seconds?: number | null): string {
   if (seconds == null || !Number.isFinite(seconds)) return DASH;
   const s = Math.max(0, seconds);
@@ -10,6 +11,23 @@ export function fmtDuration(seconds?: number | null): string {
   if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
   return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
+
+// trace:v1 id=impl.web-src-format.fmt-cost work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
+export function fmtCost(usd?: number | null): string {
+  if (usd == null || !Number.isFinite(usd)) return DASH;
+  if (usd === 0) return "$0";
+  return usd < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
+/** Token counts: compact but never lying about magnitude (842 / 14.3K / 1.2M). */
+// trace:v1 id=impl.web-src-format.fmt-tokens work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
+export function fmtTokens(count?: number | null): string {
+  if (count == null || !Number.isFinite(count)) return DASH;
+  const n = Math.max(0, count);
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
 export function fmtAge(iso?: string | null): string {

@@ -4,9 +4,18 @@
     "repo_allowlist": [
       "octo/widget"
     ],
+    "repo_owners": [],
+    "installation_ids": [],
     "max_concurrency": 8,
     "model": "anthropic/claude-sonnet-4-5",
+    "model_pool": [
+      "anthropic/claude-sonnet-4-5"
+    ],
+    "fallback_models": [],
     "thinking_level": "high",
+    "trigger_mode": "legacy",
+    "trigger_label": "carter-omp",
+    "issue_index_sync_seconds": 0.0,
     "uptime_seconds": 0.0
   },
   "inflight": [],
@@ -220,5 +229,56 @@
       "last_error": null,
       "issue_state": "reproducing"
     }
-  ]
+  ],
+  "system": {
+    "queue": {
+      "pending": [
+        {
+          "delivery_id": "queued-x",
+          "event_type": "issues",
+          "repo": "octo/widget",
+          "issue_key": "octo/widget#5",
+          "attempts": 0,
+          "received_at": "2024-01-01T00:00:00+00:00",
+          "available_at": null
+        }
+      ],
+      "dead_letters": [],
+      "retry_budget": 3
+    },
+    "index": [],
+    "runs": [],
+    "spend": {
+      "today": {
+        "runs": 0,
+        "cost_usd": 0,
+        "cache_cost_usd": 0,
+        "miss_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "fallback_runs": 0
+      },
+      "week": {
+        "runs": 0,
+        "cost_usd": 0,
+        "cache_cost_usd": 0,
+        "miss_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "fallback_runs": 0
+      },
+      "all_time": {
+        "runs": 0,
+        "cost_usd": 0,
+        "cache_cost_usd": 0,
+        "miss_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "fallback_runs": 0
+      }
+    }
+  }
 }
