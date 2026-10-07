@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse
 
 from carter_omp.config import Settings
 from carter_omp.git_ops import (
+    WORKFLOW_PERMISSION_HINT,
     GitCommandError,
     HeadDriftError,
 )
@@ -327,6 +328,53 @@ _GIT_PROBE_SCRUBBED_ENV_KEYS = (
     "CARTER_OMP_REPLAY_TOKEN",
     "CARTER_OMP_GH_PROXY_HMAC_KEY",
 )
+
+
+# trace:v1 id=impl.proxy-workflow-push-guard work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _pushed_workflow_paths(repo_dir: Path) -> list[str]:
+    """Workflow files this push introduces (present in local commits, not on any remote).
+
+    `--not --remotes` is exactly "what this push adds", so no base-branch guess
+    is needed. Returns `[]` on any git failure: an unreadable ref must not block
+    a push, the remote's own rejection still applies.
+    """
+    proc = subprocess.run(
+        # `HEAD` must be named explicitly: with only `--not --remotes` git selects
+        # no positive ref and prints nothing (measured), which would silently
+        # disable the guard.
+        ["git", "-C", str(repo_dir), "log", "--name-only", "--pretty=format:", "HEAD", "--not", "--remotes"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=_ORIGIN_READ_TIMEOUT_SECONDS,
+        env=_git_probe_env(repo_dir),
+    )
+    if proc.returncode != 0:
+        return []
+    return sorted(
+        {line.strip() for line in (proc.stdout or "").splitlines() if line.strip().startswith(".github/workflows/")}
+    )
+
+
+# trace:v1 id=impl.proxy-workflows-writable work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _workflows_writable(request: Request, repo: str) -> bool:
+    """Whether this deployment's credentials may write `.github/workflows/` in `repo`."""
+    provider = getattr(request.app.state, "app_token_provider", None)
+    if provider is None:
+        # PAT mode: workflow writes depend on the operator's token scopes, and
+        # asking GitHub would cost a round trip on every push.
+        return True
+    checker = getattr(provider, "can_write_workflows", None)
+    return bool(checker(repo)) if callable(checker) else True
+
+
+# trace:v1 id=impl.proxy-workflow-push-detail work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _workflow_push_detail(paths: list[str]) -> str:
+    listed = ", ".join(paths[:3]) + ("…" if len(paths) > 3 else "")
+    return (
+        f"refusing to push {listed}: this GitHub App installation cannot create or update workflow "
+        f"files. {WORKFLOW_PERMISSION_HINT}"
+    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -1260,6 +1308,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
             return _git_error_response(exc)
         return JSONResponse({"pool_dir": str(target)})
 
+    # trace:v1 id=impl.proxy-git-push-endpoint work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @app.post("/gh/v1/git/push")
     async def git_push_endpoint(request: Request) -> JSONResponse:
         data = await _json_body(request)
@@ -1282,6 +1331,12 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo_dir = _workspace_repo_dir(settings, workspace_key)
         if not repo_dir.is_dir():
             raise HTTPException(404, f"workspace not found: {workspace_key}")
+        # Workflow files are the one path an App token cannot touch without the
+        # explicit permission; refusing here names the fix instead of letting the
+        # remote reject a completed commit (carter-omp#30).
+        workflow_paths = _pushed_workflow_paths(repo_dir)
+        if workflow_paths and not _workflows_writable(request, repo):
+            raise HTTPException(403, _workflow_push_detail(workflow_paths))
         remote = await asyncio.to_thread(
             _origin_remote_auth,
             repo_dir,
@@ -1307,6 +1362,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
             return _git_error_response(exc)
         return JSONResponse({"head": result.head, "branch": result.branch})
 
+    # trace:v1 id=impl.proxy-git-push-release-endpoint work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @app.post("/gh/v1/git/push_release")
     async def git_push_release_endpoint(request: Request) -> JSONResponse:
         data = await _json_body(request)
@@ -1328,6 +1384,12 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo_dir = _workspace_repo_dir(settings, workspace_key)
         if not repo_dir.is_dir():
             raise HTTPException(404, f"workspace not found: {workspace_key}")
+        # Workflow files are the one path an App token cannot touch without the
+        # explicit permission; refusing here names the fix instead of letting the
+        # remote reject a completed commit (carter-omp#30).
+        workflow_paths = _pushed_workflow_paths(repo_dir)
+        if workflow_paths and not _workflows_writable(request, repo):
+            raise HTTPException(403, _workflow_push_detail(workflow_paths))
         remote = await asyncio.to_thread(
             _origin_remote_auth,
             repo_dir,

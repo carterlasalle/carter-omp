@@ -57,9 +57,25 @@ so this whole section stays at its defaults:
 | Pull requests | Read and write |
 | Metadata | Read-only (mandatory default) |
 | Actions | Read-only — **only** when release diagnosis is enabled; otherwise No access |
-| Everything else (Administration, Secrets, Deployments, Members, Workflows, …) | No access |
+| Workflows | **Read and write** if the bot should ever change `.github/workflows/*` — see below |
+| Everything else (Administration, Secrets, Deployments, Members, …) | No access |
 
-Workflows (write) only for installations that need workflow-file edits.
+**Workflow files need the `Workflows` permission.** Without it GitHub refuses
+*any* push that touches `.github/workflows/`, with the work already committed:
+
+```
+! [remote rejected] HEAD -> carter-omp/... (refusing to allow a GitHub App to
+create or update workflow `.github/workflows/ci.yml` without `workflows` permission)
+```
+
+The proxy now refuses such a push *before* relaying it and names the fix, and
+the push tool translates the raw refusal the same way — but a run can never
+deliver a workflow change until this permission is granted: App settings →
+Permissions → Repository permissions → **Workflows: Read and write**, then
+approve the updated permissions on **every** installation (each org/account
+must accept the new permission). Until then a run lands the rest of the change
+and reports the gap with `report_pain_point` (carter-omp#30).
+
 Never grant repository administration, secrets, deployments, or members
 unless a concrete carter-omp operation requires one.
 

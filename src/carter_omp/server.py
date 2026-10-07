@@ -381,6 +381,32 @@ def _build_state(settings: Settings, pool_factory: _PoolFactory) -> dict[str, An
     }
 
 
+# trace:v1 id=impl.server-store-routed-task work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+def _store_routed_payload(payload: dict[str, Any], decision: RouteDecision) -> dict[str, Any]:
+    """Stamp the routing decision into the payload the durable queue stores.
+
+    Directive + trigger metadata travel with the payload so the queue (and any
+    replay) carries the authorization forward — replays reuse the original
+    trigger context and never re-authorize against mutable issue state. The
+    routed task is stamped for the same reason and because the queue dispatches
+    on it instead of re-deriving `(event, action)`: the two mappings had drifted
+    and dropped the authorized `assigned` trigger as a no-op.
+    """
+    stamped = dict(payload)
+    if decision.directive:
+        stamped["_carter_omp_directive"] = {
+            "body": decision.directive_body,
+            "author": decision.directive_author,
+            "pragmas": [list(item) for item in decision.directive_pragmas],
+            "authorizes_impl": decision.directive_authorizes_impl,
+        }
+    if decision.trigger is not None:
+        stamped["_carter_omp_trigger"] = decision.trigger.to_record()
+    if decision.should_queue and decision.task is not None:
+        stamped["_carter_omp_task"] = decision.task
+    return stamped
+
+
 # trace:v1 id=impl.server-repo-owner-scope work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory = _build_worker_pool) -> FastAPI:
     """Build the FastAPI app, optionally using an injected worker-pool factory."""
@@ -509,28 +535,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                         },
                     )
 
-        # Persist directive + trigger metadata on the stored payload so the
-        # durable queue (and any replay) carries the authorization forward.
-        # Replays reuse the original trigger context and never re-authorize
-        # against mutable issue state.
-        if decision.directive:
-            payload = dict(payload)
-            payload["_carter_omp_directive"] = {
-                "body": decision.directive_body,
-                "author": decision.directive_author,
-                "pragmas": [list(item) for item in decision.directive_pragmas],
-                "authorizes_impl": decision.directive_authorizes_impl,
-            }
-        if decision.trigger is not None:
-            payload = dict(payload)
-            payload["_carter_omp_trigger"] = decision.trigger.to_record()
-        # trace:v1 id=impl.server-store-routed-task work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
-        # Persist the routed task so the durable queue dispatches on it instead of
-        # re-deriving `(event, action)` — the two mappings had drifted, dropping
-        # the authorized `assigned` trigger as a no-op.
-        if decision.should_queue and decision.task is not None:
-            payload = dict(payload)
-            payload["_carter_omp_task"] = decision.task
+        payload = _store_routed_payload(payload, decision)
 
         _record_decision_and_run(db, x_github_event, payload, x_github_delivery, decision)
 

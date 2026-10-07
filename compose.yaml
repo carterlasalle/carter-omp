@@ -79,6 +79,10 @@ services:
       # Destination for harness-friction reports filed by `report_pain_point`.
       # Empty disables the tool.
       CARTER_OMP_SELF_REPORT_REPO: ${CARTER_OMP_SELF_REPORT_REPO:-carterlasalle/carter-omp}
+      # Queue a fix run for a freshly filed report. The report is created by the
+      # bot itself, and the router ignores bot-authored events (that guard stops
+      # runs triggering each other), so the tool queues the run explicitly.
+      CARTER_OMP_SELF_REPORT_DISPATCH: ${CARTER_OMP_SELF_REPORT_DISPATCH:-true}
 
       # --- PR review ---
       CARTER_OMP_PR_REVIEW_ENABLED: ${CARTER_OMP_PR_REVIEW_ENABLED:-true}

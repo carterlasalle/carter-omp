@@ -516,3 +516,16 @@ def test_report_pain_point_from_the_self_repo_does_not_dispatch(db, tmp_path: Pa
     assert result["created"] is True
     assert "dispatched" not in result
     assert db.get_event(manual_delivery_id(SELF_REPO, 12)) is None
+
+
+def test_workflow_permission_rejection_is_translated() -> None:
+    """The raw remote refusal is recognised so the push tool can name the fix."""
+    from carter_omp.git_ops import WORKFLOW_PERMISSION_HINT, is_workflow_permission_error
+
+    raw = (
+        "! [remote rejected] HEAD -> carter-omp/x (refusing to allow a GitHub App to create or update "
+        "workflow `.github/workflows/ci.yml` without `workflows` permission)"
+    )
+    assert is_workflow_permission_error(raw) is True
+    assert is_workflow_permission_error("fatal: could not read from remote repository") is False
+    assert "Workflows: Read and write" in WORKFLOW_PERMISSION_HINT

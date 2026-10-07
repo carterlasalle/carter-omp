@@ -164,6 +164,29 @@ def _redacted_cmd(cmd: list[str]) -> list[str]:
     return [redact_credentials(part) for part in cmd]
 
 
+#: GitHub refuses App-token pushes that touch workflow files unless the
+#: installation carries the `workflows` permission. The raw remote rejection
+#: ("refusing to allow a GitHub App to create or update workflow ...") lands
+#: mid-delivery with the work already committed, so both the proxy (pre-flight)
+#: and the push tools (translation) surface this one actionable sentence.
+WORKFLOW_PERMISSION_HINT: str = (
+    "Grant the App `Repository permissions -> Workflows: Read and write` and approve the new "
+    "permission on every installation, or land the change without the workflow files and report "
+    "the gap with `report_pain_point`."
+)
+
+
+# trace:v1 id=impl.git-ops-workflow-permission-error work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def is_workflow_permission_error(text: str) -> bool:
+    """True when `text` is GitHub refusing a workflow-file write for lack of permission."""
+    lowered = text.lower()
+    return "workflows" in lowered and (
+        "without `workflows` permission" in lowered
+        or "workflow scope" in lowered
+        or "without workflows permission" in lowered
+    )
+
+
 class GitCommandError(RuntimeError):
     """Wraps a failed git subprocess with credentials redacted from argv and stderr."""
 

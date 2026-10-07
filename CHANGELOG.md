@@ -96,6 +96,16 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- Workflow-file pushes fail with a named cause instead of a raw remote refusal.
+  GitHub rejects any App-token push touching `.github/workflows/` unless the
+  installation carries the `Workflows` permission (carter-omp#30), and the
+  rejection arrived after the commit was made, mid-delivery. The proxy now
+  detects workflow paths in the outgoing commits and refuses *before* relaying
+  (`Repository permissions -> Workflows: Read and write`, then approve on each
+  installation); the push tools translate the same words if it slips through,
+  and the agent prompt says to land the rest of the change plus
+  `report_pain_point` — never to delete CI steps to route around it.
+
 - An authorized `assigned` trigger (`issues.assigned` / `pull_request.assigned`)
   is no longer queued and then dropped: `WorkerPool._dispatch` re-derived the task
   from `(event, action)` and had no `assigned` branch, so the delivery no-op'd

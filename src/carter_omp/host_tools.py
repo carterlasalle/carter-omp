@@ -27,7 +27,12 @@ from carter_omp import persona
 from carter_omp.capabilities import Capability
 from carter_omp.config import Settings
 from carter_omp.db import Database, IssueState, issue_key
-from carter_omp.git_ops import GitCommandError, HeadDriftError
+from carter_omp.git_ops import (
+    WORKFLOW_PERMISSION_HINT,
+    GitCommandError,
+    HeadDriftError,
+    is_workflow_permission_error,
+)
 from carter_omp.github_backend import GitHubBackend
 from carter_omp.github_client import GitHubError, IssueInfo, PullRequestFileInfo, RepoInfo
 from carter_omp.issue_index import parse_search_query
@@ -1202,6 +1207,7 @@ def _repair_commit_message_escapes(bindings: ToolBindings, args: Mapping[str, An
     )
 
 
+# trace:v1 id=impl.host-tools-guarded-push-branch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _guarded_push_branch(bindings: ToolBindings, args: Mapping[str, Any], tool_name: str, branch: str) -> str:
     if bindings.review_mode:
         msg = "refusing to push: PR review worktrees are read-only."
@@ -1293,6 +1299,11 @@ def _guarded_push_branch(bindings: ToolBindings, args: Mapping[str, Any], tool_n
         _raise_command(msg)
     except GitCommandError as exc:
         err = (exc.stderr or exc.stdout).strip() or f"exit {exc.returncode}"
+        if is_workflow_permission_error(err):
+            # The remote already rejected it; name the fix instead of the raw refusal.
+            msg = f"refusing to push: this commit changes GitHub workflow files. {WORKFLOW_PERMISSION_HINT}"
+            _audit(bindings, tool_name, args, error=msg)
+            _raise_command(msg)
         _audit(bindings, tool_name, args, error=err)
         _raise_command(f"git push failed: {err}")
     except GitHubError as exc:

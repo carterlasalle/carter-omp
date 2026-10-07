@@ -18,6 +18,7 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -193,6 +194,45 @@ class AppTokenProvider:
         with self._lock:
             self._installations[key] = installation_id
         return installation_id
+
+    # trace:v1 id=impl.app-auth-permissions-for-repo work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def permissions_for_repo(self, repo: str) -> dict[str, str]:
+        """The installation's permission map for `repo` (cached per repo).
+
+        GitHub returns it alongside the installation lookup. It is the only way
+        to know *before* a push whether the installation may write workflow
+        files: the rejection otherwise arrives as a raw `git push` refusal from
+        the remote, mid-delivery, with the work already committed.
+        """
+        # Deliberately uncached: permissions change when the operator grants
+        # one (carter-omp#30), and a cached "no" would keep refusing pushes long
+        # after the fix. One extra API call per push is nothing.
+        resp = app_get(
+            f"/repos/{repo}/installation",
+            app_id=self._app_id,
+            private_key_pem=self._key_pem,
+            transport=self._transport,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"GitHub App permission lookup failed for {repo}: {resp.status_code} {resp.text[:200]}")
+        data = resp.json()
+        raw = data.get("permissions")
+        permissions = {str(k): str(v) for k, v in raw.items()} if isinstance(raw, Mapping) else {}
+        # The lookup doubles as the installation cache when it is not populated.
+        installation_id = data.get("id")
+        with self._lock:
+            if isinstance(installation_id, int):
+                self._installations.setdefault(repo.lower(), installation_id)
+        return permissions
+
+    # trace:v1 id=impl.app-auth-can-write-workflows work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def can_write_workflows(self, repo: str) -> bool:
+        """True when the installation may create/update files under `.github/workflows/`."""
+        try:
+            return self.permissions_for_repo(repo).get("workflows") == "write"
+        except Exception as exc:  # noqa: BLE001 — an unknown permission must not block normal pushes
+            log.debug("workflow permission lookup failed", extra={"repo": repo, "err": str(exc)[:160]})
+            return True
 
     def _request_token(self, *, installation_id: int, repositories: list[str] | None) -> tuple[str, float]:
         jwt = mint_app_jwt(app_id=self._app_id, private_key_pem=self._key_pem)

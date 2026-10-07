@@ -9,6 +9,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -1823,3 +1824,111 @@ def test_installation_for_prefers_the_repo_and_falls_back_to_config(proxy_settin
     object.__setattr__(proxy_settings, "github_installation_ids_raw", "42")
     assert _installation_for(_Provider(7), proxy_settings, "octo/widget") == 7
     assert _installation_for(_Provider(None), proxy_settings, "octo/widget") == 42
+
+
+async def test_git_push_refuses_workflow_edits_without_the_permission(
+    proxy_settings: Settings, upstream_repo: Path
+) -> None:
+    """The remote's workflows refusal must be a named pre-flight, not a surprise.
+
+    GitHub rejects any App-token push touching `.github/workflows/` unless the
+    installation carries the `workflows` permission (carter-omp#30). The commit
+    is already made by then, so the proxy refuses *before* relaying and says
+    what to do.
+    """
+    branch = "carter-omp/abc/workflow"
+    repo_dir, _head = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    workflow = repo_dir / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text("name: ci\n", encoding="utf-8")
+    _git(["-C", str(repo_dir), "add", ".github/workflows/ci.yml"], repo_dir)
+    _git(["-C", str(repo_dir), "commit", "-m", "ci: touch a workflow"], repo_dir)
+    head = _git(["-C", str(repo_dir), "rev-parse", "HEAD"], repo_dir).stdout.strip()
+
+    app = _build_app(proxy_settings)
+    app.state.app_token_provider = SimpleNamespace(can_write_workflows=lambda _repo: False)
+    body = (
+        b'{"repo":"octo/widget","workspace_key":"octo__widget__1","branch":"'
+        + branch.encode()
+        + b'","expected_head":"'
+        + head.encode()
+        + b'"}'
+    )
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/git/push",
+            content=body,
+            headers={
+                **_signed("POST", "/gh/v1/git/push", body, run_token=_run_token(issue=None, branch=branch)),
+                "Content-Type": "application/json",
+            },
+        )
+
+    assert resp.status_code == 403, resp.text
+    detail = resp.json()["detail"]
+    assert ".github/workflows/ci.yml" in detail
+    assert "Workflows: Read and write" in detail
+    assert "report_pain_point" in detail
+    # Nothing left the workstation.
+    assert not _bare_has_branch(upstream_repo, branch)
+
+
+async def test_git_push_allows_workflow_edits_with_the_permission(
+    proxy_settings: Settings, upstream_repo: Path
+) -> None:
+    branch = "carter-omp/abc/workflow-ok"
+    repo_dir, _head = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    workflow = repo_dir / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text("name: ci\n", encoding="utf-8")
+    _git(["-C", str(repo_dir), "add", ".github/workflows/ci.yml"], repo_dir)
+    _git(["-C", str(repo_dir), "commit", "-m", "ci: touch a workflow"], repo_dir)
+    head = _git(["-C", str(repo_dir), "rev-parse", "HEAD"], repo_dir).stdout.strip()
+
+    app = _build_app(proxy_settings)
+    app.state.app_token_provider = SimpleNamespace(can_write_workflows=lambda _repo: True)
+    body = (
+        b'{"repo":"octo/widget","workspace_key":"octo__widget__1","branch":"'
+        + branch.encode()
+        + b'","expected_head":"'
+        + head.encode()
+        + b'"}'
+    )
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/git/push",
+            content=body,
+            headers={
+                **_signed("POST", "/gh/v1/git/push", body, run_token=_run_token(issue=None, branch=branch)),
+                "Content-Type": "application/json",
+            },
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert _bare_has_branch(upstream_repo, branch)
+
+
+async def test_workflow_permission_reads_through_so_a_grant_is_seen() -> None:
+    """A permission the operator grants must take effect without a restart.
+
+    Caching the negative answer would keep refusing workflow pushes long after
+    the App was granted `Workflows: Read and write` (carter-omp#30), which is
+    exactly the state the operator is trying to leave.
+    """
+    import subprocess
+
+    from carter_omp.app_auth import AppTokenProvider
+
+    key = subprocess.run(["openssl", "genrsa", "2048"], capture_output=True, text=True, check=True).stdout
+    seen: list[str] = []
+    granted = {"workflows": "read"}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(str(req.url))
+        return httpx.Response(200, json={"id": 5, "permissions": dict(granted)})
+
+    provider = AppTokenProvider(app_id="123", private_key_pem=key, transport=httpx.MockTransport(handler))
+    assert provider.can_write_workflows("octo/widget") is False
+    granted["workflows"] = "write"  # the operator approves the permission
+    assert provider.can_write_workflows("octo/widget") is True
+    assert len(seen) == 2  # read through, not cached
