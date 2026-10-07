@@ -57,6 +57,14 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- Ported the upstream `python/robomp`/`python/omp-rpc` fixes since extraction
+  (see `docs/upstream.md`): `fetch_ref`/`fetch_pr_head` backfill only the
+  missing tip-tree blobs instead of re-downloading the ref's history; a
+  `submit_pr_review` reached through the `eval` bridge now counts as the
+  terminal action (#13583); and `RpcClient.stop()` verifies teardown and
+  retains unreaped survivors so a child stuck in uninterruptible sleep stays
+  observable and reapable instead of pinning its concurrency slot.
+
 - Shared git pool kept its group across slots again: the containers were
   missing `CAP_FSETID`, so `chmod 2770` silently dropped the setgid bit (exit 0,
   no bit) and every slot-created file under `/data/workspaces/_pool` inherited
