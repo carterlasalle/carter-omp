@@ -1,11 +1,12 @@
-"""Deploy-surface contracts: compose env allowlist and the image entrypoint.
+"""Deploy-surface contracts: compose env allowlist, the image entrypoint, CI gates.
 
 `compose.yaml` forwards a hand-maintained allowlist (`env_file:` is absent by
 design so the GitHub credential cannot leak into the orchestrator), which means
 a `Settings` key that is documented in `.env.example` but missing from that
 allowlist silently does nothing in a compose deployment. Same class of drift
 for `entrypoint.sh`: the image ENTRYPOINT execs it, so its first line must be
-the shebang.
+the shebang. And for `.github/workflows/ci.yml`: a threshold whose failure the
+step swallows with `|| true` is decorative rather than a gate.
 """
 
 from __future__ import annotations
@@ -62,3 +63,21 @@ def test_entrypoint_shebang_is_the_first_line() -> None:
     first_line = path.read_bytes().splitlines()[0]
     assert first_line.startswith(b"#!"), f"entrypoint.sh line 1 must be a shebang, got {first_line!r}"
     assert os.access(path, os.X_OK), "entrypoint.sh must be executable"
+
+
+def test_ci_coverage_gate_is_not_masked() -> None:
+    """A `--cov-fail-under` step must be able to fail the job it runs in.
+
+    The coverage step ended in `|| true`, so a run below the threshold printed
+    `FAIL Required test coverage of 70% not reached` and the job still went
+    green (measured: 7.04 % coverage, step exit 0). A threshold nothing can
+    fail is not a gate.
+    """
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    masked = [
+        step["run"]
+        for job in workflow["jobs"].values()
+        for step in job["steps"]
+        if "--cov-fail-under" in (step.get("run") or "") and ("|| true" in step["run"] or "|| :" in step["run"])
+    ]
+    assert masked == [], f"coverage thresholds whose failure is swallowed by the shell: {masked}"

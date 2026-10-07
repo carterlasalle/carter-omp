@@ -96,6 +96,14 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- The CI coverage gate can fail the job again. The step that runs
+  `--cov-fail-under=70` ended in `|| true`, so a run at 7.04 % coverage printed
+  `FAIL Required test coverage of 70% not reached` and the job still exited 0:
+  the threshold was decorative, and a regression below 70 % would have shipped
+  green. The step now propagates pytest's exit status, and
+  `tests/test_deploy_contract.py` fails if any coverage threshold is masked
+  again.
+
 - Workflow-file pushes fail with a named cause instead of a raw remote refusal.
   GitHub rejects any App-token push touching `.github/workflows/` unless the
   installation carries the `Workflows` permission (carter-omp#30), and the
