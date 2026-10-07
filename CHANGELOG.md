@@ -86,6 +86,16 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- Run-token clients no longer collapse to the 10 s connect timeout (#16).
+  `GitHubProxyClient.with_run_token` and `ProxyGitTransport.with_run_token`
+  rebuilt their client with `timeout=self._timeout.connect`, so the per-run REST
+  client's 30 s and the per-run git transport's 120 s read budgets both became
+  10 s. A push the proxy needed 12 s for therefore raised `ReadTimeout` on the
+  scoped transport after the proxy had already performed it, and `_post`
+  re-sent the push. Both constructors now accept `float | httpx.Timeout` and
+  `with_run_token` passes the whole `httpx.Timeout` through, preserving the
+  configured read budget.
+
 - **`/allow-skip-checks` now reaches the pre-publish gates.** The directive was
   parsed into the trigger (and the run token) but `worker.run_task` built
   `ToolBindings.capabilities` from the fixed `capabilities_for(task_kind)`
