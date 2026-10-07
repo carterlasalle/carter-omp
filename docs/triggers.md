@@ -71,8 +71,9 @@ run started are fetched with the `fetch_issue_thread` host tool.
 AND an exact bot mention (token-boundary, case-insensitive;
 `@carter-omp-evil` does not match). The remaining text becomes the trusted
 operator directive. Control commands answered without a model turn: `status`
-(answers from the DB) and `stop` (cancels). Every other directive — including
-`review`, `resume`, and `release-fix` — starts a normal model run.
+(answers from the DB) and `stop` (cancels the running run(s) for that same
+issue). Every other directive — including `review`, `resume`, and
+`release-fix` — starts a normal model run.
 
 ## What does NOT trigger
 

@@ -8,6 +8,7 @@ import os
 import traceback
 from collections.abc import Callable, Mapping
 from contextlib import suppress
+from typing import Protocol
 
 from carter_omp import tasks
 from carter_omp.cancellation import clear_current_event, set_current_event
@@ -56,9 +57,43 @@ async def _handle_control_command(pool: WorkerPool, row: EventRow) -> bool:
         except RuntimeError:
             return False
         target = row.issue_key or row.delivery_id
-        loop.create_task(_cancel_issue_runs(pool, target, row.delivery_id))
+        loop.create_task(cancel_running_for_issue(pool.db, pool, target, except_delivery=row.delivery_id))
         return True
     return False
+
+
+class _CancelEventPool(Protocol):
+    async def cancel_event(self, delivery_id: str) -> bool: ...
+
+
+# trace:v1 id=impl.queue-cancel-running-for-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+async def cancel_running_for_issue(
+    db: Database,
+    pool: _CancelEventPool,
+    issue_key: str | None,
+    *,
+    except_delivery: str | None = None,
+) -> list[str]:
+    """Cancel every running event on `issue_key`, returning the delivery ids hit.
+
+    Scoping to a single issue is what keeps `@bot stop` from killing unrelated
+    runs. Running rows are discovered through the DB rather than `_cancel_hooks`:
+    a run that has not armed its hook yet is still cancellable, because
+    `cancel_event` records the request and `_arm_cancel` fires it late.
+    """
+    if not issue_key:
+        return []
+    running = await asyncio.to_thread(db.list_running_events)
+    cancelled: list[str] = []
+    for entry in running:
+        delivery_id = str(entry.get("delivery_id") or "")
+        if not delivery_id or delivery_id == except_delivery:
+            continue
+        if entry.get("issue_key") != issue_key:
+            continue
+        await pool.cancel_event(delivery_id)
+        cancelled.append(delivery_id)
+    return cancelled
 
 
 # trace:v1 id=impl.queue-status-answer work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
@@ -102,15 +137,6 @@ def _status_comment(*, key: str, issue_row: IssueRow | None, latest: EventRow | 
             detail += f" ({latest.last_error})"
         lines.append(detail)
     return "\n".join(lines)
-
-
-async def _cancel_issue_runs(pool: WorkerPool, target: str, except_delivery: str) -> None:
-    """Cancel running events for the same issue (but not this command itself)."""
-    del target
-    for delivery_id in list(pool._cancel_hooks):
-        if delivery_id != except_delivery:
-            with suppress(Exception):
-                await pool.cancel_event(delivery_id)
 
 
 # trace:v1 id=impl.queue-pool work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0

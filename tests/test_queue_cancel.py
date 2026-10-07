@@ -21,7 +21,7 @@ from carter_omp.cancellation import (
 )
 from carter_omp.config import Settings
 from carter_omp.db import Database, EventRow
-from carter_omp.queue import WorkerPool
+from carter_omp.queue import WorkerPool, cancel_running_for_issue
 from carter_omp.slot_pool import SlotPool
 
 
@@ -306,3 +306,29 @@ async def test_run_event_reaps_slot_before_release(
     assert stored is not None
     assert stored.state == "done"
     assert order == [("reap", 2001), ("release", 2001)]
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_for_issue_only_touches_that_issue(settings: Settings, db: Database) -> None:
+    """`@bot stop` on one issue must not cancel any other issue's run."""
+    pool = _make_pool(settings, db)
+    for delivery, key in (("run-a", "octo/widget#4"), ("run-b", "octo/widget#9")):
+        db.record_event(
+            delivery_id=delivery,
+            event_type="issue_comment",
+            repo="octo/widget",
+            issue_key=key,
+            payload={"action": "created"},
+        )
+    assert db.claim_next_event() is not None
+    assert db.claim_next_event() is not None
+
+    fired: list[str] = []
+    pool._arm_cancel("run-a", lambda: fired.append("run-a"))  # noqa: SLF001
+    pool._arm_cancel("run-b", lambda: fired.append("run-b"))  # noqa: SLF001
+
+    cancelled = await cancel_running_for_issue(db, pool, "octo/widget#4")
+
+    assert cancelled == ["run-a"]
+    assert fired == ["run-a"]
+    assert "run-b" not in pool._cancelled  # noqa: SLF001
