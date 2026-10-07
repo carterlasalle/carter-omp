@@ -1,5 +1,5 @@
-# trace:exempt reason=deploy-packaging-no-runtime-behavior
 #!/usr/bin/env bash
+# trace:exempt reason=deploy-packaging-no-runtime-behavior
 # carter-omp container entrypoint. No per-boot pip installs — everything is baked
 # into the image; we only sanity-check the runtime mount and create state dirs.
 #

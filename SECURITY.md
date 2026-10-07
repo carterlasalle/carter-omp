@@ -25,9 +25,13 @@ Only the latest `main` is supported. There are no versioned releases yet.
 
 - `docs/security.md` describes the threat model (trusted vs untrusted,
   fail-closed rules). This file is about *reporting*, not the model.
-- The daemon runs with least privilege (non-root, dropped capabilities,
-  no Docker socket, credential sidecar). A sandbox escape or credential
-  leak across the orchestrator/proxy boundary is in scope.
+- The daemon runs with least privilege: all capabilities dropped
+  (`cap_drop: ALL`, minimal re-add), no Docker socket, credential sidecar.
+  The entrypoint and orchestrator do run as root *inside* their container —
+  they must `chown` the shared `/data` volume and demote every task to an
+  unprivileged per-slot uid — while agent/test subprocesses never run as
+  root. A sandbox escape or credential leak across the orchestrator/proxy
+  boundary is in scope.
 - Prompt-injection *content* in issues/PRs is an expected input, not a
   vulnerability by itself; a bypass of capability enforcement from such
   content is.

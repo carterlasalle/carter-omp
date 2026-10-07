@@ -128,7 +128,7 @@ carter-omp intentionally makes unauthorized paths inert:
 - Capabilities are fixed per run by trusted routing code; the model cannot request more, and subagents inherit (never escalate).
 - Host tools are bound to the current thread/branch/repo; the proxy re-checks repo, thread, branch namespace, and action on every call.
 - Repository content (issues, diffs, `AGENTS.md`, test output, CI logs) is untrusted task data — it cannot grant permissions or override `TriggerContext`.
-- Secrets never reach the agent: the proxy holds the GitHub credential, the runner env is scrubbed, containers run non-root with dropped capabilities and no Docker socket.
+- Secrets never reach the agent: the proxy holds the GitHub credential, the runner env is scrubbed, agent/test subprocesses run as unprivileged slot users, containers drop all capabilities but the minimum needed to demote them, and no Docker socket is mounted.
 
 The normative threat model is in [Security](docs/security.md). Trigger semantics are in [Triggers](docs/triggers.md). Architectural decisions are indexed in [docs/adrs/](docs/adrs/).
 
