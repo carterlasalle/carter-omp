@@ -259,3 +259,123 @@ def test_github_proxy_client_ignores_caller_supplied_repo() -> None:
     assert result == {"number": 1, "created": True, "url": "u", "detail": "d"}
     assert "repo" not in sent["payload"]
     assert "provenance" not in sent["payload"]
+
+
+async def test_self_report_appends_to_a_known_issue_without_listing(proxy_settings: Settings) -> None:
+    """The orchestrator's fingerprint hit short-circuits GitHub's laggy list."""
+    calls: list[str] = []
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        calls.append(f"{req.method} {req.url.path}")
+        if req.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "number": 7,
+                    "title": "[bot-report] gate blocks an untraced file",
+                    "state": "open",
+                    "labels": [{"name": "bot-report"}],
+                    "user": {"login": "carter-omp[bot]"},
+                },
+            )
+        return httpx.Response(201, json={"id": 1, "body": "again"})
+
+    app = _build_app(proxy_settings, gh)
+    body = json.dumps(
+        {
+            "title": "gate blocks an untraced file",
+            "body": "expected/actual",
+            "severity": "medium",
+            "issue_number": 7,
+        }
+    ).encode()
+    async with await _async_client(app) as client:
+        resp = await client.post(ENDPOINT, content=body, headers=_headers(body))
+
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["created"] is False
+    assert payload["number"] == 7
+    assert calls == ["GET /repos/octo/self/issues/7", "POST /repos/octo/self/issues/7/comments"]
+
+
+async def test_self_report_refuses_to_append_to_a_non_report_issue(proxy_settings: Settings) -> None:
+    """A fingerprint hit must not become a comment on an unrelated issue."""
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "number": 3,
+                    "title": "Deploy and CI drift",
+                    "state": "open",
+                    "labels": [],
+                    "user": {"login": "carterlasalle"},
+                },
+            )
+        raise AssertionError("must not comment on a non-report issue")
+
+    app = _build_app(proxy_settings, gh)
+    body = json.dumps({"title": "t", "body": "b", "severity": "low", "issue_number": 3}).encode()
+    async with await _async_client(app) as client:
+        resp = await client.post(ENDPOINT, content=body, headers=_headers(body))
+
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["created"] is False
+    assert payload["number"] is None
+    assert "not a" in payload["detail"]
+
+
+def test_report_pain_point_appends_on_the_second_call(db, tmp_path: Path, settings: Settings) -> None:
+    """Two runs hitting the same fault converge on one issue via the DB."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/repos/octo/self/issues" and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if request.method == "GET":  # verify a known report
+            return httpx.Response(
+                200,
+                json={
+                    "number": 12,
+                    "title": "[bot-report] gate: gate blocks an untraced file",
+                    "state": "open",
+                    "labels": [{"name": "bot-report"}],
+                    "user": {"login": "carter-omp[bot]"},
+                },
+            )
+        if request.url.path.endswith("/comments"):
+            return httpx.Response(201, json={"id": 2, "body": "again"})
+        return httpx.Response(
+            201,
+            json={
+                "number": 12,
+                "title": "[bot-report] gate: gate blocks an untraced file",
+                "state": "open",
+                "labels": [],
+                "user": {"login": "carter-omp[bot]"},
+                "html_url": "https://github.com/octo/self/issues/12",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "comments": 0,
+            },
+        )
+
+    bindings, loop, thread = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    settings.self_report_repo = SELF_REPO
+    object.__setattr__(bindings, "settings", settings)
+    args = {"title": "gate blocks an untraced file", "details": "expected/actual", "area": "gate", "severity": "high"}
+    try:
+        tool = next(x for x in build(bindings) if x.name == "report_pain_point")
+        first = json.loads(tool.execute(dict(args), _ctx()))
+        second = json.loads(tool.execute(dict(args), _ctx()))
+    finally:
+        _stop_loop(loop, thread)
+
+    assert first["created"] is True and first["number"] == 12
+    assert second["created"] is False and second["number"] == 12
+    assert "POST /repos/octo/self/issues/12/comments" in calls
+    assert calls.count("POST /repos/octo/self/issues") == 1  # created once

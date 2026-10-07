@@ -158,6 +158,9 @@ class _SelfReportWriter(Protocol):
     # trace:v1 id=impl.github-self-report-writer-list-issues work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     async def list_issues(self, repo: str, *, state: str = ..., limit: int = ...) -> list[IssueSummary]: ...
 
+    # trace:v1 id=impl.github-self-report-writer-get-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def get_issue(self, repo: str, number: int) -> IssueInfo: ...
+
     # trace:v1 id=impl.github-self-report-writer-post-comment work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     async def post_comment(self, repo: str, number: int, body: str) -> CommentInfo: ...
 
@@ -175,6 +178,7 @@ async def file_self_report(
     severity: str,
     provenance: str = "",
     extra_labels: Sequence[str] = (),
+    issue_number: int | None = None,
 ) -> dict[str, Any]:
     """Create a friction report issue, or comment on the matching open one.
 
@@ -189,6 +193,34 @@ async def file_self_report(
     full_title = f"[{SELF_REPORT_MARKER}] {title}".strip()
     existing: IssueSummary | None = None
     dedupe_error: str | None = None
+    if issue_number is not None:
+        # The caller already knows where this fingerprint was filed (the
+        # orchestrator's DB is immediate; GitHub's list lags several seconds —
+        # measured — which is how back-to-back reports became duplicates).
+        # Only a report issue may be appended to: verify the marker first.
+        try:
+            target_issue = await client.get_issue(repo, issue_number)
+        except GitHubError as exc:
+            return {
+                "number": None,
+                "url": None,
+                "created": False,
+                "detail": f"could not verify report #{issue_number}: {exc.status}",
+            }
+        if not target_issue.title.strip().startswith(f"[{SELF_REPORT_MARKER}]"):
+            return {
+                "number": None,
+                "url": None,
+                "created": False,
+                "detail": f"refusing to append to #{issue_number}: it is not a [{SELF_REPORT_MARKER}] report",
+            }
+        await client.post_comment(repo, issue_number, body + _provenance_block(provenance, again=True))
+        return {
+            "number": issue_number,
+            "url": target_issue.html_url if hasattr(target_issue, "html_url") else "",
+            "created": False,
+            "detail": f"appended to known report #{issue_number}",
+        }
     try:
         open_reports = await client.list_issues(repo, state="open", limit=100)
     except GitHubError as exc:
@@ -811,6 +843,7 @@ class GitHubClient:
         body: str,
         severity: str,
         provenance: str = "",
+        issue_number: int | None = None,
     ) -> dict[str, Any]:
         """File (or append to) a friction report against the harness repo."""
         return await file_self_report(
@@ -820,6 +853,7 @@ class GitHubClient:
             body=body,
             severity=severity,
             provenance=provenance,
+            issue_number=issue_number,
         )
 
     async def open_pull_request(

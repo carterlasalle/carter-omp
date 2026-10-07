@@ -349,6 +349,7 @@ class GitHubProxyClient:
         body: str,
         severity: str,
         provenance: str = "",
+        issue_number: int | None = None,
     ) -> Mapping[str, Any]:
         """File a friction report against the harness repo.
 
@@ -357,11 +358,10 @@ class GitHubProxyClient:
         report cannot be redirected or misattributed by the caller.
         """
         del repo, provenance
-        return await self._request(
-            "POST",
-            "/gh/v1/self-report",
-            json_body={"title": title, "body": body, "severity": severity},
-        )
+        payload: dict[str, Any] = {"title": title, "body": body, "severity": severity}
+        if issue_number is not None:
+            payload["issue_number"] = issue_number
+        return await self._request("POST", "/gh/v1/self-report", json_body=payload)
 
     async def request_reviewers(
         self,

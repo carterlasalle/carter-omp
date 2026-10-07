@@ -19,9 +19,12 @@ versions are `Unreleased` until the first tagged release.
   losing an hour to infrastructure. The report becomes a tracked issue on
   `CARTER_OMP_SELF_REPORT_REPO` (default `carterlasalle/carter-omp`), labelled
   `bot-report` plus the deployment's trigger label, over the new
-  `POST /gh/v1/self-report` proxy route. Dedupe is an exact-title match on the
-  `[bot-report]` marker, so a repeat appends evidence instead of filing another
-  issue; the destination comes from proxy config and the provenance from the run
+  `POST /gh/v1/self-report` proxy route. Dedupe is two-layered: the
+  orchestrator records `(sha256(title) → issue)` in `self_reports` and appends
+  straight to that issue, falling back to an exact-title match on the
+  `[bot-report]` marker over open issues. GitHub's issue *list* needs ~5s to
+  show a just-created issue (measured: invisible at +0/+1/+3s, visible at +6s),
+  so a list-only check filed a duplicate for every back-to-back report; the destination comes from proxy config and the provenance from the run
   token, so a report can never be redirected or misattributed. New capability
   `report_upstream` (granted to issue, review and release runs), new
   `CARTER_OMP_SELF_REPORT_REPO` knob (empty disables the tool), and prompt

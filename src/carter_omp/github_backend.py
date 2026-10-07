@@ -69,6 +69,7 @@ class GitHubBackend(Protocol):
         body: str,
         severity: str,
         provenance: str = "",
+        issue_number: int | None = None,
     ) -> Mapping[str, Any]: ...
     async def list_issue_index_entries(
         self,

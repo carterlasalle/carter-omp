@@ -930,3 +930,18 @@ def test_issue_index_status_reports_rows_prs_and_watermark(db: Database) -> None
     assert (row["repo"], row["rows"], row["pull_requests"]) == ("octo/widget", 3, 1)
     assert row["newest_issue_at"] == "2026-01-03T00:00:00Z"
     assert row["last_synced"] == "2026-02-01T00:00:00Z"
+
+
+def test_self_report_fingerprint_round_trip(db: Database) -> None:
+    """A filed report is remembered immediately, so the next run appends.
+
+    GitHub's issue list needs seconds to show a just-created issue; the DB is
+    what makes back-to-back reports converge on one issue.
+    """
+    assert db.self_report_fingerprint("abc") is None
+    db.record_self_report("abc", issue_number=41, url="https://x/41", title="t")
+    assert db.self_report_fingerprint("abc") == 41
+    # Recording again updates in place (same fingerprint → same issue).
+    db.record_self_report("abc", issue_number=41, url="https://x/41", title="t2")
+    assert db.self_report_fingerprint("abc") == 41
+    assert db.self_report_fingerprint("other") is None

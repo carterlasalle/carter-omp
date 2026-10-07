@@ -7,6 +7,7 @@ reproduction transcript store, or the orchestrator's bookkeeping.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -914,6 +915,12 @@ def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
         if bindings.issue is not None:
             where.insert(0, f"**Working on:** `{bindings.issue_key}`")
         body = f"{details.strip()}\n\n### Where\n" + "\n".join(f"- {line}" for line in where)
+        # Fingerprint the headline so the next run that hits the same fault
+        # appends to the existing report instead of filing a duplicate: the
+        # orchestrator's DB is consistent immediately, while GitHub's issue
+        # list needs several seconds to show a just-created issue.
+        fingerprint = hashlib.sha256(headline.casefold().encode("utf-8")).hexdigest()[:32]
+        known = bindings.db.self_report_fingerprint(fingerprint)
         try:
             result = _run_coro(
                 bindings.loop,
@@ -923,13 +930,23 @@ def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
                     body=body,
                     severity=severity,
                     provenance=f"`{bindings.repo.full_name}` · branch `{bindings.workspace.branch}`",
+                    issue_number=known,
                 ),
             )
         except GitHubError as exc:
             _audit(bindings, "report_pain_point", args, error=str(exc))
             _raise_command(f"could not file the report: {exc.status} {exc.message}")
-        _audit(bindings, "report_pain_point", args, result=dict(result))
-        return json.dumps(dict(result), indent=2)
+        result = dict(result)
+        number = result.get("number")
+        if known is None and isinstance(number, int):
+            bindings.db.record_self_report(
+                fingerprint,
+                issue_number=number,
+                url=str(result.get("url") or ""),
+                title=headline,
+            )
+        _audit(bindings, "report_pain_point", args, result=result)
+        return json.dumps(result, indent=2)
 
     return host_tool(
         name="report_pain_point",

@@ -69,6 +69,15 @@ Durable operational knowledge. Read this before touching Docker, CI, or trace co
 - Pinning the full branch name (not the namespace) is what made issue #14
   unable to publish; do not "tighten" `_require_run_branch` back to equality.
 
+## GitHub API
+<!-- trace:v1 id=doc.agent-notes-github-api work=WORK-CO-Q8Z1HJJJ -->
+
+- `GET /repos/{repo}/issues` is **not** read-after-write consistent: an issue
+  created now is missing from the list at +0s/+1s/+3s and present at +6s
+  (measured 2026-10-07 while testing the self-report channel). Any create-then-
+  check dedupe needs a local record (we use `self_reports` keyed by
+  `sha256(title)`) or it will file duplicates; search is laggier still.
+
 ## Analyzers
 <!-- trace:v1 id=doc.agent-notes-analyzers work=WORK-CO-Q8Z1HJJJ -->
 

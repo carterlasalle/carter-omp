@@ -208,6 +208,21 @@ CREATE TRIGGER IF NOT EXISTS issue_index_au AFTER UPDATE ON issue_index BEGIN
   INSERT INTO issue_index_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
 END;
 
+-- Friction reports the bot filed about the harness itself, keyed by a
+-- fingerprint of the report title. GitHub's issue *list* needs several seconds
+-- to show a just-created issue (measured: invisible at +0/+1/+3s, visible at
+-- +6s), so a lookup against GitHub alone files a duplicate for every
+-- back-to-back run that hits the same wall. The orchestrator's DB is
+-- consistent immediately and shared by every run.
+CREATE TABLE IF NOT EXISTS self_reports (
+  fingerprint  TEXT PRIMARY KEY,
+  issue_number INTEGER NOT NULL,
+  url          TEXT NOT NULL DEFAULT '',
+  title        TEXT NOT NULL DEFAULT '',
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+
 -- Per-repo reconcile watermark: the max `updated_at` the sync has fully
 -- ingested. Absent row = repo never backfilled.
 CREATE TABLE IF NOT EXISTS issue_index_sync (
@@ -1738,6 +1753,43 @@ class Database:
         with self._lock:
             row = self._conn.execute("SELECT last_synced FROM issue_index_sync WHERE repo = ?", (repo,)).fetchone()
         return str(row["last_synced"]) if row is not None else None
+
+    # trace:v1 id=impl.db-self-report-fingerprint work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def self_report_fingerprint(self, fingerprint: str) -> int | None:
+        """Issue number already filed for this report fingerprint, if any."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT issue_number FROM self_reports WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+        if row is None:
+            return None
+        return int(row["issue_number"])
+
+    # trace:v1 id=impl.db-record-self-report work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def record_self_report(
+        self,
+        fingerprint: str,
+        *,
+        issue_number: int,
+        url: str = "",
+        title: str = "",
+    ) -> None:
+        """Remember where a fingerprint was filed so the next run appends."""
+        now = _utcnow()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO self_reports (fingerprint, issue_number, url, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fingerprint) DO UPDATE SET
+                    issue_number = excluded.issue_number,
+                    url = excluded.url,
+                    title = excluded.title,
+                    updated_at = excluded.updated_at
+                """,
+                (fingerprint, issue_number, url, title, now, now),
+            )
 
     def set_issue_index_watermark(self, repo: str, last_synced: str) -> None:
         with self._lock:

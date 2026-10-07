@@ -954,6 +954,8 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         severity = str(data.get("severity") or "medium").lower()
         if severity not in ("low", "medium", "high"):
             raise HTTPException(400, "severity must be low, medium or high")
+        raw_issue = data.get("issue_number")
+        issue_number = _require_int(raw_issue, "issue_number") if raw_issue is not None else None
         origin = f"`{token.repo}#{token.issue}` · run `{token.run_id}`"
         github = _scoped_client(request, target)
         try:
@@ -964,6 +966,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
                 body=body,
                 severity=severity,
                 provenance=origin,
+                issue_number=issue_number,
                 extra_labels=[cfg.trigger_label] if cfg.trigger_label else [],
             )
         except GitHubError as exc:
