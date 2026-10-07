@@ -24,11 +24,21 @@ versions are `Unreleased` until the first tagged release.
   straight to that issue, falling back to an exact-title match on the
   `[bot-report]` marker over open issues. GitHub's issue *list* needs ~5s to
   show a just-created issue (measured: invisible at +0/+1/+3s, visible at +6s),
-  so a list-only check filed a duplicate for every back-to-back report; the destination comes from proxy config and the provenance from the run
-  token, so a report can never be redirected or misattributed. New capability
+  so a list-only check filed a duplicate for every back-to-back report. The
+  destination comes from proxy config and the provenance from the run token, so
+  a report can never be redirected or misattributed. New capability
   `report_upstream` (granted to issue, review and release runs), new
   `CARTER_OMP_SELF_REPORT_REPO` knob (empty disables the tool), and prompt
   guidance to report instead of vanishing into a silent `abort_task`.
+
+- A filed report is **worked immediately**: the tool queues the fix run itself
+  (`CARTER_OMP_SELF_REPORT_DISPATCH`, default on) because the router ignores
+  bot-authored events by design. Enqueuing needed the missing half of host-
+  queued work: `enqueue_manual_triage` now synthesizes the `manual_cli`
+  TriggerContext that routing would otherwise have produced, so a queued run
+  gets a run token and can actually push/open its PR — before this, manual
+  triage in orchestrator mode carried no trigger and every proxy write 401'd.
+  Disabled or same-repo reports are never auto-dispatched (no recursion).
 
 - Console **System** view (4th rail entry, dead-letter badge): spend for
   today/7 days/all-time (runs, fallback share, cost, cache cost, token

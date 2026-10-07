@@ -225,6 +225,79 @@ def test_report_pain_point_tool_files_through_the_backend(db, tmp_path: Path, se
     assert payload["url"].endswith("/issues/12")
 
 
+def _self_report_handler(calls: list[str], *, created_number: int = 12):
+    """Mock GitHub for the tool path: create + repo metadata + issue read."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.method == "GET" and request.url.path == "/repos/octo/self/issues":
+            return httpx.Response(200, json=[])
+        if request.method == "GET" and request.url.path == "/repos/octo/self":
+            return httpx.Response(
+                200,
+                json={
+                    "full_name": "octo/self",
+                    "default_branch": "main",
+                    "clone_url": "https://x/self.git",
+                    "private": False,
+                },
+            )
+        if request.url.path.endswith("/comments"):
+            return httpx.Response(201, json={"id": 2, "body": "appended", "user": {"login": "carter-omp[bot]"}})
+        if request.method == "GET":  # get_issue for the enqueued payload / verification
+            return httpx.Response(
+                200,
+                json={
+                    "number": created_number,
+                    "title": "[bot-report] gate: gate blocks an untraced file",
+                    "body": "expected/actual",
+                    "state": "open",
+                    "labels": [{"name": "bot-report"}],
+                    "user": {"login": "carter-omp[bot]"},
+                },
+            )
+        return httpx.Response(
+            201,
+            json={
+                "number": created_number,
+                "title": "[bot-report] gate: gate blocks an untraced file",
+                "state": "open",
+                "labels": [],
+                "user": {"login": "carter-omp[bot]"},
+                "html_url": f"https://github.com/octo/self/issues/{created_number}",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "comments": 0,
+            },
+        )
+
+    return handler
+
+
+def _run_tool(db, tmp_path, settings: Settings, handler, *, repo: str = "octo/widget") -> dict[str, Any]:
+    from carter_omp.github_client import RepoInfo
+
+    bindings, loop, thread = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    settings.self_report_repo = SELF_REPO
+    object.__setattr__(bindings, "settings", settings)
+    object.__setattr__(bindings, "repo", RepoInfo(full_name=repo, default_branch="main", clone_url="", private=False))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "report_pain_point")
+        return json.loads(
+            tool.execute(
+                {
+                    "title": "gate blocks an untraced file",
+                    "details": "expected/actual",
+                    "area": "gate",
+                    "severity": "high",
+                },
+                _ctx(),
+            )
+        )
+    finally:
+        _stop_loop(loop, thread)
+
+
 def test_report_pain_point_requires_the_capability(db, tmp_path: Path) -> None:
     """A run whose trigger granted no report capability cannot file anything."""
     from carter_omp.capabilities import Capability
@@ -379,3 +452,67 @@ def test_report_pain_point_appends_on_the_second_call(db, tmp_path: Path, settin
     assert second["created"] is False and second["number"] == 12
     assert "POST /repos/octo/self/issues/12/comments" in calls
     assert calls.count("POST /repos/octo/self/issues") == 1  # created once
+
+
+def test_report_pain_point_dispatches_a_fix_run(db, tmp_path: Path, settings: Settings) -> None:
+    """A filed report is worked immediately, not left for a human trigger.
+
+    The report is created by the bot, so the router ignores the resulting
+    webhook event (that guard is what stops runs triggering each other). The
+    tool therefore queues the run itself, authorized by a `manual_cli` trigger.
+    """
+    from carter_omp import tasks
+    from carter_omp.github_events import TriggerContext
+    from carter_omp.manual_triage import manual_delivery_id
+
+    calls: list[str] = []
+    result = _run_tool(db, tmp_path, settings, _self_report_handler(calls))
+    assert result["created"] is True
+
+    delivery = manual_delivery_id(SELF_REPO, 12)
+    assert result["dispatched"] == delivery
+    row = db.get_event(delivery)
+    assert row is not None and row.state == "queued"
+    trigger = tasks._trigger_from_payload(row.payload)
+    assert isinstance(trigger, TriggerContext)
+    assert trigger.trigger_kind == "manual_cli"
+    assert trigger.trigger_value == "self-report"
+    assert trigger.issue_number == 12
+
+
+def test_report_pain_point_does_not_dispatch_on_append(db, tmp_path: Path, settings: Settings) -> None:
+    """Appended evidence means the fix is already underway."""
+    from carter_omp.manual_triage import manual_delivery_id
+
+    calls: list[str] = []
+    first = _run_tool(db, tmp_path, settings, _self_report_handler(calls))
+    assert first["created"] is True
+    # Second distinct fault with the same title resolves through the fingerprint
+    # and must not queue a second run.
+    calls.clear()
+    second = _run_tool(db, tmp_path, settings, _self_report_handler(calls))
+    assert second["created"] is False
+    assert "dispatched" not in second
+    assert db.get_event(manual_delivery_id(SELF_REPO, 12)) is not None
+
+
+def test_report_pain_point_dispatch_can_be_turned_off(db, tmp_path: Path, settings: Settings) -> None:
+    from carter_omp.manual_triage import manual_delivery_id
+
+    settings.self_report_dispatch = False
+    calls: list[str] = []
+    result = _run_tool(db, tmp_path, settings, _self_report_handler(calls))
+    assert result["created"] is True
+    assert "dispatched" not in result
+    assert db.get_event(manual_delivery_id(SELF_REPO, 12)) is None
+
+
+def test_report_pain_point_from_the_self_repo_does_not_dispatch(db, tmp_path: Path, settings: Settings) -> None:
+    """Otherwise a harness bug fixed inside the harness would queue itself forever."""
+    from carter_omp.manual_triage import manual_delivery_id
+
+    calls: list[str] = []
+    result = _run_tool(db, tmp_path, settings, _self_report_handler(calls), repo=SELF_REPO)
+    assert result["created"] is True
+    assert "dispatched" not in result
+    assert db.get_event(manual_delivery_id(SELF_REPO, 12)) is None

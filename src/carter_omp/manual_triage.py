@@ -8,10 +8,14 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
+from carter_omp.capabilities import POLICY_VERSION, Capability, capabilities_for
 from carter_omp.db import INACTIVE_EVENT_STATES, Database, EventRow, issue_key
 from carter_omp.github_backend import GitHubBackend
+from carter_omp.github_events import TriggerContext
 
 _ISSUE_REF = re.compile(r"^(?P<owner>[^/\s]+)/(?P<repo>[^#\s]+)#(?P<number>\d+)$")
 _ISSUE_URL = re.compile(
@@ -87,7 +91,60 @@ async def build_issues_opened_payload(github: GitHubBackend, repo_full: str, num
     }
 
 
-async def enqueue_manual_triage(*, db: Database, github: GitHubBackend, repo_full: str, number: int) -> str:
+# trace:v1 id=impl.manual-triage-trigger work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+def build_manual_trigger(
+    *,
+    repo_full: str,
+    number: int,
+    delivery_id: str,
+    actor_login: str,
+    tool: str,
+    capabilities: frozenset[Capability] | None = None,
+    installation_id: int | None = None,
+) -> TriggerContext:
+    """Authorize work that *our own code* queues (CLI triage, self-report fix).
+
+    Routing authorizes webhook events: it checks the sender against the
+    allowlist and stores the resulting TriggerContext in the payload. Host-queued
+    work has no sender to check, so the caller builds that record explicitly —
+    with `manual_cli` as the provenance kind. Without it the run carries no
+    trigger, `_attach_run_token` mints nothing, and every proxy write 401s
+    (which is how manual triage silently failed in orchestrator mode).
+    """
+    return TriggerContext(
+        run_id=str(uuid4()),
+        delivery_id=delivery_id,
+        repository_id=0,  # audit-only: the proxy authorizes on the repo *name*
+        repository_full_name=repo_full,
+        installation_id=installation_id or 0,
+        actor_id=0,
+        actor_login=actor_login or "carter-omp",
+        actor_type="Bot",
+        event_type="issues",
+        action="opened",
+        trigger_kind="manual_cli",
+        trigger_object_id=None,
+        trigger_value=tool,
+        issue_number=number,
+        pull_request_number=None,
+        capabilities=capabilities if capabilities is not None else capabilities_for("triage_issue"),
+        policy_version=POLICY_VERSION,
+        authorized_at=datetime.now(UTC),
+    )
+
+
+# trace:v1 id=impl.manual-triage-enqueue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+async def enqueue_manual_triage(
+    *,
+    db: Database,
+    github: GitHubBackend,
+    repo_full: str,
+    number: int,
+    actor_login: str = "",
+    tool: str = "cli",
+    capabilities: frozenset[Capability] | None = None,
+    installation_id: int | None = None,
+) -> str:
     """Fetch the issue from GitHub and queue it for the worker pool.
 
     Returns the delivery_id. A row may already exist from a previous manual
@@ -100,6 +157,15 @@ async def enqueue_manual_triage(*, db: Database, github: GitHubBackend, repo_ful
         raise ManualTriageConflict(delivery, existing.state)
 
     payload = await build_issues_opened_payload(github, repo_full, number)
+    payload["_carter_omp_trigger"] = build_manual_trigger(
+        repo_full=repo_full,
+        number=number,
+        delivery_id=delivery,
+        actor_login=actor_login,
+        tool=tool,
+        capabilities=capabilities,
+        installation_id=installation_id,
+    ).to_record()
     replaced = db.replace_event_if_state_in(
         delivery_id=delivery,
         event_type="issues",

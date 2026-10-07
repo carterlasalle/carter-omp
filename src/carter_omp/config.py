@@ -201,6 +201,10 @@ class Settings(BaseSettings):
     # The proxy owns the destination and the credentials, so the model can
     # never choose the repo; empty disables the `report_pain_point` tool.
     self_report_repo: str = Field("carterlasalle/carter-omp", alias="CARTER_OMP_SELF_REPORT_REPO")
+    # Dispatch a fix run for a freshly filed self-report (the report is filed by
+    # the bot, so the router's bot-sender guard would otherwise leave it in the
+    # queue forever). Off means reports are filed and wait for a human trigger.
+    self_report_dispatch: bool = Field(True, alias="CARTER_OMP_SELF_REPORT_DISPATCH")
     model: str = Field("anthropic/claude-sonnet-4-6", alias="CARTER_OMP_MODEL")
     # Comma-separated fallback chain OMP walks when the primary model fails
     # with a retryable provider error. Its provider credential must be in the

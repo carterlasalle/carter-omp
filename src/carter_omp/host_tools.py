@@ -31,6 +31,7 @@ from carter_omp.git_ops import GitCommandError, HeadDriftError
 from carter_omp.github_backend import GitHubBackend
 from carter_omp.github_client import GitHubError, IssueInfo, PullRequestFileInfo, RepoInfo
 from carter_omp.issue_index import parse_search_query
+from carter_omp.manual_triage import ManualTriageConflict, enqueue_manual_triage
 from carter_omp.sandbox import (
     GitTransport,
     Workspace,
@@ -945,6 +946,42 @@ def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
                 url=str(result.get("url") or ""),
                 title=headline,
             )
+        # A report filed by the bot never reaches the router (bot-authored
+        # events are ignored, which is what keeps runs from triggering each
+        # other), so the fix run is queued here — authorized explicitly by
+        # `build_manual_trigger` with the same capabilities a label would grant.
+        # Skipped for reports filed *from* the self repo to avoid recursing.
+        if (
+            result.get("created") is True
+            and isinstance(number, int)
+            and settings is not None
+            and settings.self_report_dispatch
+            and bindings.repo.full_name.lower() != target.lower()
+        ):
+            try:
+                result["dispatched"] = _run_coro(
+                    bindings.loop,
+                    enqueue_manual_triage(
+                        db=bindings.db,
+                        github=bindings.github,
+                        repo_full=target,
+                        number=number,
+                        actor_login=settings.bot_login,
+                        tool="self-report",
+                        # Audit-only for the record: the proxy resolves its own
+                        # installation from the repo name when it mints writes.
+                        installation_id=next(iter(settings.github_installation_ids), None),
+                    ),
+                )
+            except ManualTriageConflict as exc:
+                # Already queued or running: the fix is on its way either way.
+                result["dispatched"] = exc.delivery_id
+            except Exception as exc:  # noqa: BLE001 — the report exists; dispatching is best-effort
+                log.warning(
+                    "self-report dispatch failed",
+                    extra={"repo": target, "number": number, "err": str(exc)[:200]},
+                )
+                result["dispatch_error"] = str(exc)[:200]
         _audit(bindings, "report_pain_point", args, result=result)
         return json.dumps(result, indent=2)
 
