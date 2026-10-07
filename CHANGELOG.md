@@ -86,6 +86,16 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **`/allow-skip-checks` now reaches the pre-publish gates.** The directive was
+  parsed into the trigger (and the run token) but `worker.run_task` built
+  `ToolBindings.capabilities` from the fixed `capabilities_for(task_kind)`
+  profile, which never contains `SKIP_CHECKS`. Every gate tests
+  `bindings.capabilities`, so on a broken default branch the operator escape
+  hatch did nothing: `bun run fix` / `bun check` / `bun run test` still ran and
+  refused the push. Bindings now mirror the trigger's capability set — the same
+  authoritative record the run token is scoped from — falling back to the
+  task-kind profile only for legacy/manual runs with no `TriggerContext`.
+
 - Mention turns must end with a reply. `_needs_completion_reminder` only knew
   the triage, review and release task kinds, so a `handle_comment` turn had no
   terminal action at all: the 2026-10-07 run on `personal_website#64` called
