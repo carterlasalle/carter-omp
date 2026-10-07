@@ -188,10 +188,19 @@ async def file_self_report(
     """
     full_title = f"[{SELF_REPORT_MARKER}] {title}".strip()
     existing: IssueSummary | None = None
+    dedupe_error: str | None = None
     try:
         open_reports = await client.list_issues(repo, state="open", limit=100)
-    except GitHubError:
+    except GitHubError as exc:
+        # A failed lookup must not lose the report — but it must not be silent
+        # either: a swallowed error here is exactly how "dedupe" becomes
+        # "one issue per report".
+        dedupe_error = f"{exc.status} {exc.message}"
         open_reports = []
+        log.warning(
+            "self-report dedupe lookup failed",
+            extra={"repo": repo, "title": full_title[:80], "err": dedupe_error},
+        )
     wanted = full_title.casefold()
     for candidate in open_reports:
         if candidate.title.strip().casefold() == wanted:
@@ -215,11 +224,14 @@ async def file_self_report(
         created = await client.create_issue(repo=repo, title=full_title, body=full_body, labels=labels)
     except GitHubError as exc:
         return {"number": None, "url": None, "created": False, "detail": f"GitHub rejected the report: {exc.status}"}
+    detail = f"filed report #{created.number}"
+    if dedupe_error is not None:
+        detail += f" (dedupe unavailable: {dedupe_error})"
     return {
         "number": created.number,
         "url": created.html_url,
         "created": True,
-        "detail": f"filed report #{created.number}",
+        "detail": detail,
     }
 
 
