@@ -3208,6 +3208,36 @@ def test_exact_explicit_trigger_guarantee(env: dict[str, str], monkeypatch: pyte
     close_database()
 
 
+def test_webhook_stores_the_routed_task(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A queued event carries the task `route` assigned, for `_dispatch` to run.
+
+    Regression for #9: an authorized `issues.assigned` trigger was queued but
+    the row carried no task, so `_dispatch`'s `(event, action)` mapping dropped
+    it as a no-op and marked the delivery `done`.
+    """
+    cfg = _strict_settings(monkeypatch, env)
+    app = _create_app(cfg)
+    with TestClient(app) as client:
+        payload = {
+            "action": "assigned",
+            "assignee": {"login": "carter_omp-bot", "id": 4242, "type": "Bot"},
+            "issue": {"number": 4, "title": "crash on save", "user": {"login": "carterlasalle"}},
+            "repository": _repo(),
+            "installation": _installation(),
+            "sender": _sender(12345678, "carterlasalle"),
+        }
+        resp = _post(client, event="issues", delivery="assign-1", payload=payload)
+        assert resp.status_code == 202
+        assert resp.json()["state"] == "queued", resp.json()
+    db = get_database(cfg.sqlite_path)
+    try:
+        row = db.get_event("assign-1")
+        assert row is not None
+        assert row.payload["_carter_omp_task"] == "triage_issue"
+    finally:
+        close_database()
+
+
 def test_owner_scoped_repo_webhook_is_indexed(env, monkeypatch: pytest.MonkeyPatch) -> None:
     """A repo admitted by `CARTER_OMP_REPO_OWNERS` (never listed in the exact
     allowlist) must reach the local index — otherwise `gh_search_issues` is

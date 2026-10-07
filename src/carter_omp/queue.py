@@ -8,7 +8,7 @@ import os
 import traceback
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from typing import Protocol
+from typing import Any, Protocol
 
 from carter_omp import tasks
 from carter_omp.cancellation import clear_current_event, set_current_event
@@ -137,6 +137,45 @@ def _status_comment(*, key: str, issue_row: IssueRow | None, latest: EventRow | 
             detail += f" ({latest.last_error})"
         lines.append(detail)
     return "\n".join(lines)
+
+
+#: Task coroutines that share the dispatcher's call signature.
+_SHARED_SIGNATURE_TASKS = frozenset(
+    {
+        "triage_issue",
+        "handle_release_ci",
+        "handle_pr_conversation",
+        "handle_comment",
+        "review_pr",
+        "handle_review",
+    }
+)
+
+
+# trace:v1 id=impl.queue-legacy-task work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+def _legacy_task_for(event: str, action: str, payload: Mapping[str, Any]) -> str | None:
+    """Fallback task mapping for rows queued before the routed task was stored.
+
+    Every queued webhook event carries `_carter_omp_task` (the task `route`
+    assigned it). This covers manual triage and rows already queued across an
+    upgrade, and keeps the pre-task-routing action mapping for them.
+    """
+    if event == "issues" and action in ("opened", "reopened", "labeled"):
+        return "triage_issue"
+    if event == "workflow_run" and action == "completed":
+        return "handle_release_ci"
+    if event == "issue_comment" and action == "created":
+        issue = payload.get("issue") or {}
+        return "handle_pr_conversation" if "pull_request" in issue else "handle_comment"
+    if event == "pull_request" and action in ("opened", "reopened", "ready_for_review", "labeled"):
+        return "review_pr"
+    if event == "pull_request_review_comment" and action == "created":
+        return "handle_review"
+    if event == "issues" and action == "closed":
+        return "cleanup_workspace"
+    if event == "pull_request" and action == "closed":
+        return "cleanup_workspace"
+    return None
 
 
 # trace:v1 id=impl.queue-pool work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
@@ -501,19 +540,28 @@ class WorkerPool:
     async def _dispatch(self, row: EventRow, *, slot_uid: int | None = None) -> None:
         event = row.event_type
         action = str(row.payload.get("action") or "")
+        # Dispatch on the task `route` assigned and the webhook stored with the
+        # event, not on a re-derived `(event, action)` mapping — the two drifted
+        # apart and an authorized `assigned` trigger silently no-op'd.
+        task = row.payload.get("_carter_omp_task")
+        if not isinstance(task, str) or not task:
+            task = _legacy_task_for(event, action, row.payload)
         log.info(
             "dispatch",
             extra={
                 "event": event,
                 "action": action,
+                "task": task,
                 "delivery": row.delivery_id,
                 "key": row.issue_key,
                 "attempts": row.attempts,
                 "recovered": row.attempts >= 2,
             },
         )
-        if event == "issues" and action in ("opened", "reopened", "labeled"):
-            await tasks.triage_issue(
+        if task in _SHARED_SIGNATURE_TASKS:
+            # Resolve through the module at call time so tests can monkeypatch
+            # `carter_omp.tasks` entry points.
+            await getattr(tasks, task)(
                 settings=self.settings,
                 db=self.db,
                 github=self.github,
@@ -524,86 +572,20 @@ class WorkerPool:
                 attempts=row.attempts,
                 slot_uid=slot_uid,
             )
-        elif event == "workflow_run" and action == "completed":
-            await tasks.handle_release_ci(
-                settings=self.settings,
-                db=self.db,
-                github=self.github,
-                sandbox=self.sandbox,
-                git_transport=self.git_transport,
-                payload=row.payload,
-                delivery_id=row.delivery_id,
-                attempts=row.attempts,
-                slot_uid=slot_uid,
-            )
-        elif event == "issue_comment" and action == "created":
-            issue = row.payload.get("issue") or {}
-            if "pull_request" in issue:
-                await tasks.handle_pr_conversation(
-                    settings=self.settings,
-                    db=self.db,
-                    github=self.github,
-                    sandbox=self.sandbox,
-                    git_transport=self.git_transport,
-                    payload=row.payload,
-                    delivery_id=row.delivery_id,
-                    attempts=row.attempts,
-                    slot_uid=slot_uid,
-                )
-            else:
-                await tasks.handle_comment(
-                    settings=self.settings,
-                    db=self.db,
-                    github=self.github,
-                    sandbox=self.sandbox,
-                    git_transport=self.git_transport,
-                    payload=row.payload,
-                    delivery_id=row.delivery_id,
-                    attempts=row.attempts,
-                    slot_uid=slot_uid,
-                )
-        elif event == "pull_request" and action in ("opened", "reopened", "ready_for_review", "labeled"):
-            await tasks.review_pr(
-                settings=self.settings,
-                db=self.db,
-                github=self.github,
-                sandbox=self.sandbox,
-                git_transport=self.git_transport,
-                payload=row.payload,
-                delivery_id=row.delivery_id,
-                attempts=row.attempts,
-                slot_uid=slot_uid,
-            )
-        elif event == "pull_request_review_comment" and action == "created":
-            await tasks.handle_review(
-                settings=self.settings,
-                db=self.db,
-                github=self.github,
-                sandbox=self.sandbox,
-                git_transport=self.git_transport,
-                payload=row.payload,
-                delivery_id=row.delivery_id,
-                attempts=row.attempts,
-                slot_uid=slot_uid,
-            )
-        elif event == "issues" and action == "closed":
-            await tasks.cleanup_workspace(
-                db=self.db,
-                sandbox=self.sandbox,
-                payload=row.payload,
-                target_state="closed",
-            )
-        elif event == "pull_request" and action == "closed":
-            pr = row.payload.get("pull_request") or {}
-            target_state: IssueState = "merged" if bool(pr.get("merged")) else "closed"
+            return
+        if task == "cleanup_workspace":
+            target_state: IssueState = "closed"
+            if event == "pull_request":
+                pr = row.payload.get("pull_request") or {}
+                target_state = "merged" if bool(pr.get("merged")) else "closed"
             await tasks.cleanup_workspace(
                 db=self.db,
                 sandbox=self.sandbox,
                 payload=row.payload,
                 target_state=target_state,
             )
-        else:
-            log.info("no-op dispatch", extra={"event": event, "action": action})
+            return
+        log.info("no-op dispatch", extra={"event": event, "action": action, "task": task})
 
 
 __all__ = ["WorkerPool"]

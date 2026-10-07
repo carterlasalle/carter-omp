@@ -7,6 +7,7 @@ import pytest
 from carter_omp import tasks
 from carter_omp.config import Settings
 from carter_omp.db import Database, EventRow
+from carter_omp.github_events import Actor, AuthorizationDecision, route_authorized_event
 from carter_omp.queue import WorkerPool
 from carter_omp.slot_pool import SlotPool
 
@@ -309,3 +310,135 @@ async def test_control_words_without_a_handler_are_ordinary_directives(
     await _make_pool(settings, db)._dispatch_and_mark(row)  # noqa: SLF001
 
     assert seen == [command]
+
+
+# ---------- routed task -> dispatch (regression for #9) ----------
+
+
+_TASK_ENTRY_POINTS = (
+    "triage_issue",
+    "handle_release_ci",
+    "handle_pr_conversation",
+    "handle_comment",
+    "review_pr",
+    "handle_review",
+    "cleanup_workspace",
+)
+
+_BOT_PR = {"number": 7, "state": "open", "draft": False, "user": {"login": "carter-omp[bot]"}}
+_HUMAN_PR = {"number": 7, "state": "open", "draft": False, "user": {"login": "alice"}}
+
+
+# Every `(event, action)` pair `route_authorized_event` can queue, with the task
+# it assigns. `assigned` rows were the gap: routed to a task, but `_dispatch`
+# re-derived the task from `(event, action)` and had no `assigned` branch, so the
+# delivery no-op'd and was recorded `done` (#9).
+_ROUTED_CASES = [
+    ("issues", {"action": "labeled", "label": {"name": "carter-omp"}, "issue": {"number": 4}}, "triage_issue"),
+    (
+        "issues",
+        {"action": "assigned", "assignee": {"login": "carter-omp[bot]"}, "issue": {"number": 4}},
+        "triage_issue",
+    ),
+    ("pull_request", {"action": "labeled", "pull_request": _HUMAN_PR}, "review_pr"),
+    ("pull_request", {"action": "labeled", "pull_request": _BOT_PR}, "handle_pr_conversation"),
+    (
+        "pull_request",
+        {"action": "assigned", "assignee": {"login": "carter-omp[bot]"}, "pull_request": _HUMAN_PR},
+        "review_pr",
+    ),
+    (
+        "pull_request",
+        {"action": "assigned", "assignee": {"login": "carter-omp[bot]"}, "pull_request": _BOT_PR},
+        "handle_pr_conversation",
+    ),
+    (
+        "issue_comment",
+        {"action": "created", "comment": {"id": 1, "body": "@carter-omp go"}, "issue": {"number": 4}},
+        "handle_comment",
+    ),
+    (
+        "issue_comment",
+        {
+            "action": "created",
+            "comment": {"id": 1, "body": "@carter-omp go"},
+            "issue": {"number": 7, "pull_request": {}},
+        },
+        "handle_pr_conversation",
+    ),
+    (
+        "pull_request_review_comment",
+        {"action": "created", "comment": {"id": 1, "body": "@carter-omp go"}, "pull_request": _BOT_PR},
+        "handle_review",
+    ),
+    (
+        "pull_request_review_comment",
+        {"action": "created", "comment": {"id": 1, "body": "@carter-omp go"}, "pull_request": _HUMAN_PR},
+        "review_pr",
+    ),
+]
+
+
+def _routed_task(event_type: str, payload: dict) -> str:
+    decision = route_authorized_event(
+        event_type,
+        payload,
+        decision=AuthorizationDecision(
+            authorized=True,
+            reason="authorized_label_trigger",
+            trigger_kind="label",
+            trigger_value="carter-omp",
+            actor=Actor(id=12345678, login="carterlasalle", type="User"),
+        ),
+        delivery_id="d-route",
+        repo="octo/widget",
+        bot_login="carter-omp",
+    )
+    assert decision.decision == "queue", decision.reason
+    assert decision.task is not None
+    return decision.task
+
+
+@pytest.mark.parametrize(
+    "event_type,payload,expected",
+    _ROUTED_CASES,
+    ids=[f"{e}-{p['action']}-{x}" for e, p, x in _ROUTED_CASES],
+)
+@pytest.mark.asyncio
+async def test_dispatch_runs_the_task_the_router_assigned(
+    settings: Settings,
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
+    payload: dict,
+    expected: str,
+) -> None:
+    """Every queued `(event, action)` pair MUST run the task `route` picked."""
+    task = _routed_task(event_type, payload)
+    assert task == expected
+
+    calls: list[str] = []
+
+    def _recorder(name: str):
+        async def _fake(**_kwargs: object) -> None:
+            calls.append(name)
+
+        return _fake
+
+    for name in _TASK_ENTRY_POINTS:
+        monkeypatch.setattr(tasks, name, _recorder(name))
+
+    row = EventRow(
+        delivery_id="d-route",
+        event_type=event_type,
+        repo="octo/widget",
+        issue_key="octo/widget#4",
+        payload={**payload, "_carter_omp_task": task},
+        received_at="2026-01-01T00:00:00Z",
+        state="running",
+        attempts=1,
+        last_error=None,
+    )
+    await _make_pool(settings, db)._dispatch(row)  # noqa: SLF001
+
+    assert calls == [expected]
