@@ -735,14 +735,23 @@ class Database:
             )
             return True
 
-    def latest_event_for_issue(self, key: str, *, include_skipped: bool = False) -> EventRow | None:
+    def latest_event_for_issue(
+        self, key: str, *, include_skipped: bool = False, exclude_delivery: str | None = None
+    ) -> EventRow | None:
         """Return the newest event for an issue.
 
         By default this ignores `skipped` rows. Those are usually webhook noise
         (`issues.labeled ignored`, bot/self comments) and must not hide the last
         real processing run when the dashboard retries a failed issue.
+        `exclude_delivery` drops one row (the caller's own in-flight event), so a
+        `status` answer reports the run before it rather than itself.
         """
         state_filter = "" if include_skipped else "AND state <> 'skipped'"
+        delivery_filter = ""
+        params: list[Any] = [key]
+        if exclude_delivery is not None:
+            delivery_filter = "AND delivery_id <> ?"
+            params.append(exclude_delivery)
         with self._lock:
             row = self._conn.execute(
                 f"""
@@ -751,10 +760,11 @@ class Database:
                 FROM events
                 WHERE issue_key = ?
                   {state_filter}
+                  {delivery_filter}
                 ORDER BY received_at DESC, rowid DESC
                 LIMIT 1
                 """,
-                (key,),
+                params,
             ).fetchone()
         if row is None:
             return None
