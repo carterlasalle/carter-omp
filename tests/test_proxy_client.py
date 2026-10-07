@@ -850,6 +850,82 @@ def test_proxy_git_transport_post_headers_verify() -> None:
     assert json.loads(req.content)["repo"] == "octo/widget"
 
 
+# ============================================================================
+# 4. Run-token clients keep the configured read budget (#16)
+# ============================================================================
+
+
+def test_run_token_transport_keeps_read_budget() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"pool_dir": "/tmp/x"})
+
+    base = ProxyGitTransport(base_url="http://proxy.test", hmac_key=_HMAC, transport=httpx.MockTransport(handler))
+    scoped = base.with_run_token("tok")
+
+    def wire_read(transport: ProxyGitTransport) -> float | None:
+        captured.clear()
+        transport.clone_pool(
+            repo="octo/widget",
+            clone_url="https://example/widget.git",
+            default_branch="main",
+            target=Path("/tmp/unused"),
+        )
+        timeout = captured[0].extensions["timeout"]
+        assert isinstance(timeout, dict)
+        return timeout["read"]
+
+    assert wire_read(base) == 120.0
+    # Before the fix this reached the wire as the 10 s connect value, so a
+    # 12 s push raised ReadTimeout and `_post` re-sent it.
+    assert wire_read(scoped) == 120.0
+
+
+async def test_run_token_client_keeps_read_budget() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200, json={"full_name": "octo/widget", "default_branch": "main", "clone_url": "u", "private": False}
+        )
+
+    base = GitHubProxyClient(base_url="http://proxy.test", hmac_key=_HMAC, transport=httpx.MockTransport(handler))
+    scoped = base.with_run_token("tok")
+
+    async def wire_read(client: GitHubProxyClient) -> float | None:
+        captured.clear()
+        await client.get_repo("octo/widget")
+        timeout = captured[0].extensions["timeout"]
+        assert isinstance(timeout, dict)
+        return timeout["read"]
+
+    assert await wire_read(base) == 30.0
+    # Before the fix this reached the wire as the 10 s connect value.
+    assert await wire_read(scoped) == 30.0
+
+
+async def test_run_token_client_preserves_explicit_timeout_object() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200, json={"full_name": "octo/widget", "default_branch": "main", "clone_url": "u", "private": False}
+        )
+
+    base = GitHubProxyClient(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.MockTransport(handler),
+        timeout=httpx.Timeout(7.5, connect=2.5),
+    )
+    await base.with_run_token("tok").get_repo("octo/widget")
+    assert captured[0].extensions["timeout"] == {"connect": 2.5, "read": 7.5, "write": 7.5, "pool": 7.5}
+
+
 async def test_release_read_payloads_deserialize() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path

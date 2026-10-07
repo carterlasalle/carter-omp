@@ -86,6 +86,16 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- Run-token clients no longer collapse to the 10 s connect timeout (#16).
+  `GitHubProxyClient.with_run_token` and `ProxyGitTransport.with_run_token`
+  rebuilt their client with `timeout=self._timeout.connect`, so the per-run REST
+  client's 30 s and the per-run git transport's 120 s read budgets both became
+  10 s. A push the proxy needed 12 s for therefore raised `ReadTimeout` on the
+  scoped transport after the proxy had already performed it, and `_post`
+  re-sent the push. Both constructors now accept `float | httpx.Timeout` and
+  `with_run_token` passes the whole `httpx.Timeout` through, preserving the
+  configured read budget.
+
 - Mention turns must end with a reply. `_needs_completion_reminder` only knew
   the triage, review and release task kinds, so a `handle_comment` turn had no
   terminal action at all: the 2026-10-07 run on `personal_website#64` called
