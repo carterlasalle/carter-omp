@@ -497,8 +497,10 @@ def _format_process_output(stdout: Any, stderr: Any) -> str:
 def _install_command(repo_dir: Path) -> tuple[tuple[str, ...], Path | None] | None:
     """Pick the dependency install for a checkout, plus a lockfile to clean up.
 
-    The image ships bun only (no node/npm/yarn), and bun resolves
-    `package-lock.json`/`yarn.lock`/`pnpm-lock.yaml` on import. That import
+    Bun is the installer rather than `npm`/`yarn`/`pnpm`: bun resolves
+    `package-lock.json`/`yarn.lock`/`pnpm-lock.yaml` on import, so one
+    cache-aware installer covers every JS repo the sandbox serves (the scripts
+    themselves run under the repo's own runtime — Node is on PATH). That import
     writes `bun.lock`, which the pre-publish dirty check would then see as an
     untracked change, so the caller removes it when we created it. Returns None
     when there is no lockfile to install from.

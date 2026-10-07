@@ -23,6 +23,13 @@ ARG OMP_VERSION=18.2.11
 ARG OMP_SHA256_X64=97cf39557bf3d98327dd4c9814380b7e6bcb76e41169edd9b0ff30424c733a2a
 ARG OMP_SHA256_ARM64=c115f95a0a0081d3724a3c878231fb8c3b2fdb25ad5ad6c3b30d152a82b3939e
 ARG BUN_VERSION=1.3.12
+# Node.js runtime, shipped next to Bun: `bun run <script>` delegates a
+# node-shebang `.bin` entrypoint to the `node` on PATH, and silently substitutes
+# Bun's own runtime when there is none (Bun's own documented default). Bump
+# deliberately; keep the checksums in sync with the release's SHASUMS256.txt.
+ARG NODE_VERSION=24.21.0
+ARG NODE_SHA256_X64=6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff
+ARG NODE_SHA256_ARM64=724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5
 ARG PYTHON_VERSION=3.12
 ARG YARN_VERSION=4.9.2
 
@@ -48,6 +55,9 @@ ARG OMP_VERSION
 ARG OMP_SHA256_X64
 ARG OMP_SHA256_ARM64
 ARG BUN_VERSION
+ARG NODE_VERSION
+ARG NODE_SHA256_X64
+ARG NODE_SHA256_ARM64
 ARG YARN_VERSION
 ARG TARGETARCH
 
@@ -83,6 +93,25 @@ RUN case "${TARGETARCH:-amd64}" in \
     && chmod +x /usr/local/bin/bun \
     && rm -rf /tmp/bun.zip /tmp/bun-extract \
     && bun --version
+
+# Node.js — the interpreter the target repo's own tooling expects. `bun run
+# <script>` delegates a node-shebang `.bin` entrypoint to the `node` on PATH and
+# silently falls back to Bun's runtime when there is none, which aborts
+# Node-internals tooling at load (jest: "Attempted to assign to readonly
+# property", 0 tests) — so the pre-publish `bun check` / `bun run test` gate
+# could not pass for a Node-pinned repo on any diff. Bun stays the
+# installer/runner; this is the runtime its scripts ask for.
+RUN case "${TARGETARCH:-amd64}" in \
+        arm64) NODE_ARCH=arm64; NODE_SHA256="${NODE_SHA256_ARM64}" ;; \
+        *) NODE_ARCH=x64; NODE_SHA256="${NODE_SHA256_X64}" ;; \
+    esac \
+    && curl -fsSL -o /tmp/node.tar.gz \
+        "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz" \
+    && echo "${NODE_SHA256}  /tmp/node.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/node.tar.gz --strip-components=1 -C /usr/local \
+    && rm -f /tmp/node.tar.gz \
+    && node --version \
+    && npm --version
 
 # TraceLayer (`trace`) is deliberately NOT installed. Some repos wire their own
 # agent hooks/instructions to it (`.pi/hooks.json` -> `.pi/trace-hook.sh`), and
