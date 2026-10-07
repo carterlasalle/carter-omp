@@ -1495,3 +1495,69 @@ def test_agent_env_disables_pty(tmp_path: Path, settings: Settings, monkeypatch:
     monkeypatch.setattr(worker, "_AGENT_HOME", tmp_path / "agent-home")
 
     assert worker._build_extra_env(settings)["PI_NO_PTY"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_consume_trigger_label_uses_the_run_scoped_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #15: label consumption called `inputs.github` (the shared HMAC-only
+    client), which the proxy's label endpoints reject with 401, so the trigger
+    label was never removed and `:running` was never applied."""
+    from datetime import UTC, datetime
+
+    import httpx
+
+    from carter_omp.capabilities import Capability
+    from carter_omp.github_events import TriggerContext
+    from carter_omp.proxy_client import GitHubProxyClient
+    from tests.test_proxy_server import _HMAC, _build_app, _build_settings
+
+    proxy_settings = _build_settings(tmp_path)
+    gh_calls: list[str] = []
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        gh_calls.append(f"{req.method} {req.url.path}")
+        return httpx.Response(200, json=[])
+
+    client = GitHubProxyClient(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.ASGITransport(app=_build_app(proxy_settings, gh)),
+    )
+
+    inputs, _bindings = _make_inputs(tmp_path, proxy_settings, session_has_jsonl=False)
+    inputs.github = client
+    inputs.trigger = TriggerContext(
+        run_id="run-1",
+        delivery_id="d-1",
+        repository_id=1,
+        repository_full_name="octo/widget",
+        installation_id=2,
+        actor_id=3,
+        actor_login="carterlasalle",
+        actor_type="User",
+        event_type="issues",
+        action="labeled",
+        trigger_kind="label",
+        trigger_object_id=None,
+        trigger_value="carter-omp",
+        issue_number=1,
+        pull_request_number=None,
+        capabilities=frozenset({Capability.COMMENT, Capability.LABEL}),
+        policy_version="v1",
+        authorized_at=datetime(2026, 10, 6, tzinfo=UTC),
+    )
+
+    monkeypatch.setattr(worker, "_build_prompt", lambda *args, **kwargs: "prompt")
+
+    def fake_run_rpc_blocking(_inputs, *, task_kind, prompt, bindings, directive=None):
+        del task_kind, prompt, directive
+        return "ok"
+
+    monkeypatch.setattr(worker, "_run_rpc_blocking", fake_run_rpc_blocking)
+
+    await worker.run_task(task_kind="triage_issue", inputs=inputs)
+
+    assert "DELETE /repos/octo/widget/issues/1/labels/carter-omp" in gh_calls
+    assert "POST /repos/octo/widget/issues/1/labels" in gh_calls

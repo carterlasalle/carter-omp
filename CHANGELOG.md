@@ -86,6 +86,15 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **Trigger label is consumed through the run-scoped client (#15).** After a
+  successful label-triggered run, `_consume_trigger_label` called
+  `inputs.github` — the shared HMAC-only client — instead of the run-token
+  client on `bindings.github`. Every proxy label endpoint requires a run token,
+  so the `remove_issue_label`/`add_issue_labels` calls answered 401 and the
+  failure was swallowed at DEBUG: the one-shot trigger label stayed on the
+  issue, and re-applying it (the documented re-trigger) fired no `labeled`
+  event. The function now takes `bindings` and uses `bindings.github`, and logs
+  failures at WARNING.
 - Run-token clients no longer collapse to the 10 s connect timeout (#16).
   `GitHubProxyClient.with_run_token` and `ProxyGitTransport.with_run_token`
   rebuilt their client with `timeout=self._timeout.connect`, so the per-run REST
