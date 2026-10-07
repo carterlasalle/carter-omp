@@ -71,8 +71,8 @@ run started are fetched with the `fetch_issue_thread` host tool.
 AND an exact bot mention (token-boundary, case-insensitive;
 `@carter-omp-evil` does not match). The remaining text becomes the trusted
 operator directive. Small control commands: `status`, `stop`, `review`,
-`resume`, `release-fix`. `stop` cancels without a model turn; `status` answers
-from the DB.
+`resume`, `release-fix`. `stop` cancels the running run(s) for that same issue
+without a model turn; `status` answers from the DB.
 
 ## What does NOT trigger
 

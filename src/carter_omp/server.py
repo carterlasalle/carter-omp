@@ -42,7 +42,7 @@ from carter_omp.manual_triage import (
 )
 from carter_omp.natives_cache import NativesCache
 from carter_omp.proxy_client import GitHubProxyClient, ProxyGitTransport
-from carter_omp.queue import WorkerPool
+from carter_omp.queue import WorkerPool, _control_command, cancel_running_for_issue
 from carter_omp.sandbox import SandboxManager
 
 log = logging.getLogger(__name__)
@@ -540,6 +540,40 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             )
             return JSONResponse({"delivery": x_github_delivery, "state": "skipped"}, status_code=202)
 
+        # Deterministic control commands must not be serialised behind the run
+        # they control: `claim_next_event` refuses to claim a queued event whose
+        # issue already has a `running` row, so a queued `stop` could never
+        # reach its own issue (and would outlive it). Act on it at ingress.
+        pool: _AppPool = bag["pool"]
+        if _control_command(decision.directive_body) == "stop":
+            inserted = db.record_event(
+                delivery_id=x_github_delivery,
+                event_type=x_github_event,
+                repo=decision.repo,
+                issue_key=decision.issue_key,
+                payload=payload,
+                state="done",
+            )
+            if not inserted:
+                log.info("duplicate", extra={"event": x_github_event, "delivery": x_github_delivery})
+                return JSONResponse({"delivery": x_github_delivery, "state": "done"}, status_code=202)
+            cancelled_deliveries = await cancel_running_for_issue(
+                db, pool, decision.issue_key, except_delivery=x_github_delivery
+            )
+            log.info(
+                "stop",
+                extra={
+                    "event": x_github_event,
+                    "delivery": x_github_delivery,
+                    "key": decision.issue_key,
+                    "cancelled": cancelled_deliveries,
+                },
+            )
+            return JSONResponse(
+                {"delivery": x_github_delivery, "state": "done", "cancelled": cancelled_deliveries},
+                status_code=202,
+            )
+
         # Per-user rate limiting. Lifecycle events (cleanup) carry no submitter
         # and are not gated. For everything user-driven, atomically record the
         # accepted delivery while checking the rolling window against the tier cap.
@@ -597,7 +631,6 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             state="queued",
         )
         if inserted:
-            pool: _AppPool = bag["pool"]
             pool.wake()
             log.info(
                 "queued", extra={"event": x_github_event, "delivery": x_github_delivery, "key": decision.issue_key}

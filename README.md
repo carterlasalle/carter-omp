@@ -116,7 +116,7 @@ Full sequence with App wiring and secret mounts: [Setup](docs/setup.md).
 2. Carter reviews it. To run the agent, add the `carter-omp` label — or comment `@carter-omp investigate this but don't change code yet`.
 3. The agent triages, reproduces, edits, tests, pushes a `carter-omp/*` branch, opens a PR, and comments back.
 4. Later: `@carter-omp go ahead and implement it`. On its PR: `@carter-omp address the latest review comments` — same session resumes, same branch, review text as context, Carter's comment as the authoritative directive.
-5. Small control commands: `@carter-omp status` (DB answer, no model), `@carter-omp stop` (cancel without a model turn), `@carter-omp review` / `resume` / `release-fix`.
+5. Small control commands: `@carter-omp status` (DB answer, no model), `@carter-omp stop` (cancel that issue's running run without a model turn), `@carter-omp review` / `resume` / `release-fix`.
 
 ## Safety model
 <!-- trace:v1 id=doc.readme-safety-model work=WORK-CO-Q8Z1HJJJ -->

@@ -168,3 +168,10 @@ versions are `Unreleased` until the first tagged release.
   the unscoped client (HMAC only, no run token) and the resulting 401 was
   swallowed. It now runs after run-token attachment, at the single choke point
   covering issue comments, PR conversations, and label triggers.
+- `@carter-omp stop` now cancels only the running run(s) for the issue it was
+  posted on, and does so while that run is still in flight. It previously
+  cancelled every running run in the deployment (the per-issue scope was
+  discarded, `del target`) while never stopping its own issue's run — the
+  durable queue refuses to claim an event whose issue already has a `running`
+  row, so the stop sat `queued` until that run had finished on its own. `stop`
+  is now handled deterministically at webhook ingress.

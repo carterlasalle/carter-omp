@@ -61,6 +61,32 @@ class _PausedPoolFactory:
         return pool
 
 
+class _RecordingPool(_PausedPool):
+    """Paused pool that records which deliveries the handler asked to cancel."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelled: list[str] = []
+
+    async def cancel_event(self, delivery_id: str) -> bool:
+        self.cancelled.append(delivery_id)
+        return True
+
+
+class _RecordingPoolFactory(_PausedPoolFactory):
+    def __call__(
+        self,
+        settings: Settings,
+        db: Database,
+        github: GitHubBackend,
+        sandbox: SandboxManager,
+        git_transport: ProxyGitTransport,
+    ) -> _RecordingPool:
+        pool = _RecordingPool()
+        self.pools.append(pool)
+        return pool
+
+
 def _create_app(settings: Settings | None = None) -> FastAPI:
     return create_app(settings, pool_factory=_PausedPoolFactory())
 
@@ -1689,6 +1715,53 @@ def test_webhook_directive_on_unknown_issue_is_queued_with_metadata(env, monkeyp
     assert row.state == "queued"
     directive = row.payload.get("_carter_omp_directive")
     assert directive == {"body": "please refactor X", "author": "can1357", "pragmas": [], "authorizes_impl": True}
+
+
+def test_webhook_stop_cancels_only_its_own_issue_while_in_flight(settings: Settings) -> None:
+    """`@bot stop` on issue #4 cancels #4's running run and nothing else.
+
+    The stop must also take effect while #4 is still running: the durable queue
+    refuses to claim any event whose issue already has a running row, so a
+    queued stop could never reach the run it was posted on.
+    """
+    db = get_database(settings.sqlite_path)
+    for delivery_id, number in (("run-a", 4), ("run-b", 9)):
+        db.record_event(
+            delivery_id=delivery_id,
+            event_type="issue_comment",
+            repo="octo/widget",
+            issue_key=issue_key("octo/widget", number),
+            payload={"action": "created"},
+        )
+    assert db.claim_next_event() is not None
+    assert db.claim_next_event() is not None  # both are now `running` on distinct issues
+
+    factory = _RecordingPoolFactory()
+    app = create_app(settings, pool_factory=factory)
+    with TestClient(app) as client:
+        resp = _post_issue_comment(
+            client,
+            delivery="stop-4",
+            user="carterlasalle",
+            number=4,
+            body="@carter_omp-bot stop",
+            association="OWNER",
+        )
+        pool = factory.pools[0]
+
+    assert resp.status_code == 202
+    assert resp.json() == {"delivery": "stop-4", "state": "done", "cancelled": ["run-a"]}
+    assert pool.cancelled == ["run-a"]
+
+    stop_row = db.get_event("stop-4")
+    assert stop_row is not None
+    assert stop_row.state == "done"  # handled at ingress, never left queued behind #4
+    # The unrelated run is untouched.
+    run_a = db.get_event("run-a")
+    run_b = db.get_event("run-b")
+    assert run_a is not None and run_a.state == "running"
+    assert run_b is not None and run_b.state == "running"
+    close_database()
 
 
 def test_webhook_directive_authorizes_deployed_app_login_without_author_association(
