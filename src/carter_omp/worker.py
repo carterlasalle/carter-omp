@@ -156,6 +156,14 @@ _SCRUBBED_ENV_KEYS: tuple[str, ...] = (
 _SCRUBBED_ENV_PREFIXES: tuple[str, ...] = ("AWS_", "GCP_", "AZURE_", "GOOGLE_")
 
 _AGENT_HOME = Path("/srv/agent-home")
+# Generated OMP overlay (`--config`), deliberately OUTSIDE the staged agent home.
+# `_stage_agent_home` wipes `<home>/.omp/agent` and re-copies the (often empty)
+# stage directory on every run start, so an overlay written there was deleted
+# mid-flight by a *concurrent* run's staging and the child died with
+# "Config overlay not found" (a wasted attempt on carter-omp#17, 2026-10-07).
+# The content is deployment-wide (`settings.fallback_models`), so one stable,
+# world-readable file is both race-free and correct.
+_FALLBACK_OVERLAY_PATH = Path("/srv/carter-omp-fallback.yml")
 _AGENT_HOME_STAGE = Path("/srv/agent-home-stage")
 
 
@@ -263,6 +271,9 @@ def _write_fallback_chains(settings: Settings) -> Path | None:
     pragma picked.
 
     Returns the overlay path, or None when unset/unwritable (no `--config`).
+
+    Written to `_FALLBACK_OVERLAY_PATH` (see the constant): the staged agent
+    home is wiped per run, so the overlay must live outside it.
     """
     chain = settings.fallback_models
     if not chain:
@@ -276,7 +287,7 @@ def _write_fallback_chains(settings: Settings) -> Path | None:
         "    default: ["
         f"{rendered}]\n"
     )
-    path = _AGENT_HOME / ".omp" / "agent" / "carter-omp-fallback.yml"
+    path = _FALLBACK_OVERLAY_PATH
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists() or path.read_text(encoding="utf-8") != body:

@@ -1318,13 +1318,13 @@ def test_rpc_env_scrubs_app_and_cloud_secrets(tmp_path: Path, settings: Settings
 def test_write_fallback_chains_renders_default_overlay(
     tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agent_home = tmp_path / "agent-home"
-    monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
+    overlay = tmp_path / "fallback.yml"
+    monkeypatch.setattr(worker, "_FALLBACK_OVERLAY_PATH", overlay)
     cfg = settings.model_copy(update={"fallback_model": "openrouter/deepseek/deepseek-v4.1-flash, opencode-zen/x"})
 
     path = worker._write_fallback_chains(cfg)
 
-    assert path == agent_home / ".omp" / "agent" / "carter-omp-fallback.yml"
+    assert path == overlay
     body = path.read_text(encoding="utf-8")
     assert "fallbackChains:" in body
     assert body.rstrip().endswith('default: ["openrouter/deepseek/deepseek-v4.1-flash", "opencode-zen/x"]')
@@ -1333,22 +1333,48 @@ def test_write_fallback_chains_renders_default_overlay(
     assert worker._write_fallback_chains(cfg) == path
 
 
+def test_staging_the_agent_home_never_deletes_the_fallback_overlay(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The overlay must outlive the per-run staging wipe.
+
+    `_stage_agent_home` deletes `<home>/.omp/agent` and re-copies the stage
+    directory on *every* run start. While the overlay lived there, a concurrent
+    run's staging deleted it mid-flight and the child died with
+    "Config overlay not found" — a wasted attempt (carter-omp#17, 2026-10-07).
+    """
+    overlay = tmp_path / "fallback.yml"
+    monkeypatch.setattr(worker, "_FALLBACK_OVERLAY_PATH", overlay)
+    cfg = settings.model_copy(update={"fallback_model": "openrouter/deepseek/deepseek-v4.1-flash"})
+    assert worker._write_fallback_chains(cfg) == overlay
+
+    agent_home = tmp_path / "agent-home"
+    stage = tmp_path / "agent-home-stage"
+    (stage / ".omp" / "agent").mkdir(parents=True)
+    monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
+    monkeypatch.setattr(worker, "_AGENT_HOME_STAGE", stage)
+    worker._stage_agent_home()
+
+    assert overlay.exists(), "staging wiped the generated overlay"
+    assert not (agent_home / ".omp" / "agent" / overlay.name).exists()
+
+
 def test_write_fallback_chains_unset_writes_nothing(
     tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agent_home = tmp_path / "agent-home"
-    monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
+    overlay = tmp_path / "fallback.yml"
+    monkeypatch.setattr(worker, "_FALLBACK_OVERLAY_PATH", overlay)
 
     assert worker._write_fallback_chains(settings) is None
-    assert not agent_home.exists()
+    assert not overlay.exists()
 
 
 @pytest.mark.asyncio
 async def test_run_rpc_passes_fallback_overlay_config(
     tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agent_home = tmp_path / "agent-home"
-    monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
+    overlay = tmp_path / "fallback.yml"
+    monkeypatch.setattr(worker, "_FALLBACK_OVERLAY_PATH", overlay)
     cfg = settings.model_copy(update={"fallback_model": "openrouter/deepseek/deepseek-v4.1-flash"})
 
     inputs, bindings = _make_inputs(tmp_path, cfg, session_has_jsonl=False)
@@ -1360,7 +1386,7 @@ async def test_run_rpc_passes_fallback_overlay_config(
     )
 
     extra_args = _FakeRpcClient.instances[0].kwargs["extra_args"]
-    assert extra_args == ("--no-extensions", "--config", str(agent_home / ".omp" / "agent" / "carter-omp-fallback.yml"))
+    assert extra_args == ("--no-extensions", "--config", str(overlay))
 
 
 @pytest.mark.asyncio
