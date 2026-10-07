@@ -20,7 +20,7 @@ import os
 import shutil
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -739,6 +739,113 @@ def _build_prompt(
     raise ValueError(f"unknown task kind: {task_kind!r}")
 
 
+# trace:v1 id=impl.worker-agent-stalled work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+class AgentStalledError(TimeoutError):
+    """The agent stopped emitting events for longer than the silence budget.
+
+    A `TimeoutError` subclass so callers that already treat a timed-out turn as
+    transient keep working — but the message names the silence, because a bare
+    "timed out waiting for agent_end" reads as "still working" when in fact
+    nothing had happened for half an hour.
+    """
+
+
+# trace:v1 id=impl.worker-agent-activity-watch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+class _AgentActivityWatch:
+    """Restartable deadline on agent *silence*.
+
+    `prompt_and_wait` bounds the whole turn; nothing bounded silence, so a hung
+    provider stream (no message deltas, no tool events) burned the full task
+    budget and each retry repeated it — 2026-10-07, an issue comment on
+    `carterlasalle/scc#21` spent four 40-minute attempts, ~32 of those minutes
+    silent, and the traceback only ever said `Timed out waiting for
+    agent_end`. Every agent event re-arms the watch; on expiry the turn is
+    stopped and the failure names how long the silence lasted and what the
+    last event was.
+
+    `clock` and `interval` are injectable and `check()` is the whole loop body,
+    so the behaviour is testable without sleeping; `seconds <= 0` disables it.
+    """
+
+    # trace:v1 id=impl.worker-activity-watch-init work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def __init__(
+        self,
+        *,
+        seconds: float,
+        on_stall: Callable[[], None],
+        clock: Callable[[], float] = time.monotonic,
+        interval: float | None = None,
+    ) -> None:
+        self._seconds = seconds
+        self._on_stall = on_stall
+        self._clock = clock
+        # Poll often enough that a short budget still fires promptly, but never
+        # busier than 5s in production (the budget is minutes there).
+        self._interval = interval if interval is not None else min(5.0, max(seconds / 3.0, 0.01))
+        self._lock = threading.Lock()
+        self._last_at = clock()
+        self._last_kind = "turn start"
+        self._fired = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    # trace:v1 id=impl.worker-activity-watch-enabled work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @property
+    def enabled(self) -> bool:
+        return self._seconds > 0
+
+    # trace:v1 id=impl.worker-activity-watch-fired work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @property
+    def fired(self) -> bool:
+        return self._fired.is_set()
+
+    # trace:v1 id=impl.worker-activity-watch-touch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def touch(self, kind: str) -> None:
+        with self._lock:
+            self._last_at = self._clock()
+            self._last_kind = kind
+
+    # trace:v1 id=impl.worker-activity-watch-reason work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def reason(self) -> str:
+        with self._lock:
+            silent = self._clock() - self._last_at
+            kind = self._last_kind
+        return f"no agent activity for {int(silent)}s (last event: {kind})"
+
+    # trace:v1 id=impl.worker-agent-activity-check work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def check(self) -> bool:
+        """Fire once the silence exceeds the budget. Also the watcher's loop body."""
+        if self.fired or not self.enabled:
+            return self.fired
+        with self._lock:
+            silent = self._clock() - self._last_at
+        if silent < self._seconds:
+            return False
+        self._fired.set()
+        try:
+            self._on_stall()
+        except Exception:  # noqa: BLE001 — the caller still reports the stall
+            log.exception("stall stop failed")
+        return True
+
+    # trace:v1 id=impl.worker-activity-watch-start work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def start(self) -> None:
+        if not self.enabled:
+            return
+        self._thread = threading.Thread(target=self._watch, name="agent-activity-watch", daemon=True)
+        self._thread.start()
+
+    # trace:v1 id=impl.worker-activity-watch-stop work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def stop(self) -> None:
+        self._stop.set()
+
+    # trace:v1 id=impl.worker-activity-watch-watch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def _watch(self) -> None:
+        while not self._stop.wait(self._interval):
+            if self.check():
+                return
+
+
 # trace:v1 id=impl.worker-rpc-blocking work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _run_rpc_blocking(
     inputs: TaskInputs,
@@ -992,6 +1099,27 @@ def _run_rpc_blocking(
                 "rpc_start",
                 extra={"issue": bindings.issue_key, "task": task_kind, "branch": bindings.workspace.branch},
             )
+            # Silence detection. `hard_timeout` below bounds the whole turn;
+            # this bounds *silence*, because a hung provider stream otherwise
+            # looks like work until the budget runs out and every retry repeats
+            # it (see `_AgentActivityWatch`). Any agent event re-arms it.
+            # trace:v1 id=impl.worker-activity-watch-on-stall work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+            def _on_stall() -> None:
+                log.warning(
+                    "rpc_stalled",
+                    extra={"issue": bindings.issue_key, "task": task_kind, "reason": watch.reason()},
+                )
+                try:
+                    # Same kill path as the hard timeout / operator cancel: stops
+                    # the child and unblocks `_wait_for_agent_end`.
+                    _cancel_hook()
+                except Exception:
+                    log.exception("stall stop failed", extra={"issue": bindings.issue_key, "task": task_kind})
+
+            watch = _AgentActivityWatch(seconds=settings.task_stall_seconds, on_stall=_on_stall)
+            client.on_event(lambda event: watch.touch(event.type))
+            watch.start()
+
             hard_timeout_seconds = _task_timeout(settings, task_kind) + settings.task_timeout_hard_grace_seconds
             hard_timeout_fired = threading.Event()
 
@@ -1022,9 +1150,18 @@ def _run_rpc_blocking(
                 )
                 if turn is None:
                     return None
+            except BaseException as exc:
+                # The stall kill surfaces as an RPC error; report the silence
+                # instead, which is the actionable fact.
+                if watch.fired:
+                    raise AgentStalledError(watch.reason()) from exc
+                raise
             finally:
                 hard_timer.cancel()
+                watch.stop()
             assert turn is not None  # returned above when None; narrows for LSP
+            if watch.fired:
+                raise AgentStalledError(watch.reason())
             if hard_timeout_fired.is_set():
                 raise TimeoutError("omp task exceeded hard timeout")
             if turn.assistant_message is not None:

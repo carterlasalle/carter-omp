@@ -464,3 +464,167 @@ async def test_resume_reuses_session_branch_and_trigger(db, settings, monkeypatc
     assert second_trigger is not None
     assert second_trigger.trigger_kind == "mention"
     assert second_trigger.actor_id == 12345678
+
+
+async def test_pr_conversation_on_a_reviewed_pr_is_handled_not_dropped(
+    db, tmp_path, settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reviewed PR stays addressable: the author's follow-up mention runs.
+
+    The row keeps `review/pr-N` as its branch, so the conversation run is
+    review-mode (read-only) — it can reply but never push. Dropping these left
+    replies unanswered (#64).
+    """
+    workspace = SimpleNamespace(
+        root=tmp_path,
+        repo_dir=tmp_path / "repo",
+        session_dir=tmp_path / "session",
+        branch="review/pr-7",
+    )
+    workspace.repo_dir.mkdir(exist_ok=True)
+    workspace.session_dir.mkdir(exist_ok=True)
+    db.upsert_issue(
+        key="octo/widget#42",
+        repo="octo/widget",
+        number=42,
+        state="reviewing",
+        branch=workspace.branch,
+        session_dir=str(workspace.session_dir),
+        pr_number=7,
+    )
+    called: dict[str, object] = {}
+
+    class FakeGitHub:
+        async def get_repo(self, repo: str) -> RepoInfo:
+            return RepoInfo(full_name=repo, default_branch="main", clone_url="https://x/octo/widget.git", private=False)
+
+        async def get_issue(self, repo: str, number: int) -> IssueInfo:
+            return IssueInfo(
+                repo=repo,
+                number=number,
+                title="proposal",
+                body="issue body",
+                state="open",
+                author="alice",
+                labels=("proposal",),
+                is_pull_request=False,
+            )
+
+    async def fake_attach_thread(_github, directive, repo, number, *, is_pr):
+        return directive
+
+    async def fake_run_task(*, task_kind: str, inputs, **kwargs: object) -> None:
+        del inputs
+        called["task_kind"] = task_kind
+        called["pr_number"] = kwargs.get("pr_number")
+
+    monkeypatch.setattr(tasks, "_attach_thread", fake_attach_thread)
+    monkeypatch.setattr(tasks, "run_task", fake_run_task)
+
+    payload = _payload_with_directive(issue_number=7)
+    issue_payload = payload["issue"]
+    assert isinstance(issue_payload, dict)
+    issue_payload["pull_request"] = {"url": "https://api.github.com/repos/octo/widget/pulls/7"}
+    await tasks.handle_pr_conversation(
+        settings=settings,
+        db=db,
+        github=FakeGitHub(),
+        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=lambda **_kwargs: workspace),
+        git_transport=SimpleNamespace(),
+        payload=payload,
+        delivery_id="d-pr-reviewed",
+    )
+
+    assert called == {"task_kind": "handle_comment", "pr_number": 7}
+
+
+async def test_pr_conversation_records_a_visible_skip_for_an_unowned_pr(
+    db, tmp_path, settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drop is recorded as `skipped: <reason>`, never as a silent `done`."""
+    db.record_event(
+        delivery_id="d-pr-unowned",
+        event_type="issue_comment",
+        repo="octo/widget",
+        issue_key=None,
+        payload={"action": "created"},
+    )
+
+    async def no_row(**_kwargs: object):
+        return None, None
+
+    monkeypatch.setattr(tasks, "_resolve_issue_row_for_pr", no_row)
+    payload = _payload_with_directive(issue_number=7)
+    issue_payload = payload["issue"]
+    assert isinstance(issue_payload, dict)
+    issue_payload["pull_request"] = {"url": "https://api.github.com/repos/octo/widget/pulls/7"}
+    await tasks.handle_pr_conversation(
+        settings=settings,
+        db=db,
+        github=SimpleNamespace(),
+        sandbox=SimpleNamespace(natives_cache=None),
+        git_transport=SimpleNamespace(),
+        payload=payload,
+        delivery_id="d-pr-unowned",
+    )
+
+    row = db.get_event("d-pr-unowned")
+    assert row is not None
+    assert row.state == "skipped"
+    assert row.last_error == "pr_conversation_unowned_pr"
+
+
+async def test_review_pr_leaves_the_reviewing_state(db, settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`reviewing` means "a review run is in flight"; it must not outlive the run."""
+    from carter_omp.github_client import PullRequestInfo
+
+    workspace = SimpleNamespace(root=None, repo_dir=None, session_dir=None, branch="review/pr-7")
+    captured: dict[str, object] = {}
+
+    class FakeGitHub:
+        async def get_repo(self, repo: str) -> RepoInfo:
+            return RepoInfo(full_name=repo, default_branch="main", clone_url="https://x/octo/widget.git", private=False)
+
+        async def get_issue(self, repo: str, number: int) -> IssueInfo:
+            return IssueInfo(
+                repo=repo,
+                number=number,
+                title="feat: x",
+                body="",
+                state="open",
+                author="alice",
+                labels=(),
+                is_pull_request=True,
+            )
+
+        async def get_pull_request(self, repo: str, number: int) -> PullRequestInfo:
+            return PullRequestInfo(
+                repo=repo,
+                number=number,
+                html_url="https://x/octo/widget/pull/7",
+                head_ref="feat/x",
+                base_ref="main",
+                state="open",
+            )
+
+    async def fake_run_task(*, task_kind: str, inputs, **kwargs: object) -> None:
+        del inputs
+        captured["task_kind"] = task_kind
+        captured["state_during_run"] = db.get_issue("octo/widget#7").state  # type: ignore[union-attr]
+
+    monkeypatch.setattr(tasks, "run_task", fake_run_task)
+
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=FakeGitHub(),
+        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=lambda **_kwargs: workspace),
+        git_transport=SimpleNamespace(),
+        payload={"pull_request": {"number": 7}, "repository": {"full_name": "octo/widget"}},
+        delivery_id="d-review",
+    )
+
+    assert captured == {"task_kind": "review_pr", "state_during_run": "reviewing"}
+    row = db.get_issue("octo/widget#7")
+    assert row is not None
+    assert row.state == "opened"

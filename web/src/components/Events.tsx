@@ -8,6 +8,7 @@ import { GlassCard } from "./GlassCard";
 import { IssueLink } from "./IssueLink";
 import { Pill } from "./Pill";
 
+// trace:v1 id=impl.web-src-components-events.events-props work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
 export interface EventsProps {
   onRetry: (deliveryId: string) => void;
 }
@@ -50,9 +51,15 @@ interface RowProps {
   onRetry: (deliveryId: string) => void;
 }
 
+// trace:v1 id=impl.web-src-components-events.event-row work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
 function EventRow(props: RowProps): JSX.Element {
   const ref = (): { repo: string; number: string } => splitIssueKey(props.event.issue_key);
-  const canRetry = (): boolean => props.event.state === "failed" || props.event.state === "done";
+  // `skipped` is a deliberate drop (reason in the error column) and the backend
+  // accepts it for retry: re-firing is how an operator re-triggers a mention the
+  // bot ignored — e.g. one dropped while the row was still `reviewing`.
+// trace:v1 id=impl.web-src-components-events.can-retry work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+  const canRetry = (): boolean =>
+    props.event.state === "failed" || props.event.state === "done" || props.event.state === "skipped";
 
   return (
     <tr>

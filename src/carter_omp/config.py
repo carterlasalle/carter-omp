@@ -207,6 +207,14 @@ class Settings(BaseSettings):
     # Runtime
     max_concurrency: int = Field(8, alias="CARTER_OMP_MAX_CONCURRENCY")
     task_timeout_seconds: float = Field(2400.0, alias="CARTER_OMP_TASK_TIMEOUT_SECONDS")
+    # Silence budget for one running turn. `task_timeout_seconds` bounds the
+    # whole turn, so a hung provider stream (no message deltas, no tool
+    # events) looked like work until the entire budget ran out — and every
+    # retry repeated it. A 2026-10-07 comment run on carterlasalle/scc#21
+    # spent four 40-minute attempts that way, ~32 silent minutes each. Any
+    # event from the agent re-arms this watch; on expiry the turn is stopped
+    # with a reason that names the silence. 0 disables it.
+    task_stall_seconds: float = Field(900.0, alias="CARTER_OMP_TASK_STALL_SECONDS")
     task_timeout_hard_grace_seconds: float = Field(60.0, alias="CARTER_OMP_TASK_TIMEOUT_HARD_GRACE_SECONDS")
     request_timeout_seconds: float = Field(120.0, alias="CARTER_OMP_REQUEST_TIMEOUT_SECONDS")
 

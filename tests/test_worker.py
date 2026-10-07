@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import stat
+import time
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -35,6 +36,7 @@ class _FakeRpcClient:
         self.kwargs = kwargs
         self.on_prompt = on_prompt
         self.prompts: list[str] = []
+        self.event_listeners: list[Callable[[Any], None]] = []
         self.tool_end_listeners: list[Callable[[Any], None]] = []
         self.host_tool_completed_listeners: list[Callable[[Any], None]] = []
         self.set_todos_calls: list[list[dict]] = []
@@ -51,6 +53,9 @@ class _FakeRpcClient:
 
     def install_headless_ui(self) -> None:
         pass
+
+    def on_event(self, cb) -> None:
+        self.event_listeners.append(cb)
 
     def on_tool_execution_end(self, cb) -> None:
         self.tool_end_listeners.append(cb)
@@ -82,6 +87,11 @@ class _FakeRpcClient:
     def get_todos(self):
         self.get_todos_calls += 1
         return ()
+
+    def emit_event(self, event_type: str) -> None:
+        event = SimpleNamespace(type=event_type)
+        for cb in self.event_listeners:
+            cb(event)
 
     def emit_tool_end(self, tool_name: str, *, result: Any = None, is_error: bool | None = None) -> None:
         event = SimpleNamespace(tool_name=tool_name, result={} if result is None else result, is_error=is_error)
@@ -534,6 +544,98 @@ async def test_run_rpc_hard_timeout_stops_client_and_fails(
     from omp_rpc import RpcProcessExitError
 
     assert isinstance(fake.mark_closed_calls[0], RpcProcessExitError)
+
+
+def test_agent_activity_watch_fires_on_silence_and_rearms() -> None:
+    """The watch is the *silence* deadline `prompt_and_wait` never had."""
+    now = {"t": 1000.0}
+    stalls: list[str] = []
+    watch = worker._AgentActivityWatch(
+        seconds=10.0, on_stall=lambda: stalls.append("x"), clock=lambda: now["t"]
+    )
+    assert watch.enabled is True
+    assert watch.fired is False
+
+    now["t"] += 30
+    assert watch.check() is True
+    assert watch.fired is True
+    assert stalls == ["x"]
+    assert watch.reason() == "no agent activity for 30s (last event: turn start)"
+
+    # A second watch re-armed by steady events never fires (4s < 10s each time).
+    quiet = worker._AgentActivityWatch(
+        seconds=10.0, on_stall=lambda: stalls.append("y"), clock=lambda: now["t"]
+    )
+    for _ in range(5):
+        now["t"] += 4
+        quiet.touch("message_update")
+        assert quiet.check() is False
+    now["t"] += 7  # 7s since the last event, still inside the budget
+    assert quiet.check() is False
+    assert stalls == ["x"]
+    assert quiet.reason() == "no agent activity for 7s (last event: message_update)"
+
+
+def test_agent_activity_watch_is_disabled_at_zero() -> None:
+    watch = worker._AgentActivityWatch(
+        seconds=0.0, on_stall=lambda: pytest.fail("disabled watch must never fire")
+    )
+    watch.start()
+    assert watch.enabled is False
+    assert watch.check() is False
+
+
+def test_run_rpc_fails_fast_when_the_agent_goes_silent(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A silent child fails on the silence budget, not on the 40-minute turn budget."""
+    settings.task_stall_seconds = 0.3
+
+    def on_prompt(_client, _prompt: str) -> None:
+        time.sleep(1.2)  # agent alive but emitting nothing (the scc#21 hang)
+
+    _install_prompt_hook(monkeypatch, on_prompt)
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    started = time.monotonic()
+    with pytest.raises(worker.AgentStalledError, match=r"no agent activity for \d+s"):
+        worker._run_rpc_blocking(
+            inputs,
+            task_kind="triage_issue",
+            prompt="x",
+            bindings=bindings,  # type: ignore[arg-type]
+        )
+    assert time.monotonic() - started < 5.0
+
+    fake = _FakeRpcClient.instances[0]
+    assert fake.stop_calls == 1
+    from omp_rpc import RpcProcessExitError
+
+    assert len(fake.mark_closed_calls) == 1
+    assert isinstance(fake.mark_closed_calls[0], RpcProcessExitError)
+
+
+def test_run_rpc_tolerates_a_slow_but_talking_agent(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Steady events re-arm the watch: a long turn is not a stalled one."""
+    settings.task_stall_seconds = 0.5
+
+    def on_prompt(client, _prompt: str) -> None:
+        for _ in range(20):  # ~1.0s of work, events every 50ms
+            client.emit_event("message_update")
+            time.sleep(0.05)
+
+    _install_prompt_hook(monkeypatch, on_prompt)
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    result = worker._run_rpc_blocking(
+        inputs,
+        task_kind="triage_issue",
+        prompt="x",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
+
+    assert result == "ok"
+    assert _FakeRpcClient.instances[0].stop_calls == 0
 
 
 @pytest.mark.asyncio
