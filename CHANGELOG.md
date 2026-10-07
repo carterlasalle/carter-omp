@@ -160,6 +160,14 @@ versions are `Unreleased` until the first tagged release.
   path: trailing punctuation on a bare command line no longer turns a canned DB
   answer into a full model run.
 
+- The deterministic `status` handler actually exists now — it answers from the
+  issue/event rows with no model turn. Previously `_handle_control_command`
+  implemented only `stop`, so `@carter-omp status` silently fell through to
+  `tasks.handle_comment` and spent a full model run on the bare word. `review`,
+  `resume`, and `release-fix` are no longer declared control commands either:
+  they need a model run, so they are ordinary directives — the old declaration
+  promised a no-model answer the queue never gave.
+
 - `github-proxy` enforced a parallel allowlist that ignored
   `CARTER_OMP_REPO_OWNERS`, so owner-scoped repos (e.g. `mac_messages_mcp`)
   were rejected with `repo not in proxy allowlist`. Both processes now share
