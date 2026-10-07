@@ -5066,10 +5066,10 @@ def test_release_status_and_job_log_are_scoped_to_expected_sha(
 def test_install_command_picks_the_lockfile_install(
     tmp_path: Path, files: tuple[str, ...], expected: tuple[str, ...] | None
 ) -> None:
-    """The image ships bun only, and bun imports npm/yarn lockfiles. An npm repo
-    used to get no install at all, so its own `check` script died at the first
-    binary (`prettier: command not found` → exit 127) and every push was
-    refused."""
+    """Bun imports npm/yarn/pnpm lockfiles, so one installer covers every JS
+    repo the sandbox serves. An npm repo used to get no install at all, so its
+    own `check` script died at the first binary (`prettier: command not found`
+    → exit 127) and every push was refused."""
     for name in files:
         (tmp_path / name).write_text("{}", encoding="utf-8")
 

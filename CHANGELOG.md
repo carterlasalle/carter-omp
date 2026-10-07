@@ -96,6 +96,17 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **Pre-publish gates can run a Node-pinned repo's suite (#34).** The runtime
+  image shipped Bun but no Node, and `bun run <script>` delegates a
+  node-shebang `.bin` entrypoint to the `node` on `PATH` only when there is one
+  — without one Bun silently substitutes its own runtime, which aborts
+  Node-internals tooling at load. A Jest repo therefore reported
+  `Tests: 0 total` with `TypeError: Attempted to assign to readonly property`
+  from `jest-runtime/build/index.js`, so `bun check` / `bun run test` could
+  never pass for any diff and every push fell back to `skip_checks`. The image
+  now installs a checksum-verified Node 24.21.0 (x64/arm64) next to Bun, so the
+  repo's scripts run under Node while Bun remains the installer/runner.
+
 - Workflow-file pushes fail with a named cause instead of a raw remote refusal.
   GitHub rejects any App-token push touching `.github/workflows/` unless the
   installation carries the `Workflows` permission (carter-omp#30), and the
