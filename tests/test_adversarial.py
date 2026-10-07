@@ -168,6 +168,9 @@ def test_release_profile_exposes_release_tools(db: Database, tmp_path: object) -
 def test_push_rejects_foreign_branch(db: Database, tmp_path: object) -> None:
     """A compromised agent cannot push `main` or another repo's branch."""
     b, loop, thread = _bindings(db, tmp_path, ISSUE_RUN_CAPABILITIES)
+    # `bug` is an auto-publish class, so the implementation-authorization gate
+    # passes and the branch guard is what rejects the foreign ref.
+    db.set_issue_classification(b.issue_key, "bug")
     try:
         tool = host_tools._build_push_branch(b)
         with pytest.raises(RpcCommandError, match="does not match workspace branch"):

@@ -93,6 +93,13 @@ versions are `Unreleased` until the first tagged release.
   delivery was recorded `done` — the human saw the bot ignore them. Comment
   turns now require `gh_post_comment` (or `abort_task`), with their own
   `comment_completion_reminder` prompt.
+- Restored the implementation-authorization gate on `gh_push_branch` and
+  `gh_open_pr`. `_enforce_impl_authorization` was extracted with zero callers
+  and without its `bug`/`documentation` exemption, so a run on any other
+  classification (e.g. `enhancement`, `proposal`, `question`) could publish
+  without a maintainer go-ahead, and wiring the function verbatim would have
+  refused the legitimate bug/doc flow. It now guards both tools and lets the
+  auto-publish classes through.
 
 - Ported the upstream `python/robomp`/`python/omp-rpc` fixes since extraction
   (see `docs/upstream.md`): `fetch_ref`/`fetch_pr_head` backfill only the
