@@ -529,3 +529,57 @@ def test_workflow_permission_rejection_is_translated() -> None:
     assert is_workflow_permission_error(raw) is True
     assert is_workflow_permission_error("fatal: could not read from remote repository") is False
     assert "Workflows: Read and write" in WORKFLOW_PERMISSION_HINT
+
+
+def test_report_pain_point_does_not_double_the_area_prefix(db, tmp_path: Path, settings: Settings) -> None:
+    """`area="infra"` + a title already starting with "infra:" must not double up.
+
+    Two reports for one fault (carter-omp#30 vs #33) came from exactly that:
+    the titles differed, so neither the fingerprint nor the title fallback
+    matched.
+    """
+    calls: list[str] = []
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.method == "GET" and request.url.path == "/repos/octo/self/issues":
+            return httpx.Response(200, json=[])
+        if request.method == "GET" and request.url.path == "/repos/octo/self":
+            return httpx.Response(
+                200,
+                json={"full_name": "octo/self", "default_branch": "main", "clone_url": "x", "private": False},
+            )
+        if request.url.path.endswith("/comments"):
+            return httpx.Response(201, json={"id": 2, "body": "appended"})
+        if request.method == "POST":
+            seen["title"] = json.loads(request.content)["title"]
+        return httpx.Response(
+            201,
+            json={
+                "number": 12,
+                "title": seen.get("title", "t"),
+                "state": "open",
+                "labels": [],
+                "user": {"login": "carter-omp[bot]"},
+                "html_url": "https://github.com/octo/self/issues/12",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "comments": 0,
+            },
+        )
+
+    bindings, loop, thread = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    settings.self_report_repo = SELF_REPO
+    settings.self_report_dispatch = False
+    object.__setattr__(bindings, "settings", settings)
+    try:
+        tool = next(x for x in build(bindings) if x.name == "report_pain_point")
+        tool.execute(
+            {"title": "infra: App token lacks workflows", "details": "d", "area": "infra", "severity": "low"},
+            _ctx(),
+        )
+    finally:
+        _stop_loop(loop, thread)
+
+    assert seen["title"] == "[bot-report] infra: App token lacks workflows"

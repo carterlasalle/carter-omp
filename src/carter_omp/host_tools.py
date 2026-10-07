@@ -913,7 +913,12 @@ def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
             _raise_command(msg)
         headline = title.strip()[:200]
         if isinstance(area, str) and area.strip():
-            headline = f"{area.strip()[:40]}: {headline}"[:200]
+            bucket = area.strip()[:40]
+            # Agents often restate the bucket in the title ("infra: …"); doubling
+            # it produced two issues for one fault (carter-omp#30 vs #33), so the
+            # prefix is only added when it is not already there.
+            if not headline.casefold().startswith(f"{bucket.casefold()}:"):
+                headline = f"{bucket}: {headline}"[:200]
         where = [
             f"**Task:** `{bindings.repo.full_name}`",
             f"**Workspace branch:** `{bindings.workspace.branch}`",
