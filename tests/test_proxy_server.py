@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -1932,3 +1933,73 @@ async def test_workflow_permission_reads_through_so_a_grant_is_seen() -> None:
     granted["workflows"] = "write"  # the operator approves the permission
     assert provider.can_write_workflows("octo/widget") is True
     assert len(seen) == 2  # read through, not cached
+
+
+async def test_git_push_retries_once_with_a_fresh_token_after_a_workflow_refusal(
+    proxy_settings: Settings, upstream_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A permission the operator just granted is not in the token we hold.
+
+    Installation tokens keep their mint-time permissions, so GitHub keeps
+    refusing a workflow push after the grant until a fresh token exists
+    (2026-10-07: it took a container restart to notice). The proxy evicts the
+    cached token and retries once.
+    """
+    from carter_omp.git_ops import GitCommandError, PushResult
+
+    branch = "carter-omp/abc/workflow-retry"
+    repo_dir, _head = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    workflow = repo_dir / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text("name: ci\n", encoding="utf-8")
+    _git(["-C", str(repo_dir), "add", ".github/workflows/ci.yml"], repo_dir)
+    _git(["-C", str(repo_dir), "commit", "-m", "ci: touch a workflow"], repo_dir)
+    head = _git(["-C", str(repo_dir), "rev-parse", "HEAD"], repo_dir).stdout.strip()
+
+    attempts: list[int] = []
+    invalidated: list[str] = []
+
+    def flaky_push(*_args: Any, **_kwargs: Any) -> PushResult:
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            raise GitCommandError(
+                ["git", "push"],
+                1,
+                "",
+                "! [remote rejected] HEAD -> x (refusing to allow a GitHub App to create or update "
+                "workflow `.github/workflows/ci.yml` without `workflows` permission)",
+            )
+        return PushResult(head=head, branch=branch)
+
+    class _Provider:
+        def can_write_workflows(self, _repo: str) -> bool:
+            return True
+
+        def invalidate(self, repo: str) -> bool:
+            invalidated.append(repo)
+            return True
+
+    monkeypatch.setattr("carter_omp.proxy.server.git_push", flaky_push)
+    app = _build_app(proxy_settings)
+    app.state.app_token_provider = _Provider()
+    body = (
+        b'{"repo":"octo/widget","workspace_key":"octo__widget__1","branch":"'
+        + branch.encode()
+        + b'","expected_head":"'
+        + head.encode()
+        + b'"}'
+    )
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/git/push",
+            content=body,
+            headers={
+                **_signed("POST", "/gh/v1/git/push", body, run_token=_run_token(issue=None, branch=branch)),
+                "Content-Type": "application/json",
+            },
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"head": head, "branch": branch}
+    assert attempts == [1, 2]  # refused once, retried once
+    assert invalidated == ["octo/widget"]

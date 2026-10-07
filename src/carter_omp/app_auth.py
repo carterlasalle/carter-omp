@@ -268,6 +268,27 @@ class AppTokenProvider:
                 continue
         return token, expires_at
 
+    # trace:v1 id=impl.app-auth-invalidate-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def invalidate(self, repo: str) -> bool:
+        """Drop the cached installation token for `repo`; True if one was held.
+
+        Installation tokens carry the permissions they were *minted* with, so a
+        permission the operator just granted is invisible to a cached token: a
+        workflow-file push kept being refused after the grant until the
+        container restarted (2026-10-07). Evicting lets the caller retry with a
+        token that carries the new permission.
+        """
+        key = repo.lower()
+        with self._lock:
+            installation = self._installations.get(key)
+            if installation is None:
+                return False
+            prefix = f"{installation}:{key}"
+            held = [cache_key for cache_key in self._cache if cache_key.startswith(prefix)]
+            for cache_key in held:
+                del self._cache[cache_key]
+        return bool(held)
+
     def token_for_repo(self, *, installation_id: int, repo: str) -> str:
         """Return a cached installation token scoped to ``repo`` if possible."""
         name = repo.split("/")[-1]

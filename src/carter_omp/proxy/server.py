@@ -31,6 +31,7 @@ from carter_omp.git_ops import (
     WORKFLOW_PERMISSION_HINT,
     GitCommandError,
     HeadDriftError,
+    is_workflow_permission_error,
 )
 from carter_omp.git_ops import (
     clone as git_clone,
@@ -354,6 +355,16 @@ def _pushed_workflow_paths(repo_dir: Path) -> list[str]:
     return sorted(
         {line.strip() for line in (proc.stdout or "").splitlines() if line.strip().startswith(".github/workflows/")}
     )
+
+
+# trace:v1 id=impl.proxy-evict-cached-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _evict_cached_token(request: Request, repo: str) -> bool:
+    """Drop the provider's cached installation token for `repo` (App mode only)."""
+    provider = getattr(request.app.state, "app_token_provider", None)
+    evict = getattr(provider, "invalidate", None)
+    if not callable(evict):
+        return False
+    return bool(evict(repo))
 
 
 # trace:v1 id=impl.proxy-workflows-writable work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
@@ -1345,21 +1356,50 @@ def create_proxy_app(settings: Settings) -> FastAPI:
             push=True,
             slot_uid=slot_uid,
         )
-        try:
-            result = await _run_git_op(
+
+        # trace:v1 id=impl.proxy-push-once work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+        async def _push_once(auth: _RemoteAuth) -> Any:
+            return await _run_git_op(
                 git_push,
                 repo_dir,
                 branch=branch,
                 expected_head=expected_head,
-                token=remote.token,
-                remote_url=remote.url,
-                auth_url=remote.auth_url,
+                token=auth.token,
+                remote_url=auth.url,
+                auth_url=auth.auth_url,
                 slot_uid=slot_uid,
             )
+
+        try:
+            result = await _push_once(remote)
         except HeadDriftError as exc:
             return _git_error_response(exc, head_drift=True)
         except GitCommandError as exc:
-            return _git_error_response(exc)
+            refusal = f"{exc.stderr or ''}{exc.stdout or ''}"
+            if not is_workflow_permission_error(refusal) or not _evict_cached_token(request, repo):
+                return _git_error_response(exc)
+            # The permission is granted but the token we hold was minted before
+            # it: installation tokens keep their mint-time permissions, so the
+            # push stays refused until a fresh token exists (2026-10-07 — it
+            # took a container restart to notice). Mint one and retry once.
+            log.warning(
+                "workflow permission refusal; retrying with a fresh installation token",
+                extra={"repo": repo, "branch": branch},
+            )
+            remote = await asyncio.to_thread(
+                _origin_remote_auth,
+                repo_dir,
+                repo,
+                _resolve_git_token(settings, repo),
+                push=True,
+                slot_uid=slot_uid,
+            )
+            try:
+                result = await _push_once(remote)
+            except HeadDriftError as retry_exc:
+                return _git_error_response(retry_exc, head_drift=True)
+            except GitCommandError as retry_exc:
+                return _git_error_response(retry_exc)
         return JSONResponse({"head": result.head, "branch": result.branch})
 
     # trace:v1 id=impl.proxy-git-push-release-endpoint work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
