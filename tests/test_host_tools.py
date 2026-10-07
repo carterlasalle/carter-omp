@@ -1982,6 +1982,39 @@ def test_impl_gate_rejects_unauthorized_non_auto_classification_before_repo_comm
     assert all("lacks capability" in row["error"] for row in rows)
 
 
+@pytest.mark.parametrize("classification", ["enhancement", "proposal", "question"])
+def test_impl_gate_rejects_unauthorized_non_auto_classification_with_capabilities(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, classification: str
+) -> None:
+    # The capability check alone cannot enforce the workflow rule: an
+    # authorized trigger grants PUSH_BRANCH/OPEN_PR for every issue run, so
+    # without the implementation gate a non-bug/doc issue given a go-ahead-less
+    # run could publish uninvited. Classification lives only in the DB here.
+    calls: list[list[str] | tuple[str, ...]] = []
+
+    def record_repo_command(_bindings: ToolBindings, cmd: list[str] | tuple[str, ...], *, timeout: float | None = None):
+        del timeout
+        calls.append(cmd)
+        raise AssertionError("repo command must not run before implementation authorization")
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda _r: httpx.Response(500)))
+    db.set_issue_classification(bindings.issue_key, classification)
+    monkeypatch.setattr(host_tools, "_run_repo_command", record_repo_command)
+    try:
+        push = host_tools._build_push_branch(bindings)
+        open_pr = host_tools._build_open_pr(bindings)
+        with pytest.raises(RpcCommandError) as push_exc:
+            push.execute({}, _ctx())
+        with pytest.raises(RpcCommandError) as pr_exc:
+            open_pr.execute({"title": "fix: x", "body": "invalid"}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert "refusing to push branch" in str(push_exc.value)
+    assert "refusing to open PR" in str(pr_exc.value)
+    assert calls == []
+
+
 @pytest.mark.parametrize("classification", ["enhancement", "proposal"])
 def test_impl_gate_allows_authorized_non_auto_classification_to_reach_pr_validation(
     db: Database, tmp_path: Path, classification: str
@@ -3931,6 +3964,9 @@ def test_gh_open_pr_runs_fix_then_check_and_amends_formatter_diff(
             branch=ws.branch,
             session_dir=str(ws.session_dir),
         )
+        # `bug` is an auto-publish class; this test covers the fix/check/amend
+        # mechanics, not the implementation-authorization gate.
+        db.set_issue_classification(bindings.issue_key, "bug")
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
         body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
         result = tool.execute({"title": "fix: x", "body": body}, _ctx())
