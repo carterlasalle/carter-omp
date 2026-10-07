@@ -927,7 +927,51 @@ class SandboxManager:
     def workspace_root(self, repo: str, number: int | str) -> Path:
         return self.root / workspace_key(repo, number)
 
-    # trace:exempt reason=internal-detail
+    # trace:v1 id=impl.sandbox-refresh-review-worktree work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def _refresh_review_worktree(
+        self,
+        *,
+        repo: str,
+        pool: Path,
+        repo_dir: Path,
+        pr_head: int,
+        slot_uid: int | None,
+    ) -> None:
+        """Re-point an existing review worktree at the PR's *current* head.
+
+        Review worktrees are detached and read-only (`review_mode` blocks push
+        and PR tools), so moving one to a newer head is safe. A leftover local
+        modification from an earlier run is discarded with a warning rather than
+        blocking the refresh — reviewing old code is the failure being fixed.
+        """
+        self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)
+        env = _git_env_for_repo(repo_dir)
+        kwargs = _slot_subprocess_kwargs(slot_uid)
+        # `fetch_pr_head` writes FETCH_HEAD into the *pool's* git dir; a linked
+        # worktree has its own (empty) FETCH_HEAD, so resolve the fetched SHA
+        # where the fetch wrote it and check that out in the worktree.
+        probe = ["git", "rev-parse", "FETCH_HEAD"]
+        resolved = _safe_run(probe, cwd=pool, env=env, **kwargs)
+        if resolved.returncode != 0:
+            raise GitCommandError(probe, resolved.returncode, resolved.stdout, resolved.stderr)
+        head_sha = resolved.stdout.strip()
+        checkout_cmd = ["git", "checkout", "--detach", head_sha]
+        checkout = _safe_run(checkout_cmd, cwd=repo_dir, env=env, **kwargs)
+        if checkout.returncode == 0:
+            return
+        if checkout.returncode == 124:
+            # Indeterminate (timed out): do not fall through to a forced reset.
+            raise GitCommandError(checkout_cmd, checkout.returncode, checkout.stdout, checkout.stderr)
+        log.warning(
+            "review worktree is not clean; resetting it to the PR head",
+            extra={"repo": repo, "pr": pr_head, "head": head_sha[:12], "err": (checkout.stderr or "").strip()[:200]},
+        )
+        reset_cmd = ["git", "reset", "--hard", head_sha]
+        reset = _safe_run(reset_cmd, cwd=repo_dir, env=env, **kwargs)
+        if reset.returncode != 0:
+            raise GitCommandError(reset_cmd, reset.returncode, reset.stdout, reset.stderr)
+
+    # trace:v1 id=impl.sandbox-ensure-workspace work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def ensure_workspace(
         self,
         *,
@@ -979,6 +1023,19 @@ class SandboxManager:
                 _provision_runtime_dirs(ws_root)
                 _chown_workspace(ws_root, slot_uid)
                 workspace_prepared = True
+                if pr_head is not None:
+                    # A review must see the PR as it is *now*. The worktree is
+                    # created once at the original head, so a re-review (or a
+                    # follow-up mention on a reviewed PR) otherwise inspects a
+                    # stale tree — the run says so and answers against old code
+                    # (personal_website#64: "checked out behind the PR head").
+                    self._refresh_review_worktree(
+                        repo=repo,
+                        pool=pool,
+                        repo_dir=repo_dir,
+                        pr_head=pr_head,
+                        slot_uid=slot_uid,
+                    )
             if not repo_exists:
                 if pr_head is not None:
                     self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)

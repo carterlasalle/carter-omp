@@ -340,6 +340,29 @@ class GitHubProxyClient:
         )
         return _pr_from(data)
 
+    # trace:v1 id=impl.src-carter-omp-proxy-client.git-hub-proxy-client work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
+    async def self_report(
+        self,
+        *,
+        repo: str,
+        title: str,
+        body: str,
+        severity: str,
+        provenance: str = "",
+    ) -> Mapping[str, Any]:
+        """File a friction report against the harness repo.
+
+        `repo` and `provenance` are ignored here on purpose: the proxy takes the
+        destination from its own config and the origin from the run token, so a
+        report cannot be redirected or misattributed by the caller.
+        """
+        del repo, provenance
+        return await self._request(
+            "POST",
+            "/gh/v1/self-report",
+            json_body={"title": title, "body": body, "severity": severity},
+        )
+
     async def request_reviewers(
         self,
         *,

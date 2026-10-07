@@ -2484,3 +2484,80 @@ def test_reclaim_all_caches_sweeps_workspaces_not_pool(tmp_path: Path) -> None:
         assert not list(ws_root.glob(".trash-*"))
     assert pool_marker.exists(), "sweep must never touch the shared clone pool"
     assert mgr.reclaim_all_caches() == 0
+
+
+def test_ensure_workspace_refreshes_review_worktree_to_the_new_pr_head(tmp_path: Path, upstream_repo: Path) -> None:
+    """A re-review must inspect the PR's *current* head, not the original one.
+
+    The worktree is created once at the head that existed then; without a
+    refresh a follow-up review answers against stale code and says so
+    ("checked out behind the PR head", personal_website#64).
+    """
+    contributor = tmp_path / "contributor"
+    _git(["clone", str(upstream_repo), str(contributor)], cwd=tmp_path)
+    identity = os.environ | {
+        "GIT_AUTHOR_NAME": "c",
+        "GIT_AUTHOR_EMAIL": "c@t",
+        "GIT_COMMITTER_NAME": "c",
+        "GIT_COMMITTER_EMAIL": "c@t",
+    }
+
+    def commit_and_push_pr_head(message: str, body: str) -> str:
+        (contributor / "README.md").write_text(body, encoding="utf-8")
+        _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+        subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=str(contributor),
+            check=True,
+            capture_output=True,
+            text=True,
+            env=identity,
+        )
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(contributor), check=True, capture_output=True, text=True
+        ).stdout.strip()
+        _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+        return sha
+
+    first_head = commit_and_push_pr_head("pr change", "hello from pr\n")
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="carter_omp-bot",
+        author_email="carter_omp-bot@example.invalid",
+    )
+    assert _head(ws.repo_dir) == first_head
+
+    second_head = commit_and_push_pr_head("pr change 2", "hello again\n")
+    assert second_head != first_head
+    # A leftover modification to a *tracked* file would make a plain checkout
+    # refuse, so this also covers the reset fallback (reviews are read-only;
+    # stale code is the failure being fixed).
+    (ws.repo_dir / "README.md").write_text("local edit that conflicts\n", encoding="utf-8")
+
+    again = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="carter_omp-bot",
+        author_email="carter_omp-bot@example.invalid",
+    )
+
+    assert _head(again.repo_dir) == second_head
+    assert again.branch == "review/pr-9"
+    assert (again.repo_dir / "README.md").read_text(encoding="utf-8") == "hello again\n"
+
+
+def _head(repo_dir: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo_dir), check=True, capture_output=True, text=True
+    ).stdout.strip()

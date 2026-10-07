@@ -13,6 +13,20 @@ versions are `Unreleased` until the first tagged release.
 
 ### Added
 
+- `report_pain_point`: any authorized run can now file the friction it hits in
+  *the harness itself* — a host tool rejecting a valid call, an error message
+  pointing at the wrong cause, a gate blocking work for the wrong reason, a run
+  losing an hour to infrastructure. The report becomes a tracked issue on
+  `CARTER_OMP_SELF_REPORT_REPO` (default `carterlasalle/carter-omp`), labelled
+  `bot-report` plus the deployment's trigger label, over the new
+  `POST /gh/v1/self-report` proxy route. Dedupe is an exact-title match on the
+  `[bot-report]` marker, so a repeat appends evidence instead of filing another
+  issue; the destination comes from proxy config and the provenance from the run
+  token, so a report can never be redirected or misattributed. New capability
+  `report_upstream` (granted to issue, review and release runs), new
+  `CARTER_OMP_SELF_REPORT_REPO` knob (empty disables the tool), and prompt
+  guidance to report instead of vanishing into a silent `abort_task`.
+
 - Console **System** view (4th rail entry, dead-letter badge): spend for
   today/7 days/all-time (runs, fallback share, cost, cache cost, token
   breakdown), the live queue with each event's next attempt, dead letters with

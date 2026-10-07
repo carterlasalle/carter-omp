@@ -58,6 +58,18 @@ class GitHubBackend(Protocol):
     ) -> list[IssueSummary]: ...
 
     async def search_issues(self, repo: str, query: str, *, limit: int = 10) -> list[IssueSummary]: ...
+
+    # ---- self-report ----
+    # trace:v1 id=impl.src-carter-omp-github-backend.git-hub-backend work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
+    async def self_report(
+        self,
+        *,
+        repo: str,
+        title: str,
+        body: str,
+        severity: str,
+        provenance: str = "",
+    ) -> Mapping[str, Any]: ...
     async def list_issue_index_entries(
         self,
         repo: str,

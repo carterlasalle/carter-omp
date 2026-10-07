@@ -50,6 +50,7 @@ GitHub is untrusted input. The signed webhook's `sender.id` and `repository.id` 
 | Sessions | Persistent per-issue transcripts (`--continue` resume), crash recovery, durable SQLite queue, per-issue serialization |
 | Operations | Dashboard with trigger/actor/decision/capability columns, audited host-tool actions, cancellation, model/thinking overrides |
 | Spend + telemetry | Per-run model/duration/cost/tokens recorded by the worker, aggregated per day/week/all-time in the console's **System** view; every bot-authored GitHub text (comments, PR bodies, review bodies) carries the model/duration/cost footer |
+| Self-report | Friction the bot hits in the harness itself (a tool rejecting a valid call, a misleading error, a gate that blocked work) is filed with `report_pain_point` as a deduped, labelled issue on `CARTER_OMP_SELF_REPORT_REPO` — the destination and provenance are host-side, so the model never picks the repo |
 | Release repair | Elevated default-branch/tag capabilities via explicit `@carter-omp release-fix` only |
 
 ## Quick start

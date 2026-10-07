@@ -196,6 +196,11 @@ class Settings(BaseSettings):
     github_proxy_git_timeout_seconds: float = Field(60.0, alias="CARTER_OMP_GH_PROXY_GIT_TIMEOUT_SECONDS")
 
     # Model selection
+    # Where the bot files friction reports it hits in the harness itself
+    # ("this tool is broken", "this error is misleading", "this cost an hour").
+    # The proxy owns the destination and the credentials, so the model can
+    # never choose the repo; empty disables the `report_pain_point` tool.
+    self_report_repo: str = Field("carterlasalle/carter-omp", alias="CARTER_OMP_SELF_REPORT_REPO")
     model: str = Field("anthropic/claude-sonnet-4-6", alias="CARTER_OMP_MODEL")
     # Comma-separated fallback chain OMP walks when the primary model fails
     # with a retryable provider error. Its provider credential must be in the

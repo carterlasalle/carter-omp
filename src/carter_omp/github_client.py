@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote
 
 import httpx
@@ -27,6 +27,12 @@ class GitHubError(RuntimeError):
         self.status = status
         self.message = message
         self.retry_after = retry_after
+
+
+#: Label and title marker every self-report carries, so they are filterable in
+#: one query (`label:bot-report`) and dedupeable by title.
+SELF_REPORT_LABEL = "bot-report"
+SELF_REPORT_MARKER = "bot-report"
 
 
 @dataclass(slots=True, frozen=True)
@@ -142,6 +148,100 @@ class PullRequestReviewInfo:
     body: str
     state: str  # APPROVED / CHANGES_REQUESTED / COMMENTED
     submitted_at: str
+
+
+# trace:v1 id=impl.github-self-report-writer work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+class _SelfReportWriter(Protocol):
+    """The three calls a self-report needs (protocol, not the backend one:
+    `github_backend` imports this module, so a direct import would cycle)."""
+
+    # trace:v1 id=impl.github-self-report-writer-list-issues work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def list_issues(self, repo: str, *, state: str = ..., limit: int = ...) -> list[IssueSummary]: ...
+
+    # trace:v1 id=impl.github-self-report-writer-post-comment work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def post_comment(self, repo: str, number: int, body: str) -> CommentInfo: ...
+
+    # trace:v1 id=impl.github-self-report-writer-create-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def create_issue(self, *, repo: str, title: str, body: str, labels: Sequence[str] = ...) -> IssueSummary: ...
+
+
+# trace:v1 id=impl.github-file-self-report work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+async def file_self_report(
+    client: _SelfReportWriter,
+    *,
+    repo: str,
+    title: str,
+    body: str,
+    severity: str,
+    provenance: str = "",
+    extra_labels: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Create a friction report issue, or comment on the matching open one.
+
+    The title carries a `[bot-report]` marker and dedupe is an exact match on
+    it, so a retried run (or a second run hitting the same wall) appends
+    evidence instead of filing a dozen near-identical issues. `provenance` is
+    appended verbatim — the proxy builds it from the run token, so a report can
+    never lie about its origin. `extra_labels` lets the caller add the
+    deployment's own trigger label, so reports land in the same queue the
+    operator already works from.
+    """
+    full_title = f"[{SELF_REPORT_MARKER}] {title}".strip()
+    existing: IssueSummary | None = None
+    try:
+        open_reports = await client.list_issues(repo, state="open", limit=100)
+    except GitHubError:
+        open_reports = []
+    wanted = full_title.casefold()
+    for candidate in open_reports:
+        if candidate.title.strip().casefold() == wanted:
+            existing = candidate
+            break
+
+    if existing is not None:
+        await client.post_comment(repo, existing.number, body + _provenance_block(provenance, again=True))
+        return {
+            "number": existing.number,
+            "url": existing.html_url,
+            "created": False,
+            "detail": f"appended to open report #{existing.number}",
+        }
+
+    full_body = body + _provenance_block(provenance, again=False)
+    labels = _dedupe(
+        [SELF_REPORT_LABEL, *extra_labels, *_severity_labels(severity)],
+    )
+    try:
+        created = await client.create_issue(repo=repo, title=full_title, body=full_body, labels=labels)
+    except GitHubError as exc:
+        return {"number": None, "url": None, "created": False, "detail": f"GitHub rejected the report: {exc.status}"}
+    return {
+        "number": created.number,
+        "url": created.html_url,
+        "created": True,
+        "detail": f"filed report #{created.number}",
+    }
+
+
+# trace:v1 id=impl.src-carter-omp-github-client.dedupe work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
+def _dedupe(values: Sequence[str]) -> list[str]:
+    seen: dict[str, None] = {}
+    for value in values:
+        if value.strip():
+            seen.setdefault(value.strip(), None)
+    return list(seen)
+
+
+# trace:v1 id=impl.src-carter-omp-github-client.severity-labels work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
+def _severity_labels(severity: str) -> list[str]:
+    return {"high": ["prio:p1"], "medium": ["prio:p2"], "low": []}.get(severity, [])
+
+
+# trace:v1 id=impl.src-carter-omp-github-client.provenance-block work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
+def _provenance_block(provenance: str, *, again: bool) -> str:
+    header = "### Reported again from" if again else "### Reported from"
+    line = provenance.strip() or "(no provenance recorded)"
+    return f"\n\n---\n{header}\n{line}\n"
 
 
 @dataclass(slots=True, frozen=True)
@@ -653,6 +753,62 @@ class GitHubClient:
             json={"body": body},
         )
         return _comment_from_payload(data)
+
+    # trace:v1 id=impl.github-create-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def create_issue(
+        self,
+        *,
+        repo: str,
+        title: str,
+        body: str,
+        labels: Sequence[str] = (),
+    ) -> IssueSummary:
+        """Create an issue. Unknown labels are retried without them.
+
+        GitHub rejects the whole request when a label does not exist yet, so a
+        first-ever self-report must not depend on the label having been created
+        by hand.
+        """
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = list(labels)
+        try:
+            data = await self.request("POST", f"/repos/{repo}/issues", json=payload)
+        except GitHubError as exc:
+            # A label that does not exist yet must never cost the report itself:
+            # retry with the labels most likely to exist, then with none.
+            if not labels or exc.status != 422:
+                raise
+            kept = [name for name in labels if name != SELF_REPORT_LABEL]
+            try:
+                data = await self.request(
+                    "POST", f"/repos/{repo}/issues", json={"title": title, "body": body, "labels": kept}
+                )
+            except GitHubError as retry_exc:
+                if not kept or retry_exc.status != 422:
+                    raise
+                data = await self.request("POST", f"/repos/{repo}/issues", json={"title": title, "body": body})
+        return _summary_from_item(repo, data)
+
+    # trace:v1 id=impl.github-self-report work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def self_report(
+        self,
+        *,
+        repo: str,
+        title: str,
+        body: str,
+        severity: str,
+        provenance: str = "",
+    ) -> dict[str, Any]:
+        """File (or append to) a friction report against the harness repo."""
+        return await file_self_report(
+            self,
+            repo=repo,
+            title=title,
+            body=body,
+            severity=severity,
+            provenance=provenance,
+        )
 
     async def open_pull_request(
         self,

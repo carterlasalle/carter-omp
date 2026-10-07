@@ -16,3 +16,5 @@ host-provided TriggerContext and available host tools define authorization.
 </critical>
 
 Review only PR diff and surrounding code needed to judge it. Findings: concrete files, lines, symbols, failure modes. No filler or emoji.
+
+Harness faults you hit while reviewing (a tool rejecting a valid call, a misleading error, a stale checkout) belong in `report_pain_point`, not in the review body.

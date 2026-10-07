@@ -49,7 +49,7 @@ from carter_omp.git_ops import (
 from carter_omp.git_ops import (
     push_release as git_push_release,
 )
-from carter_omp.github_client import GitHubClient, GitHubError
+from carter_omp.github_client import GitHubClient, GitHubError, file_self_report
 from carter_omp.proxy_hmac import HEADER_RUN_TOKEN, HEADER_SIGNATURE, HEADER_TIMESTAMP, verify
 from carter_omp.run_token import RunToken, verify_run_token
 from carter_omp.sandbox import _safe_directory_env, _slot_subprocess_kwargs
@@ -929,6 +929,46 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         except GitHubError as exc:
             return _gh_error_response(exc)
         return JSONResponse(_serialize(pr))
+
+    # trace:v1 id=impl.src-carter-omp-proxy-server.create-proxy-app work=WORK-CO-Q8Z1HJJJ implements=PLAN-CO-YFKQADAY satisfies=REQ-CO-9N23MPRP
+    @app.post("/gh/v1/self-report")
+    async def self_report_endpoint(request: Request) -> JSONResponse:
+        """File a friction report against the harness repo.
+
+        The run token proves *which* run is reporting and carries the
+        capability; the destination comes from the proxy's own config and the
+        origin from the token, so neither is model-controlled. The deployment's
+        trigger label is attached so reports land in the operator's normal
+        queue (the repo's own `carter-omp` label).
+        """
+        data = await _json_body(request)
+        cfg: Settings = request.app.state.settings
+        token = _require_run_token(request, cfg)
+        _require_run_cap(token, "report_upstream")
+        target = cfg.self_report_repo.strip()
+        if not target:
+            raise HTTPException(404, "self-reporting is not configured")
+        _enforce_repo_scope(cfg, target)
+        title = _require_str(data.get("title"), "title")
+        body = _require_str(data.get("body"), "body")
+        severity = str(data.get("severity") or "medium").lower()
+        if severity not in ("low", "medium", "high"):
+            raise HTTPException(400, "severity must be low, medium or high")
+        origin = f"`{token.repo}#{token.issue}` · run `{token.run_id}`"
+        github = _scoped_client(request, target)
+        try:
+            result = await file_self_report(
+                github,
+                repo=target,
+                title=title,
+                body=body,
+                severity=severity,
+                provenance=origin,
+                extra_labels=[cfg.trigger_label] if cfg.trigger_label else [],
+            )
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse(result)
 
     @app.post("/gh/v1/request_reviewers")
     async def request_reviewers(request: Request) -> JSONResponse:

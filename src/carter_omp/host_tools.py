@@ -873,6 +873,96 @@ def _footer_suffix(bindings: ToolBindings) -> str:
     return "" if stats is None else stats.footer()
 
 
+# ---------- report_pain_point ----------
+# trace:v1 id=impl.host-tools-report-pain-point work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
+    """File a friction report against the harness repo (see the proxy endpoint).
+
+    The model describes what went wrong; the *destination* comes from
+    `CARTER_OMP_SELF_REPORT_REPO` and the provenance from the run token, so a
+    report can never be redirected at another repo or misattributed. Dedupe
+    (exact title, `[bot-report]` marker) happens on the GitHub side, so a
+    repeated fault appends evidence instead of filing another issue.
+    """
+
+    # trace:v1 id=impl.host-tools-report-pain-point-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+        bindings.require(Capability.REPORT_UPSTREAM, "report_pain_point", args)
+        settings = bindings.settings
+        target = (settings.self_report_repo if settings is not None else "").strip()
+        title = args.get("title")
+        details = args.get("details")
+        area = args.get("area")
+        severity = str(args.get("severity") or "medium").lower()
+        if not isinstance(title, str) or not title.strip():
+            _raise_command("report_pain_point requires a non-empty 'title'.")
+        if not isinstance(details, str) or not details.strip():
+            _raise_command("report_pain_point requires 'details': what you expected and what happened.")
+        if severity not in ("low", "medium", "high"):
+            _raise_command("report_pain_point severity must be low, medium or high.")
+        if not target:
+            msg = "report_pain_point is disabled: CARTER_OMP_SELF_REPORT_REPO is empty."
+            _audit(bindings, "report_pain_point", args, error=msg)
+            _raise_command(msg)
+        headline = title.strip()[:200]
+        if isinstance(area, str) and area.strip():
+            headline = f"{area.strip()[:40]}: {headline}"[:200]
+        where = [
+            f"**Task:** `{bindings.repo.full_name}`",
+            f"**Workspace branch:** `{bindings.workspace.branch}`",
+        ]
+        if bindings.issue is not None:
+            where.insert(0, f"**Working on:** `{bindings.issue_key}`")
+        body = f"{details.strip()}\n\n### Where\n" + "\n".join(f"- {line}" for line in where)
+        try:
+            result = _run_coro(
+                bindings.loop,
+                bindings.github.self_report(
+                    repo=target,
+                    title=headline,
+                    body=body,
+                    severity=severity,
+                    provenance=f"`{bindings.repo.full_name}` · branch `{bindings.workspace.branch}`",
+                ),
+            )
+        except GitHubError as exc:
+            _audit(bindings, "report_pain_point", args, error=str(exc))
+            _raise_command(f"could not file the report: {exc.status} {exc.message}")
+        _audit(bindings, "report_pain_point", args, result=dict(result))
+        return json.dumps(dict(result), indent=2)
+
+    return host_tool(
+        name="report_pain_point",
+        description=persona.host_tool_description("report_pain_point"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("report_pain_point", "title"),
+                },
+                "details": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("report_pain_point", "details"),
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "default": "medium",
+                    "description": persona.host_tool_parameter_description("report_pain_point", "severity"),
+                },
+                "area": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("report_pain_point", "area"),
+                },
+            },
+            "required": ["title", "details"],
+            "additionalProperties": False,
+        },
+        execute=execute,
+    )
+
+
 # ---------- gh_post_comment ----------
 # trace:v1 id=impl.host-tools-post-comment work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
@@ -2834,6 +2924,8 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
         tools.append(_build_open_pr(bindings))
     if Capability.REQUEST_REVIEW in caps:
         tools.append(_build_request_review(bindings))
+    if Capability.REPORT_UPSTREAM in caps:
+        tools.append(_build_report_pain_point(bindings))
     if Capability.READ_GITHUB in caps:
         tools += [_build_release_ci_status(bindings), _build_release_job_log(bindings)]
     if Capability.UPDATE_DEFAULT_BRANCH in caps and Capability.MOVE_RELEASE_TAG in caps:

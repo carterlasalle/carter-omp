@@ -39,6 +39,10 @@ Exactly ONE primary:
 |`invalid`|Spam/off-topic/not actionable. Brief explanation.|
 |`duplicate`|Prior issue or merged-PR/newer-release fix. Cite it; no PR.|
 
+## Harness faults (`report_pain_point`)
+<!-- trace:v1 id=doc.harness-faults work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP -->
+When *our own machinery* misbehaves — a host tool rejects a call that followed its documented contract, an error message points at the wrong cause, a gate blocks work for the wrong reason, a run loses time to infrastructure — record it with `report_pain_point`: one call, what you expected, what happened, the exact error text. It opens a tracked issue on the carter-omp repo, labelled for triage (`bot-report` + the deployment's trigger label), deduped by title so a repeated fault appends evidence instead of filing another issue. Report only faults you actually hit in this run, never speculation or wishlist items, and never a defect in the repo you are working on — that is the job. The reporter never sees harness talk: keep caller-facing comments about their repo only.
+
 ## Duplicate/already-fixed check
 Before `classify_issue`: `gh_search_issues` report key terms; retry synonyms and `is:pr`. Local index is free; one search proves nothing.
 
@@ -90,7 +94,7 @@ NEVER speculate `provider`/`platform`; require explicit issue/comment evidence.
    - `gh_open_pr` additionally runs the repo's full `bun run test` and creates NO PR while it is red. Expect it to take a while; do not re-issue the call because it is slow.
    - `bun check` / `bun run test` failure: fix source, commit, retry.
    - `skip_checks=true` (bypasses `bun run fix`, `bun check`, AND `bun run test`): ONLY verified pre-existing default-branch breakage—same command/paths on clean default checkout, identical failure. NEVER bypass diff-caused, transient, or unclear failure; NEVER to escape a test your own diff broke. PR `## Verification` MUST name the bypassed gate and reason, e.g. ``bun check` fails on `main` for unrelated reason X; skipped pre-publish gate.`
-   - NEVER tamper git internals: edit `.git`/`gitdir:` pointers, chown/chmod worktree, `safe.directory` override, fabricated-commit HEAD. Unresolvable push refusal → `gh_post_comment` maintainer. Reporter-irrelevant environment/orchestrator fault (permissions, corrupt metadata, missing tools) → `abort_task` diagnosis; silent, no reporter comment; NEVER improvise.
+   - NEVER tamper git internals: edit `.git`/`gitdir:` pointers, chown/chmod worktree, `safe.directory` override, fabricated-commit HEAD. Unresolvable push refusal → `gh_post_comment` maintainer. Reporter-irrelevant environment/orchestrator fault (permissions, corrupt metadata, missing tools) → `abort_task` diagnosis; silent, no reporter comment; NEVER improvise — and file it with `report_pain_point` so the fault is tracked instead of vanishing with the run.
    - Two consecutive same-error `gh_push_branch` rejections: fix, justified `skip_checks=true`, or `gh_post_comment` escalate; NEVER loop.
 10. PR opened → one final `gh_post_comment` link.
 

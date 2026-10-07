@@ -1045,6 +1045,10 @@ async def handle_pr_conversation(
         if existing_branch is None and not (directive and issue_row.state == "reproducing"):
             _record_skip(db, delivery_id, "pr_conversation_missing_branch")
             return
+    # Review worktrees are detached at the PR head and read-only: re-point them
+    # at the *current* head so a re-review is not answered from a stale
+    # checkout. Owned branches are left untouched (local commits must survive).
+    review_workspace = bool(existing_branch and existing_branch.startswith("review/pr-"))
     workspace = await _run_workspace_op(
         sandbox.ensure_workspace,
         repo=repo.full_name,
@@ -1052,7 +1056,8 @@ async def handle_pr_conversation(
         title=issue.title,
         clone_url=clone_url,
         default_branch=repo.default_branch,
-        existing_branch=existing_branch,
+        pr_head=pr_number if review_workspace else None,
+        existing_branch=None if review_workspace else existing_branch,
         author_name=settings.resolved_author_name,
         author_email=settings.git_author_email,
         slot_uid=slot_uid,
