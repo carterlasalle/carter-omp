@@ -86,6 +86,35 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **Trigger label is consumed through the run-scoped client (#15).** After a
+  successful label-triggered run, `_consume_trigger_label` called
+  `inputs.github` — the shared HMAC-only client — instead of the run-token
+  client on `bindings.github`. Every proxy label endpoint requires a run token,
+  so the `remove_issue_label`/`add_issue_labels` calls answered 401 and the
+  failure was swallowed at DEBUG: the one-shot trigger label stayed on the
+  issue, and re-applying it (the documented re-trigger) fired no `labeled`
+  event. The function now takes `bindings` and uses `bindings.github`, and logs
+  failures at WARNING.
+- Run-token clients no longer collapse to the 10 s connect timeout (#16).
+  `GitHubProxyClient.with_run_token` and `ProxyGitTransport.with_run_token`
+  rebuilt their client with `timeout=self._timeout.connect`, so the per-run REST
+  client's 30 s and the per-run git transport's 120 s read budgets both became
+  10 s. A push the proxy needed 12 s for therefore raised `ReadTimeout` on the
+  scoped transport after the proxy had already performed it, and `_post`
+  re-sent the push. Both constructors now accept `float | httpx.Timeout` and
+  `with_run_token` passes the whole `httpx.Timeout` through, preserving the
+  configured read budget.
+
+- **`/allow-skip-checks` now reaches the pre-publish gates.** The directive was
+  parsed into the trigger (and the run token) but `worker.run_task` built
+  `ToolBindings.capabilities` from the fixed `capabilities_for(task_kind)`
+  profile, which never contains `SKIP_CHECKS`. Every gate tests
+  `bindings.capabilities`, so on a broken default branch the operator escape
+  hatch did nothing: `bun run fix` / `bun check` / `bun run test` still ran and
+  refused the push. Bindings now mirror the trigger's capability set — the same
+  authoritative record the run token is scoped from — falling back to the
+  task-kind profile only for legacy/manual runs with no `TriggerContext`.
+
 - Mention turns must end with a reply. `_needs_completion_reminder` only knew
   the triage, review and release task kinds, so a `handle_comment` turn had no
   terminal action at all: the 2026-10-07 run on `personal_website#64` called
@@ -93,6 +122,13 @@ versions are `Unreleased` until the first tagged release.
   delivery was recorded `done` — the human saw the bot ignore them. Comment
   turns now require `gh_post_comment` (or `abort_task`), with their own
   `comment_completion_reminder` prompt.
+- Restored the implementation-authorization gate on `gh_push_branch` and
+  `gh_open_pr`. `_enforce_impl_authorization` was extracted with zero callers
+  and without its `bug`/`documentation` exemption, so a run on any other
+  classification (e.g. `enhancement`, `proposal`, `question`) could publish
+  without a maintainer go-ahead, and wiring the function verbatim would have
+  refused the legitimate bug/doc flow. It now guards both tools and lets the
+  auto-publish classes through.
 
 - Ported the upstream `python/robomp`/`python/omp-rpc` fixes since extraction
   (see `docs/upstream.md`): `fetch_ref`/`fetch_pr_head` backfill only the
@@ -159,6 +195,14 @@ versions are `Unreleased` until the first tagged release.
 - `@carter-omp status?` (and `stop!`, …) now reaches the deterministic control
   path: trailing punctuation on a bare command line no longer turns a canned DB
   answer into a full model run.
+
+- The deterministic `status` handler actually exists now — it answers from the
+  issue/event rows with no model turn. Previously `_handle_control_command`
+  implemented only `stop`, so `@carter-omp status` silently fell through to
+  `tasks.handle_comment` and spent a full model run on the bare word. `review`,
+  `resume`, and `release-fix` are no longer declared control commands either:
+  they need a model run, so they are ordinary directives — the old declaration
+  promised a no-model answer the queue never gave.
 
 - `github-proxy` enforced a parallel allowlist that ignored
   `CARTER_OMP_REPO_OWNERS`, so owner-scoped repos (e.g. `mac_messages_mcp`)
