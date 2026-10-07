@@ -758,6 +758,48 @@ async def test_run_rpc_skips_reminder_when_unclassified(tmp_path: Path, settings
 
 
 @pytest.mark.asyncio
+async def test_run_rpc_comment_turn_reminds_without_a_reply(tmp_path: Path, settings: Settings) -> None:
+    """A mention that ends without posting leaves the human waiting.
+
+    The run on personal_website#64 (2026-10-07) called todo/bash and stopped:
+    the delivery went `done` in 84s and the thread got nothing. `handle_comment`
+    now has a terminal tool like the review and triage kinds.
+    """
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="handle_comment",
+        prompt="kickoff",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
+    fake = _FakeRpcClient.instances[0]
+    assert len(fake.prompts) == 1 + settings.task_completion_max_reminders
+    assert fake.prompts[0] == "kickoff"
+    assert all("gh_post_comment" in p for p in fake.prompts[1:])
+
+
+@pytest.mark.asyncio
+async def test_run_rpc_comment_turn_stops_after_the_reply(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    prompts: list[str] = []
+
+    def on_prompt(client, prompt: str) -> None:
+        prompts.append(prompt)
+        client.emit_tool_end("gh_post_comment")
+
+    _install_prompt_hook(monkeypatch, on_prompt)
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="handle_comment",
+        prompt="kickoff",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
+    assert prompts == ["kickoff"]
+
+
+@pytest.mark.asyncio
 async def test_run_rpc_review_pr_reminds_until_submit_pr_review(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
     worker._run_rpc_blocking(
@@ -872,6 +914,10 @@ async def test_run_rpc_sends_dirty_state_reminder_when_worktree_has_unpushed_wor
     states = iter([dirty, clean])
     monkeypatch.setattr(worker, "_probe_workspace_dirty", lambda _ws, _slot: next(states, clean))
 
+    # A mention turn must reach its terminal action (the reply) before the
+    # dirty-state check applies — that is what makes this a "replied but left
+    # work unpushed" scenario.
+    _install_prompt_hook(monkeypatch, lambda client, _prompt: client.emit_tool_end("gh_post_comment"))
     worker._run_rpc_blocking(
         inputs,
         task_kind="handle_comment",
@@ -899,6 +945,10 @@ async def test_run_rpc_skips_dirty_state_reminder_when_worktree_is_clean(
         lambda _ws, _slot: DirtyState(uncommitted=0, unpushed=0, summary=""),
     )
 
+    # A mention turn must reach its terminal action (the reply) before the
+    # dirty-state check applies — that is what makes this a "replied but left
+    # work unpushed" scenario.
+    _install_prompt_hook(monkeypatch, lambda client, _prompt: client.emit_tool_end("gh_post_comment"))
     worker._run_rpc_blocking(
         inputs,
         task_kind="handle_comment",

@@ -86,6 +86,14 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- Mention turns must end with a reply. `_needs_completion_reminder` only knew
+  the triage, review and release task kinds, so a `handle_comment` turn had no
+  terminal action at all: the 2026-10-07 run on `personal_website#64` called
+  `todo`/`bash` for 84 seconds, stopped without posting anything, and the
+  delivery was recorded `done` — the human saw the bot ignore them. Comment
+  turns now require `gh_post_comment` (or `abort_task`), with their own
+  `comment_completion_reminder` prompt.
+
 - Ported the upstream `python/robomp`/`python/omp-rpc` fixes since extraction
   (see `docs/upstream.md`): `fetch_ref`/`fetch_pr_head` backfill only the
   missing tip-tree blobs instead of re-downloading the ref's history; a

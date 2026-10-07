@@ -331,6 +331,10 @@ def _build_extra_env(settings: Settings) -> dict[str, str]:
 _TERMINAL_TRIAGE_TOOLS: frozenset[str] = frozenset({"gh_open_pr", "mark_unable_to_reproduce", "abort_task"})
 _TERMINAL_REVIEW_TOOLS: frozenset[str] = frozenset({"submit_pr_review", "abort_task"})
 _TERMINAL_RELEASE_TOOLS: frozenset[str] = frozenset({"release_retag", "abort_task"})
+# A mention's deliverable *is* the reply: without it the human is left with a
+# run that consumed tokens and said nothing (see the 2026-10-07 run on
+# personal_website#64, which ended after todo/bash calls with no comment).
+_TERMINAL_COMMENT_TOOLS: frozenset[str] = frozenset({"gh_post_comment", "abort_task"})
 _PR_REQUIRING_CLASSIFICATIONS: frozenset[str] = frozenset({"bug", "documentation"})
 
 
@@ -339,6 +343,7 @@ def _task_timeout(settings: Settings, task_kind: str) -> float:
     return settings.release_task_timeout_seconds if task_kind == "handle_release_ci" else settings.task_timeout_seconds
 
 
+# trace:v1 id=impl.worker-needs-completion-reminder work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _needs_completion_reminder(
     *,
     task_kind: str,
@@ -353,6 +358,8 @@ def _needs_completion_reminder(
         return not (tools_called & _TERMINAL_REVIEW_TOOLS)
     if task_kind == "handle_release_ci":
         return not (tools_called & _TERMINAL_RELEASE_TOOLS)
+    if task_kind == "handle_comment":
+        return not (tools_called & _TERMINAL_COMMENT_TOOLS)
     if task_kind != "triage_issue":
         return False
     row = inputs.db.get_issue(bindings.issue_key)
@@ -381,6 +388,7 @@ def _probe_workspace_dirty(workspace: Workspace, slot_uid: int | None) -> DirtyS
         return DirtyState(uncommitted=0, unpushed=0, summary="")
 
 
+# trace:v1 id=impl.worker-drive-turn work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _drive_turn(
     client: RpcClient,
     initial_prompt: str,
@@ -450,6 +458,13 @@ def _drive_turn(
             elif task_kind == "review_pr":
                 assert inputs.issue is not None
                 reminder = persona.review_completion_reminder(
+                    repo=inputs.repo,
+                    issue=inputs.issue,
+                    workspace=inputs.workspace,
+                )
+            elif task_kind == "handle_comment":
+                assert inputs.issue is not None
+                reminder = persona.comment_completion_reminder(
                     repo=inputs.repo,
                     issue=inputs.issue,
                     workspace=inputs.workspace,
