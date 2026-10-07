@@ -86,6 +86,14 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- An authorized `assigned` trigger (`issues.assigned` / `pull_request.assigned`)
+  is no longer queued and then dropped: `WorkerPool._dispatch` re-derived the task
+  from `(event, action)` and had no `assigned` branch, so the delivery no-op'd
+  and was recorded `done`. The webhook now stores the task `route` assigned on
+  the queued event and dispatch runs that task; the same change fixes
+  `pull_request_review_comment.created` on a non-bot PR (routed to `review_pr`,
+  previously run as `handle_review`) (#9).
+
 - **Trigger label is consumed through the run-scoped client (#15).** After a
   successful label-triggered run, `_consume_trigger_label` called
   `inputs.github` — the shared HMAC-only client — instead of the run-token

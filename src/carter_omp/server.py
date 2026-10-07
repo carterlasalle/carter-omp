@@ -524,6 +524,13 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         if decision.trigger is not None:
             payload = dict(payload)
             payload["_carter_omp_trigger"] = decision.trigger.to_record()
+        # trace:v1 id=impl.server-store-routed-task work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+        # Persist the routed task so the durable queue dispatches on it instead of
+        # re-deriving `(event, action)` — the two mappings had drifted, dropping
+        # the authorized `assigned` trigger as a no-op.
+        if decision.should_queue and decision.task is not None:
+            payload = dict(payload)
+            payload["_carter_omp_task"] = decision.task
 
         _record_decision_and_run(db, x_github_event, payload, x_github_delivery, decision)
 
