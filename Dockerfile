@@ -67,6 +67,20 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip git tini sqlite3 \
  && rm -rf /var/lib/apt/lists/*
+# Chromium runtime libraries, so a *repo's own* browser suite can run
+# (`npx playwright test`, `npm run test:e2e`). The sandbox has no root, so
+# `playwright install-deps` can never fix this at run time: the browser
+# downloads fine and then dies with `libglib-2.0.so.0: cannot open shared object
+# file` (carter-omp#40). Debian trixie renamed several of these to `*t64`; the
+# pre-trixie names do not resolve there. This adds no tool: OMP's own
+# `browser`/`computer` built-ins stay forbidden (OMP_FORBIDDEN_BUILTINS), and
+# the image ships no browser binary — a repo fetches the one its suite pins.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    libglib2.0-0t64 libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
+    libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    libxshmfence1 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 fonts-liberation \
+ && rm -rf /var/lib/apt/lists/*
 # Pinned OMP prebuilt binary (no `curl | sh`; checksum-verified download).
 # Release assets: omp-linux-x64 / omp-linux-arm64 (bare binaries, not zips).
 RUN case "${TARGETARCH:-amd64}" in \
