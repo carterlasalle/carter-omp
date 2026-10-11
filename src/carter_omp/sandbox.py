@@ -578,9 +578,10 @@ def _prepare_slot_runtime_env(workspace: Workspace, slot_uid: int | None) -> dic
     xdg_data = xdg_root / "data"
     xdg_state = xdg_root / "state"
     xdg_cache = xdg_root / "cache"
+    xdg_config = xdg_root / "config"
     bun_cache = xdg_cache / "bun-install"
 
-    for base in (xdg_data, xdg_state, xdg_cache):
+    for base in (xdg_data, xdg_state, xdg_cache, xdg_config):
         base.mkdir(parents=True, exist_ok=True)
         (base / "omp").mkdir(parents=True, exist_ok=True)
     bun_cache.mkdir(parents=True, exist_ok=True)
@@ -592,6 +593,12 @@ def _prepare_slot_runtime_env(workspace: Workspace, slot_uid: int | None) -> dic
         "XDG_DATA_HOME": str(xdg_data),
         "XDG_STATE_HOME": str(xdg_state),
         "XDG_CACHE_HOME": str(xdg_cache),
+        # XDG-aware children (Chromium via the OMP browser daemon, fontconfig,
+        # `git config --global`) otherwise fall back to `$HOME/.config`. HOME is
+        # the read-only `root:root` template, so that write fails and Chromium
+        # dies at startup with SIGTRAP before it writes any profile — the
+        # `Shared browser daemon unavailable` failure (carter-omp#41).
+        "XDG_CONFIG_HOME": str(xdg_config),
         "BUN_INSTALL_CACHE_DIR": str(bun_cache),
     }
 
@@ -619,7 +626,7 @@ def _provision_runtime_dirs(ws_root: Path) -> None:
     tmpdir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     xdg_root = ws_root / ".omp-xdg"
-    for sub in ("data", "state", "cache"):
+    for sub in ("data", "state", "cache", "config"):
         base = xdg_root / sub
         base.mkdir(parents=True, exist_ok=True)
         (base / "omp").mkdir(parents=True, exist_ok=True)

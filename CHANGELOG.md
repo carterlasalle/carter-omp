@@ -96,6 +96,20 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **The agent's browser daemon can start (carter-omp#41).** `browser.open` from
+  `eval` failed with `Shared browser daemon unavailable (broker start or
+  Chromium launch failed)`: Chromium resolved (the cache download ran), but
+  every launch died with `SIGTRAP` before it wrote a profile. The daemon child
+  inherits the run env, whose `HOME` is the read-only `root:root` agent-home
+  template, and no `XDG_CONFIG_HOME` was set — so Chromium's config write hit a
+  root-owned directory it cannot create in. The slot env now points
+  `XDG_CONFIG_HOME` at the slot-owned `.omp-xdg/config` (created by
+  `_provision_runtime_dirs` and `_prepare_slot_runtime_env` alongside the
+  existing data/state/cache XDG dirs), which is what lets Chromium start; the
+  same redirect fixes any other XDG-aware child (`fontconfig`, `git config
+  --global`). No browser binary is bundled and `OMP_FORBIDDEN_BUILTINS` is
+  unchanged: a repo still fetches the browser its suite pins.
+
 - The CI coverage gate can fail the job again. The step that runs
   `--cov-fail-under=70` ended in `|| true`, so a run at 7.04 % coverage printed
   `FAIL Required test coverage of 70% not reached` and the job still exited 0:
