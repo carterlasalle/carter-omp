@@ -1033,6 +1033,32 @@ async def test_run_rpc_sends_dirty_state_reminder_when_worktree_has_unpushed_wor
 
 
 @pytest.mark.asyncio
+async def test_run_rpc_skips_dirty_state_reminder_in_review_mode(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up turn on a review worktree: dirty probe must not demand a refused push (#44)."""
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    bindings.workspace.branch = "review/pr-1"
+    bindings.review_mode = True
+    monkeypatch.setattr(
+        worker,
+        "_probe_workspace_dirty",
+        lambda _ws, _slot: DirtyState(uncommitted=0, unpushed=1, summary="Unpushed commits (1):\n68dfb58 wip"),
+    )
+
+    _install_prompt_hook(monkeypatch, lambda client, _prompt: client.emit_tool_end("gh_post_comment"))
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="handle_comment",
+        prompt="kickoff",
+        bindings=bindings,  # type: ignore[arg-type]
+    )
+
+    fake = _FakeRpcClient.instances[0]
+    assert len(fake.prompts) == 1, fake.prompts
+
+
+@pytest.mark.asyncio
 async def test_run_rpc_skips_dirty_state_reminder_when_worktree_is_clean(
     tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

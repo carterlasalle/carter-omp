@@ -445,6 +445,11 @@ def _drive_turn(
         if not needs_completion:
             if task_kind == "review_pr":
                 break
+            if getattr(bindings, "review_mode", False):
+                # Review worktrees are read-only: push/PR tools refuse by
+                # design and the next refresh discards leftover state, so a
+                # push-demanding reminder is an unachievable gate (#44).
+                break
             dirty = _probe_workspace_dirty(inputs.workspace, inputs.slot_uid)
             if not dirty.is_dirty:
                 break
