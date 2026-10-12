@@ -501,3 +501,29 @@ async def test_stranded_issue_past_the_redispatch_cap_is_abandoned(settings: Set
     issue = db.get_issue("octo/widget#4")
     assert issue is not None and issue.state == "abandoned"
     assert [row.state for row in db.list_events(limit=10)] == ["failed"]
+
+
+async def test_cancelled_run_is_not_redispatched(settings: Settings, db: Database) -> None:
+    """`@bot stop` must not be undone by the sweep.
+
+    A cancel leaves the row `failed` while the issue keeps its in-flight state,
+    so without the exclusion the sweeper would re-queue work a human just
+    stopped. The recorded error is the worker's wrapper around the reason, which
+    is why the check matches a substring.
+    """
+    settings.event_max_retries = 0
+    settings.redispatch_max_per_issue = 1
+    db.upsert_issue(key="octo/widget#4", repo="octo/widget", number=4, state="reproducing", branch="b")
+    db.record_event(
+        delivery_id="d1",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key="octo/widget#4",
+        payload={"_carter_omp_task": "triage_issue", "action": "opened"},
+        state="failed",
+        last_error="RpcProcessExitError('cancelled by operator')",
+    )
+
+    assert db.stranded_issues(max_attempts=0) == []
+    assert await _make_pool(settings, db)._redispatch_stranded() == 0  # noqa: SLF001
+    assert [row.state for row in db.list_events(limit=5)] == ["failed"]

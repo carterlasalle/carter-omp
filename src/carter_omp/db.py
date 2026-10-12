@@ -40,6 +40,13 @@ STRANDED_ISSUE_STATES: tuple[IssueState, ...] = ("new", "reproducing", "fixing",
 # redispatches (not the original delivery's own retries).
 REDISPATCH_PREFIX = "redispatch-"
 
+# Recorded when an operator stops a run (`@bot stop`, the dashboard's cancel).
+# The cancelled row stays `failed` while the issue keeps its in-flight state, so
+# the redispatch sweeper must treat this reason as "settled by a human" and never
+# re-queue it. Matched as a substring: the worker can record it wrapped in its
+# own exception text.
+CANCEL_REASON = "cancelled by operator"
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
@@ -644,13 +651,14 @@ class Database:
                                WHERE e.issue_key = i.key
                                  AND e.state = 'failed'
                                  AND e.attempts >= ?
+                                 AND COALESCE(e.last_error, '') NOT LIKE '%' || ? || '%'
                                  AND e.rowid = (SELECT MAX(e2.rowid) FROM events e2
                                                  WHERE e2.issue_key = i.key
                                                    AND e2.state <> 'skipped'))
                 ORDER BY i.updated_at ASC
                 LIMIT ?
                 """,
-                (*STRANDED_ISSUE_STATES, max_attempts, limit),
+                (*STRANDED_ISSUE_STATES, max_attempts, CANCEL_REASON, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 

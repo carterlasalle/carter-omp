@@ -14,6 +14,7 @@ from carter_omp import tasks
 from carter_omp.cancellation import clear_current_event, set_current_event
 from carter_omp.config import Settings
 from carter_omp.db import (
+    CANCEL_REASON,
     INACTIVE_EVENT_STATES,
     REDISPATCH_PREFIX,
     Database,
@@ -521,6 +522,7 @@ class WorkerPool:
             log.exception("cancel hook raised", extra={"delivery": delivery_id})
         return True
 
+    # trace:v1 id=impl.queue-run-event work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
     async def _run_event(self, row: EventRow) -> None:
         token = set_current_event(self, row.delivery_id)
         slot_uid: int | None = None
@@ -551,7 +553,7 @@ class WorkerPool:
                 )
             elif row.delivery_id in self._cancelled:
                 log.info("event cancelled", extra={"delivery": row.delivery_id})
-                self.db.mark_event(row.delivery_id, "failed", error="cancelled by operator")
+                self.db.mark_event(row.delivery_id, "failed", error=CANCEL_REASON)
             else:
                 tb = traceback.format_exc(limit=20)
                 err = f"{exc}\n{tb}"
@@ -615,7 +617,7 @@ class WorkerPool:
             return
         await self._dispatch(row, slot_uid=slot_uid)
         if row.delivery_id in self._cancelled:
-            self.db.mark_event(row.delivery_id, "failed", error="cancelled by operator")
+            self.db.mark_event(row.delivery_id, "failed", error=CANCEL_REASON)
             return
         latest = self.db.get_event(row.delivery_id)
         if latest is not None and latest.state in INACTIVE_EVENT_STATES:
