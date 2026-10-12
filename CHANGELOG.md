@@ -96,6 +96,25 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **A stranded run is re-dispatched instead of sitting there forever.**
+  `CARTER_OMP_EVENT_MAX_RETRIES` retries *inside* one delivery; once that budget
+  is spent the event is terminal and nothing re-dispatched the issue, so a 402
+  credit exhaustion left `carterlasalle/autolight#4` in `reproducing` with no
+  queued event and no signal at all for hours. A sweeper now re-queues such an
+  issue (in-flight state, no queued/running event, newest event failed at the
+  retry cap) with the failed delivery's own payload, so it dispatches the same
+  routed task and resumes the same workspace. Bounded by
+  `CARTER_OMP_REDISPATCH_MAX_PER_ISSUE` (default 1); past the cap the issue is
+  marked `abandoned`, so a permanently-failing issue settles visibly instead of
+  being retried forever. `CARTER_OMP_REDISPATCH_INTERVAL_SECONDS` (default 300)
+  tunes the sweep, 0 disables it.
+- **A review worktree can be refreshed when the slot uid differs from the pool's
+  owner.** The probe that resolves the fetched PR head runs inside the shared
+  pool, which is owned by root while the slot runs as `omp-N`, and the
+  `safe.directory` overlay named only the worktree — git refused it with
+  `detected dubious ownership in repository at .../_pool/<repo>`, so the review
+  never started. The overlay now names every directory the command resolves.
+
 - **The agent's browser daemon can start (carter-omp#41).** `browser.open` from
   `eval` failed with `Shared browser daemon unavailable (broker start or
   Chromium launch failed)`: Chromium resolved (the cache download ran), but

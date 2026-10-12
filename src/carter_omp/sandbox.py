@@ -129,19 +129,25 @@ def workspace_key(repo: str, number: int | str) -> str:
 
 
 # trace:v1 id=impl.sandbox--safe-directory-env work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-def _safe_directory_env(repo_dir: Path) -> dict[str, str]:
-    """Return a Git config env overlay whitelisting ``repo_dir`` as safe."""
-    return {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "safe.directory",
-        "GIT_CONFIG_VALUE_0": str(repo_dir),
-    }
+def _safe_directory_env(*paths: Path) -> dict[str, str]:
+    """Return a Git config env overlay whitelisting each path as safe.
+
+    Git refuses a repository whose owner is not the calling uid (the shared pool
+    is owned by root while slots run as `omp-N`), so every directory a command
+    resolves has to be named — for a linked worktree that is both the worktree
+    and the pool that holds its git dir.
+    """
+    env = {"GIT_CONFIG_COUNT": str(len(paths))}
+    for index, path in enumerate(paths):
+        env[f"GIT_CONFIG_KEY_{index}"] = "safe.directory"
+        env[f"GIT_CONFIG_VALUE_{index}"] = str(path)
+    return env
 
 
 # trace:v1 id=impl.sandbox--git-env-for-repo work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-def _git_env_for_repo(repo_dir: Path) -> dict[str, str]:
+def _git_env_for_repo(repo_dir: Path, *extra_safe: Path) -> dict[str, str]:
     env = os.environ.copy()
-    env.update(_safe_directory_env(repo_dir))
+    env.update(_safe_directory_env(repo_dir, *extra_safe))
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
@@ -952,7 +958,11 @@ class SandboxManager:
         blocking the refresh — reviewing old code is the failure being fixed.
         """
         self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)
-        env = _git_env_for_repo(repo_dir)
+        # The probe below runs in the *pool*, which is owned by root while this
+        # runs as the slot uid, so both directories have to be whitelisted —
+        # naming only the worktree makes git refuse the probe outright with
+        # "detected dubious ownership in repository at .../_pool/<repo>".
+        env = _git_env_for_repo(repo_dir, pool)
         kwargs = _slot_subprocess_kwargs(slot_uid)
         # `fetch_pr_head` writes FETCH_HEAD into the *pool's* git dir; a linked
         # worktree has its own (empty) FETCH_HEAD, so resolve the fetched SHA

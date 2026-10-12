@@ -442,3 +442,62 @@ async def test_dispatch_runs_the_task_the_router_assigned(
     await _make_pool(settings, db)._dispatch(row)  # noqa: SLF001
 
     assert calls == [expected]
+
+
+async def test_stranded_issue_is_redispatched_with_the_failed_delivery_payload(
+    settings: Settings, db: Database
+) -> None:
+    """A run that burned its retry budget must not leave its issue stuck.
+
+    The failed event is terminal, so without a sweep the issue sits in
+    `reproducing` with nothing queued to carry it — the 402 credit exhaustion
+    on carterlasalle/autolight#4 left it that way for hours. The re-queue
+    reuses the failed delivery's payload, so it dispatches the same routed task
+    and resumes the same workspace.
+    """
+    settings.event_max_retries = 0
+    settings.redispatch_max_per_issue = 1
+    db.upsert_issue(key="octo/widget#4", repo="octo/widget", number=4, state="reproducing", branch="b")
+    db.record_event(
+        delivery_id="d1",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key="octo/widget#4",
+        payload={"_carter_omp_task": "triage_issue", "action": "opened"},
+        state="failed",
+        last_error="omp agent error (stopReason=error): 402 Insufficient credits",
+    )
+
+    redispatched = await _make_pool(settings, db)._redispatch_stranded()  # noqa: SLF001
+
+    assert redispatched == 1
+    queued = [row for row in db.list_events(limit=10) if row.state == "queued"]
+    assert [row.issue_key for row in queued] == ["octo/widget#4"]
+    assert queued[0].payload["_carter_omp_task"] == "triage_issue"
+
+
+async def test_stranded_issue_past_the_redispatch_cap_is_abandoned(settings: Settings, db: Database) -> None:
+    """The sweep is bounded: one re-queue per issue, then it settles visibly.
+
+    Without the cap a permanently-failing issue would be re-dispatched every
+    interval, spending provider credits on each pass.
+    """
+    settings.event_max_retries = 0
+    settings.redispatch_max_per_issue = 1
+    db.upsert_issue(key="octo/widget#4", repo="octo/widget", number=4, state="reproducing", branch="b")
+    db.record_event(
+        delivery_id="redispatch-octo/widget__4-1",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key="octo/widget#4",
+        payload={"_carter_omp_task": "triage_issue", "action": "opened"},
+        state="failed",
+        last_error="omp agent error (stopReason=error): 402 Insufficient credits",
+    )
+
+    redispatched = await _make_pool(settings, db)._redispatch_stranded()  # noqa: SLF001
+
+    assert redispatched == 0
+    issue = db.get_issue("octo/widget#4")
+    assert issue is not None and issue.state == "abandoned"
+    assert [row.state for row in db.list_events(limit=10)] == ["failed"]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Generator, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -30,6 +30,15 @@ IssueState = Literal[
 ]
 
 ReleaseState = Literal["awaiting_ci", "fixing", "green", "failed", "superseded"]
+
+# Issue states that mean a run is (or should be) in flight. Anything outside
+# this set — `opened`, `merged`, `closed`, `needs_info`, `abandoned` — is a
+# settled outcome a redispatch must not touch.
+STRANDED_ISSUE_STATES: tuple[IssueState, ...] = ("new", "reproducing", "fixing", "reviewing")
+
+# Delivery-id prefix that marks a sweeper-issued re-queue, so the cap counts
+# redispatches (not the original delivery's own retries).
+REDISPATCH_PREFIX = "redispatch-"
 
 SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -423,8 +432,9 @@ class Database:
         with self._lock:
             self._conn.close()
 
+    # trace:v1 id=impl.db-txn work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @contextmanager
-    def _txn(self) -> Iterator[sqlite3.Connection]:
+    def _txn(self) -> Generator[sqlite3.Connection, None, None]:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -604,6 +614,43 @@ class Database:
                 LIMIT ?
                 """,
                 (max_attempts, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # trace:v1 id=impl.db-stranded-issues work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+    def stranded_issues(self, *, max_attempts: int, limit: int = 20) -> list[dict[str, Any]]:
+        """Issues whose run died terminally with nothing left to dispatch.
+
+        A failed event is terminal, so an issue caught mid-flight — no queued or
+        running event to carry it — never gets another attempt and just sits in
+        its state. These are the rows a redispatch sweeper can safely re-queue;
+        `redispatches` counts the re-queues already spent so the caller can cap
+        them.
+        """
+        states = ",".join("?" * len(STRANDED_ISSUE_STATES))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT i.key, i.repo, i.number, i.state,
+                       (SELECT COUNT(*) FROM events e
+                         WHERE e.issue_key = i.key
+                           AND e.delivery_id LIKE '{REDISPATCH_PREFIX}%') AS redispatches
+                FROM issues i
+                WHERE i.state IN ({states})
+                  AND NOT EXISTS (SELECT 1 FROM events e
+                                   WHERE e.issue_key = i.key
+                                     AND e.state IN ('queued', 'running'))
+                  AND EXISTS (SELECT 1 FROM events e
+                               WHERE e.issue_key = i.key
+                                 AND e.state = 'failed'
+                                 AND e.attempts >= ?
+                                 AND e.rowid = (SELECT MAX(e2.rowid) FROM events e2
+                                                 WHERE e2.issue_key = i.key
+                                                   AND e2.state <> 'skipped'))
+                ORDER BY i.updated_at ASC
+                LIMIT ?
+                """,
+                (*STRANDED_ISSUE_STATES, max_attempts, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 

@@ -13,7 +13,15 @@ from typing import Any, Protocol
 from carter_omp import tasks
 from carter_omp.cancellation import clear_current_event, set_current_event
 from carter_omp.config import Settings
-from carter_omp.db import INACTIVE_EVENT_STATES, Database, EventRow, IssueRow, IssueState, issue_key
+from carter_omp.db import (
+    INACTIVE_EVENT_STATES,
+    REDISPATCH_PREFIX,
+    Database,
+    EventRow,
+    IssueRow,
+    IssueState,
+    issue_key,
+)
 from carter_omp.github_backend import GitHubBackend
 from carter_omp.github_client import GitHubError
 from carter_omp.sandbox import GitTransport, SandboxManager, _reap_slot
@@ -248,6 +256,7 @@ class WorkerPool:
             return
         await asyncio.gather(*(asyncio.to_thread(_reap_slot, uid) for uid in self._slot_pool.slot_uids))
 
+    # trace:v1 id=impl.queue-pool-start work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
     async def start(self) -> None:
         await self._reap_all_slots()
         if self.settings.reclaim_workspace_caches:
@@ -265,6 +274,9 @@ class WorkerPool:
         # restarted orchestrator doesn't burn CPU on a cold cache.
         if self.sandbox.natives_cache is not None and self.settings.natives_cache_gc_interval_seconds > 0:
             self._workers.append(asyncio.create_task(self._natives_cache_gc_loop(), name="carter_omp-natives-gc"))
+        # Periodic redispatch of stranded work, if enabled. Sleep-first.
+        if self.settings.redispatch_interval_seconds > 0:
+            self._workers.append(asyncio.create_task(self._redispatch_loop(), name="carter_omp-redispatch"))
 
     async def stop(self, *, drain_timeout: float = 25.0, kill_timeout: float = 5.0) -> None:
         """Halt the dispatcher, then drain (or kill) in-flight `_run_event` tasks.
@@ -350,6 +362,82 @@ class WorkerPool:
                     log.exception("natives_cache gc raised")
         except asyncio.CancelledError:
             raise
+
+    # trace:v1 id=impl.queue-redispatch-loop work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+    async def _redispatch_loop(self) -> None:
+        """Periodically re-queue work whose run died with a terminal failure.
+
+        Retries inside one delivery are bounded by `event_max_retries`; once that
+        budget is spent the event is terminal and nothing else would ever dispatch
+        the issue again, so it sat in an in-flight state indefinitely. A 402
+        credit exhaustion left carterlasalle/autolight#4 stuck in `reproducing`
+        with no queued event and no signal at all, which is exactly what this
+        sweeper exists to prevent. Sleep-first; cancellation is the only exit.
+        """
+        interval = self.settings.redispatch_interval_seconds
+        log.info("redispatch loop online", extra={"interval": interval})
+        try:
+            while not self._stop.is_set():
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                    return  # stop was set during the wait
+                except TimeoutError:
+                    pass
+                try:
+                    await self._redispatch_stranded()
+                except Exception:
+                    log.exception("redispatch sweep raised")
+        except asyncio.CancelledError:
+            raise
+
+    # trace:v1 id=impl.queue-redispatch-stranded work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+    async def _redispatch_stranded(self) -> int:
+        """One sweep: re-queue stranded issues, abandon the ones past the cap.
+
+        The re-queue reuses the failed delivery's payload, so it carries the same
+        routed task and resumes the same workspace; its delivery id is derived
+        from the issue and the count already spent, which makes a double sweep
+        idempotent (`record_event` ignores duplicates).
+        """
+        cap = self.settings.redispatch_max_per_issue
+        candidates = await asyncio.to_thread(self.db.stranded_issues, max_attempts=self.settings.event_max_retries)
+        redispatched = 0
+        for candidate in candidates:
+            key = str(candidate["key"])
+            spent = int(candidate["redispatches"])
+            if spent >= cap:
+                await asyncio.to_thread(self.db.set_issue_state, key, "abandoned")
+                log.warning(
+                    "issue abandoned after redispatch cap",
+                    extra={"key": key, "redispatches": spent, "cap": cap},
+                )
+                continue
+            latest = await asyncio.to_thread(self.db.latest_event_for_issue, key)
+            if latest is None or latest.state != "failed":
+                continue  # something moved it between the query and here
+            delivery_id = f"{REDISPATCH_PREFIX}{candidate['repo']}__{candidate['number']}-{spent + 1}"
+            queued = await asyncio.to_thread(
+                self.db.record_event,
+                delivery_id=delivery_id,
+                event_type=latest.event_type,
+                repo=str(candidate["repo"]),
+                issue_key=key,
+                payload=latest.payload,
+            )
+            if not queued:
+                continue  # already re-queued under that delivery id
+            redispatched += 1
+            log.warning(
+                "stranded issue re-queued",
+                extra={
+                    "key": key,
+                    "delivery": delivery_id,
+                    "attempts": latest.attempts,
+                    "err": (latest.last_error or "")[:160],
+                },
+            )
+            self.wake()
+        return redispatched
 
     async def _dispatch_loop(self) -> None:
         log.info("dispatch loop online")

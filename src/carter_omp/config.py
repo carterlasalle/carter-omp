@@ -237,6 +237,17 @@ class Settings(BaseSettings):
     # Set `event_max_retries=0` to restore fail-fast behavior.
     event_max_retries: int = Field(3, alias="CARTER_OMP_EVENT_MAX_RETRIES")
     event_retry_delays_raw: str = Field("30,120,600", alias="CARTER_OMP_EVENT_RETRY_DELAYS_SECONDS")
+    # Redispatch of stranded work. `event_max_retries` retries *inside* one
+    # delivery; once that budget is exhausted the event is terminal, and the
+    # issue used to stay in its in-flight state forever with nothing queued to
+    # carry it — a 402 credit exhaustion on carterlasalle/autolight#4 left the
+    # run stuck in `reproducing` with no live event and no signal. This sweeper
+    # re-queues such an issue (in-flight state, no queued/running event, newest
+    # event failed at the retry cap) up to `redispatch_max_per_issue` times, then
+    # marks it `abandoned` so it stops being retried and shows as settled. 0
+    # disables the sweeper.
+    redispatch_interval_seconds: float = Field(300.0, alias="CARTER_OMP_REDISPATCH_INTERVAL_SECONDS")
+    redispatch_max_per_issue: int = Field(1, alias="CARTER_OMP_REDISPATCH_MAX_PER_ISSUE")
     # Premature-end reminder. When a `triage_issue` turn ends without the
     # agent having reached a terminal tool (`gh_open_pr`,
     # `mark_unable_to_reproduce`, `abort_task`) for a `bug`/`documentation`
@@ -332,6 +343,7 @@ class Settings(BaseSettings):
             raise ValueError("CARTER_OMP_BOT_LOGIN must be a non-empty GitHub login")
         return cleaned
 
+    # trace:v1 id=impl.config-blank-replay-disables work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     @field_validator("replay_token", mode="before")
     @classmethod
     def _blank_replay_disables(cls, value: object) -> object:
@@ -340,12 +352,13 @@ class Settings(BaseSettings):
         # happily compare against an empty X-CarterOmp-Replay-Token header.
         if isinstance(value, str) and not value.strip():
             return None
-        if hasattr(value, "get_secret_value"):
-            inner = value.get_secret_value()  # type: ignore[attr-defined]
+        if isinstance(value, SecretStr):
+            inner = value.get_secret_value()
             if isinstance(inner, str) and not inner.strip():
                 return None
         return value
 
+    # trace:v1 id=impl.config-blank-token-disables work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     @field_validator("github_token", mode="before")
     @classmethod
     def _blank_token_disables(cls, value: object) -> object:
@@ -353,8 +366,8 @@ class Settings(BaseSettings):
         deployments don't have to remove the env var."""
         if isinstance(value, str) and not value.strip():
             return None
-        if hasattr(value, "get_secret_value"):
-            inner = value.get_secret_value()  # type: ignore[attr-defined]
+        if isinstance(value, SecretStr):
+            inner = value.get_secret_value()
             if isinstance(inner, str) and not inner.strip():
                 return None
         return value
@@ -366,13 +379,14 @@ class Settings(BaseSettings):
             return None
         return value
 
+    # trace:v1 id=impl.config-blank-proxy-key-disables work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     @field_validator("github_proxy_hmac_key", mode="before")
     @classmethod
     def _blank_proxy_key_disables(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
             return None
-        if hasattr(value, "get_secret_value"):
-            inner = value.get_secret_value()  # type: ignore[attr-defined]
+        if isinstance(value, SecretStr):
+            inner = value.get_secret_value()
             if isinstance(inner, str) and not inner.strip():
                 return None
         return value
@@ -639,13 +653,14 @@ class _ProxyEnvLoader(BaseSettings):
     github_proxy_max_body_bytes: int = Field(1 << 20, alias="CARTER_OMP_GH_PROXY_MAX_BODY_BYTES")
     github_proxy_git_timeout_seconds: float = Field(60.0, alias="CARTER_OMP_GH_PROXY_GIT_TIMEOUT_SECONDS")
 
+    # trace:v1 id=impl.config-reject-blank work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     @field_validator("github_proxy_hmac_key", mode="before")
     @classmethod
     def _reject_blank(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
             raise ValueError("must be a non-empty string")
-        if hasattr(value, "get_secret_value"):
-            inner = value.get_secret_value()  # type: ignore[attr-defined]
+        if isinstance(value, SecretStr):
+            inner = value.get_secret_value()
             if isinstance(inner, str) and not inner.strip():
                 raise ValueError("must be a non-empty string")
         return value

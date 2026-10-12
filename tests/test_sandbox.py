@@ -10,12 +10,13 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
-from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from carter_omp.git_ops import (
     GitCommandError,
+    PushResult,
 )
 from carter_omp.git_ops import (
     fetch_pr_head as git_fetch_pr_head,
@@ -43,6 +44,59 @@ from carter_omp.sandbox import (
     rename_workspace_branch,
     workspace_key,
 )
+
+
+class _RecordingTransport:
+    """`GitTransport` stand-in that records calls instead of touching a remote.
+
+    A real implementation of the protocol (rather than a `SimpleNamespace`)
+    keeps these tests type-clean; the push paths raise so an unexpected remote
+    write fails loudly instead of silently no-op'ing.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def clone_pool(self, *, repo: str, clone_url: str, default_branch: str, target: Path) -> None:
+        self.calls.append(
+            ("clone_pool", {"repo": repo, "clone_url": clone_url, "default_branch": default_branch, "target": target})
+        )
+
+    def fetch_pool(self, *, repo: str, pool_dir: Path) -> None:
+        self.calls.append(("fetch_pool", {"repo": repo, "pool_dir": pool_dir}))
+
+    def fetch_base_ref(self, *, repo: str, pool_dir: Path, ref: str) -> None:
+        self.calls.append(("fetch_base_ref", {"repo": repo, "pool_dir": pool_dir, "ref": ref}))
+
+    def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None:
+        self.calls.append(("fetch_pr_head", {"repo": repo, "pool_dir": pool_dir, "pr_number": pr_number}))
+
+    def push_branch(
+        self,
+        *,
+        repo: str,
+        workspace_key: str,
+        repo_dir: Path,
+        branch: str,
+        expected_head: str,
+        slot_uid: int | None = None,
+    ) -> PushResult:
+        del repo, workspace_key, repo_dir, branch, expected_head, slot_uid
+        raise AssertionError("push_branch is not expected in sandbox tests")
+
+    def push_release(
+        self,
+        *,
+        repo: str,
+        workspace_key: str,
+        repo_dir: Path,
+        branch: str,
+        tag: str,
+        expected_head: str,
+        slot_uid: int | None = None,
+    ) -> PushResult:
+        del repo, workspace_key, repo_dir, branch, tag, expected_head, slot_uid
+        raise AssertionError("push_release is not expected in sandbox tests")
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -267,7 +321,8 @@ def test_rename_workspace_branch_is_idempotent_when_slug_unchanged(tmp_path: Pat
 def test_rename_workspace_branch_rejects_bad_slug(tmp_path: Path, bad: object) -> None:
     ws = _workspace(tmp_path / "ws")
     with pytest.raises(ValueError):
-        rename_workspace_branch(ws, bad)  # type: ignore[arg-type]
+        # Deliberately not a str: the list includes None and an int.
+        rename_workspace_branch(ws, cast("str", bad))
 
 
 def test_rename_workspace_branch_noop_when_pr_open(tmp_path: Path) -> None:
@@ -778,6 +833,42 @@ def test_safe_directory_env_scopes_single_repo_path(tmp_path: Path) -> None:
     }
 
 
+def test_review_worktree_refresh_whitelists_the_pool_as_safe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refresh resolves FETCH_HEAD inside the root-owned shared pool.
+
+    A slot uid cannot use a repository owned by another user without declaring
+    it safe, so the probe's overlay must name the pool as well as the worktree;
+    naming only the worktree makes git abort with "detected dubious ownership in
+    repository at .../_pool/<repo>" and no review ever starts.
+    """
+    from carter_omp import sandbox as sandbox_mod
+    from carter_omp.sandbox import SandboxManager
+
+    pool = tmp_path / "_pool" / "octo__widget"
+    repo_dir = tmp_path / "octo__widget__4" / "repo"
+    pool.mkdir(parents=True)
+    repo_dir.mkdir(parents=True)
+
+    seen: list[dict[str, object]] = []
+
+    def fake_safe_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append({"cwd": kwargs.get("cwd"), "env": kwargs.get("env")})
+        return subprocess.CompletedProcess(cmd, 0, "a" * 40 + "\n", "")
+
+    monkeypatch.setattr(sandbox_mod, "_safe_run", fake_safe_run)
+
+    manager = SandboxManager(tmp_path / "ws")
+    manager.transport = _RecordingTransport()
+    manager._refresh_review_worktree(repo="octo/widget", pool=pool, repo_dir=repo_dir, pr_head=7, slot_uid=None)
+
+    probe = seen[0]
+    assert probe["cwd"] == pool
+    env = probe["env"]
+    assert isinstance(env, dict)
+    assert env["GIT_CONFIG_COUNT"] == "2"
+    assert {env["GIT_CONFIG_VALUE_0"], env["GIT_CONFIG_VALUE_1"]} == {str(repo_dir), str(pool)}
+
+
 def test_slot_subprocess_kwargs_run_as_slot_on_linux_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("carter_omp.sandbox.platform.system", lambda: "Linux")
     monkeypatch.setattr("carter_omp.sandbox.os.geteuid", lambda: 0)
@@ -796,7 +887,8 @@ def test_chown_workspace_normalizes_to_root_when_slots_disabled(
     calls: list[tuple[list[str], bool | None]] = []
 
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append((cmd, kwargs.get("check") if isinstance(kwargs.get("check"), bool) else None))
+        check = kwargs.get("check")
+        calls.append((cmd, check if isinstance(check, bool) else None))
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr("carter_omp.sandbox.platform.system", lambda: "Linux")
@@ -1936,12 +2028,7 @@ def test_ensure_workspace_acquires_repo_lock(tmp_path: Path, monkeypatch: pytest
         return Rec()
 
     monkeypatch.setattr(mgr, "_repo_lock", fake_lock)
-    mgr.transport = SimpleNamespace(
-        clone_pool=lambda **k: None,
-        fetch_pool=lambda **k: None,
-        fetch_base_ref=lambda **k: None,
-        fetch_pr_head=lambda **k: None,
-    )  # type: ignore
+    mgr.transport = _RecordingTransport()
     ok = subprocess.CompletedProcess(["x"], 0, "", "")
     monkeypatch.setattr("carter_omp.sandbox._run", lambda *a, **k: ok)
     monkeypatch.setattr("carter_omp.sandbox._safe_run", lambda *a, **k: ok)
@@ -2026,12 +2113,7 @@ def test_ensure_workspace_raises_when_local_branch_probe_times_out(
 ) -> None:
     mgr = SandboxManager(tmp_path)
     mgr.natives_cache = None
-    mgr.transport = SimpleNamespace(
-        clone_pool=lambda **k: None,
-        fetch_pool=lambda **k: None,
-        fetch_base_ref=lambda **k: None,
-        fetch_pr_head=lambda **k: None,
-    )  # type: ignore
+    mgr.transport = _RecordingTransport()
 
     def fake_safe_run(cmd: list[str], **k: object) -> subprocess.CompletedProcess[str]:
         if "rev-parse" in cmd and cmd[-1].startswith("refs/heads/"):
@@ -2063,12 +2145,7 @@ def test_ensure_workspace_raises_when_remote_branch_probe_times_out(
 ) -> None:
     mgr = SandboxManager(tmp_path)
     mgr.natives_cache = None
-    mgr.transport = SimpleNamespace(
-        clone_pool=lambda **k: None,
-        fetch_pool=lambda **k: None,
-        fetch_base_ref=lambda **k: None,
-        fetch_pr_head=lambda **k: None,
-    )  # type: ignore
+    mgr.transport = _RecordingTransport()
 
     def fake_safe_run(cmd: list[str], **k: object) -> subprocess.CompletedProcess[str]:
         if "rev-parse" in cmd and cmd[-1].startswith("refs/heads/"):
@@ -2102,12 +2179,7 @@ def test_ensure_workspace_raises_when_symbolic_ref_probe_times_out(
 ) -> None:
     mgr = SandboxManager(tmp_path)
     mgr.natives_cache = None
-    mgr.transport = SimpleNamespace(
-        clone_pool=lambda **k: None,
-        fetch_pool=lambda **k: None,
-        fetch_base_ref=lambda **k: None,
-        fetch_pr_head=lambda **k: None,
-    )  # type: ignore
+    mgr.transport = _RecordingTransport()
 
     # Force the repo_exists=True branch: the worktree already has a .git.
     repo_dir = mgr.workspace_root("o/r", 1) / "repo"
@@ -2174,12 +2246,12 @@ def test_remove_workspace_real_prune_clears_dangling_registration(
 
     real_safe_run = s._safe_run
 
-    def fake_safe_run(cmd: list[str], **k: object) -> subprocess.CompletedProcess[str]:
+    def fake_safe_run(cmd: list[str], **k: Any) -> subprocess.CompletedProcess[str]:
         if cmd[:3] == ["git", "worktree", "remove"]:
             # A remove that "times out" without unregistering — the source must
             # then rmtree the checkout and run the REAL prune to clear metadata.
             return subprocess.CompletedProcess(cmd, 124, "", "timed out")
-        return real_safe_run(cmd, **k)  # type: ignore[arg-type]
+        return real_safe_run(cmd, **k)
 
     monkeypatch.setattr("carter_omp.sandbox._safe_run", fake_safe_run)
 
@@ -2277,11 +2349,8 @@ def test_ensure_clone_fails_before_fetch_when_origin_probe_times_out(
     pool = mgr.pool_path("octo/widget")
     (pool / ".git").mkdir(parents=True)  # take the idempotent-refresh path
 
-    fetched = {"called": False}
-    mgr.transport = SimpleNamespace(
-        fetch_pool=lambda **k: fetched.__setitem__("called", True),
-        clone_pool=lambda **k: None,
-    )  # type: ignore
+    transport = _RecordingTransport()
+    mgr.transport = transport
 
     def fake_safe_run(cmd: list[str], **k: object) -> subprocess.CompletedProcess[str]:
         if cmd[:4] == ["git", "remote", "get-url", "origin"]:
@@ -2292,7 +2361,7 @@ def test_ensure_clone_fails_before_fetch_when_origin_probe_times_out(
 
     with pytest.raises(GitCommandError):
         mgr.ensure_clone(repo="octo/widget", clone_url="https://github.com/octo/widget.git", default_branch="main")
-    assert fetched["called"] is False, (
+    assert not any(name == "fetch_pool" for name, _ in transport.calls), (
         "fetch_pool ran despite an indeterminate origin probe — a legacy credential could persist and be reused"
     )
 
