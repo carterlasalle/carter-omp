@@ -1115,6 +1115,21 @@ def _repair_message_escapes(message: str) -> str | None:
     return "`".join(parts) if changed else None
 
 
+# trace:v1 id=impl.host-tools-unpushed-rev-range work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _unpushed_rev_range(bindings: ToolBindings) -> list[str]:
+    """Revision arguments for the commits a push would newly publish.
+
+    `origin/<base>..HEAD` alone is wrong for a branch that starts at a PR head
+    someone else authored: the PR's own commits sit inside that range, so the
+    identity gate demands the bot's authorship on commits it must not rewrite
+    and the message normalizer would add trailers to them (`alert3d#1`, whose
+    review branch is based on a `cursor/…` PR head). Excluding everything
+    already reachable from a remote leaves exactly the commits this push
+    publishes — the ones it is allowed to rewrite.
+    """
+    return [f"origin/{bindings.repo.default_branch}..HEAD", "--not", "--remotes=origin"]
+
+
 # trace:v1 id=impl.host-tools-configured-coauthor work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _configured_coauthor(bindings: ToolBindings) -> str:
     """The deployment's configured co-author, or ``""`` when unset."""
@@ -1161,8 +1176,7 @@ def _normalize_unpushed_messages(bindings: ToolBindings, args: Mapping[str, Any]
         _audit(bindings, tool_name, args, error=msg)
         _raise_command(msg)
 
-    base = bindings.repo.default_branch
-    rev_list = _run_repo_command(bindings, ["git", "rev-list", "--reverse", f"origin/{base}..HEAD"])
+    rev_list = _run_repo_command(bindings, ["git", "rev-list", "--reverse", *_unpushed_rev_range(bindings)])
     if rev_list.returncode != 0:
         return
     shas = rev_list.stdout.split()
@@ -1273,11 +1287,11 @@ def _guarded_push_branch(bindings: ToolBindings, args: Mapping[str, Any], tool_n
     base = bindings.repo.default_branch
     identities = _run_repo_command(
         bindings,
-        ["git", "log", "--format=%H%x09%ae%x09%an", f"origin/{base}..HEAD"],
+        ["git", "log", "--format=%H%x09%ae%x09%an", *_unpushed_rev_range(bindings)],
     )
     if identities.returncode != 0:
         err = (identities.stderr or identities.stdout).strip()
-        msg = f"refusing to push: could not inspect commit authors for origin/{base}..HEAD: {err}"
+        msg = f"refusing to push: could not inspect the authors of the commits this push publishes: {err}"
         _audit(bindings, tool_name, args, error=msg)
         _raise_command(msg)
     offending: list[str] = []

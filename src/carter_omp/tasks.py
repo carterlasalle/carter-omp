@@ -267,16 +267,25 @@ async def _resolve_issue_row_for_pr(
     return issue_row, pr_info
 
 
-def _can_handle_pr_directly(*, settings: Settings, repo_full: str, pr: PullRequestInfo) -> bool:
-    """Only bot-owned same-repo PR branches are safe to amend directly."""
+# trace:v1 id=impl.tasks-can-handle-pr-directly work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _can_handle_pr_directly(
+    *,
+    settings: Settings,
+    repo_full: str,
+    pr: PullRequestInfo,
+    maintainer_directed: bool = False,
+) -> bool:
+    """Whether this PR's own branch may be checked out and pushed to.
+
+    Same-repo only, always: a branch outside this repository is someone else's
+    to push, and that check comes first. Within the repo, the bot's own PRs are
+    always fair game, and so is a PR a maintainer explicitly directed it to work
+    on — the branch belongs to the repo the maintainer controls, and refusing
+    that case silently discarded their request (`staminatimer#100`: six mentions,
+    each answered with `pr_conversation_unowned_pr`).
+    """
     if not pr.head_ref:
         log.info("skip: PR has no head ref", extra={"repo": repo_full, "pr": pr.number})
-        return False
-    if pr.author.lower() != settings.bot_login.lower():
-        log.info(
-            "skip: unmapped PR not authored by bot",
-            extra={"repo": repo_full, "pr": pr.number, "author": pr.author},
-        )
         return False
     if pr.head_repo.lower() != repo_full.lower():
         log.info(
@@ -284,7 +293,13 @@ def _can_handle_pr_directly(*, settings: Settings, repo_full: str, pr: PullReque
             extra={"repo": repo_full, "pr": pr.number, "head_repo": pr.head_repo},
         )
         return False
-    return True
+    if pr.author.lower() == settings.bot_login.lower() or maintainer_directed:
+        return True
+    log.info(
+        "skip: unmapped PR not authored by bot and no maintainer directive",
+        extra={"repo": repo_full, "pr": pr.number, "author": pr.author},
+    )
+    return False
 
 
 _BLOCKING_RELEASE_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure", "action_required"})
@@ -973,6 +988,7 @@ async def handle_pr_conversation(
     if not repo_full or not isinstance(pr_number, int):
         _record_skip(db, delivery_id, "pr_conversation_missing_repo_number")
         return
+    directive = _directive_from_payload(payload)
     issue_row, pr_info = await _resolve_issue_row_for_pr(
         db=db,
         github=github,
@@ -980,10 +996,12 @@ async def handle_pr_conversation(
         pr_number=pr_number,
     )
     if issue_row is None:
-        if pr_info is None or not _can_handle_pr_directly(settings=settings, repo_full=repo_full, pr=pr_info):
+        maintainer_directed = directive is not None and directive.authorizes_impl
+        if pr_info is None or not _can_handle_pr_directly(
+            settings=settings, repo_full=repo_full, pr=pr_info, maintainer_directed=maintainer_directed
+        ):
             _record_skip(db, delivery_id, "pr_conversation_unowned_pr")
             return
-    directive = _directive_from_payload(payload)
     # A reviewed PR stays addressable: the review worktree is read-only
     # (review_mode), so a follow-up mention can reply but never push. Dropping
     # these outright left the author's replies unanswered (#64).
@@ -1049,21 +1067,6 @@ async def handle_pr_conversation(
     # at the *current* head so a re-review is not answered from a stale
     # checkout. Owned branches are left untouched (local commits must survive).
     review_workspace = bool(existing_branch and existing_branch.startswith("review/pr-"))
-    # A maintainer directive that authorizes implementation has to be able to
-    # deliver. In a review worktree `gh_push_branch` refuses by design, so the
-    # agent can only answer "maintainer must push" — `alert3d#1` did exactly
-    # that across three sweeps while its author asked for the fixes and a PR.
-    # Drop the review worktree and let the run own a writable branch instead.
-    if review_workspace and directive is not None and directive.authorizes_impl and issue_row is not None:
-        log.info(
-            "implementation directive on a review worktree; rebranching",
-            extra={"key": issue_row.key, "pr": pr_number, "author": directive.author},
-        )
-        await _run_workspace_op(sandbox.remove_workspace, repo=issue_row.repo, number=issue_row.number)
-        db.upsert_issue(key=issue_row.key, repo=issue_row.repo, number=issue_row.number, state="reproducing")
-        issue_row = db.get_issue(issue_row.key) or issue_row
-        existing_branch = None
-        review_workspace = False
     workspace = await _run_workspace_op(
         sandbox.ensure_workspace,
         repo=repo.full_name,
@@ -1077,6 +1080,25 @@ async def handle_pr_conversation(
         author_email=settings.git_author_email,
         slot_uid=slot_uid,
     )
+    # A maintainer directive that authorizes implementation has to be able to
+    # deliver. A review worktree is detached at the PR head and read-only by
+    # design, so the agent could only ever answer "maintainer must push" —
+    # `alert3d#1` did exactly that, three times, while its author asked for the
+    # fixes and a PR. Adopt that same checkout onto a branch the run owns: the
+    # code under review is exactly what the fixes apply to, so nothing is
+    # re-cloned, and the push gates judge the commits this run publishes rather
+    # than the PR's existing history.
+    if review_workspace and directive is not None and directive.authorizes_impl and issue_row is not None:
+        log.info(
+            "implementation directive on a review worktree; adopting it",
+            extra={"key": issue_row.key, "pr": pr_number, "author": directive.author},
+        )
+        workspace = await _run_workspace_op(
+            sandbox.adopt_review_workspace,
+            workspace=workspace,
+            title=issue.title,
+            slot_uid=slot_uid,
+        )
     if issue_row is None:
         db.upsert_issue(
             key=issue_key(repo_full, pr_number),

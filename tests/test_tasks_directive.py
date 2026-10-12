@@ -563,9 +563,10 @@ async def test_implementation_directive_on_a_reviewed_pr_gets_a_writable_branch(
 
     Review worktrees are detached at the PR head and `gh_push_branch` refuses by
     design, so an implementation request could only ever be answered with
-    "maintainer must push" — `alert3d#1` did exactly that across three sweeps.
-    An implementation-authorized directive drops the review worktree and gives
-    the run a branch it owns.
+    "maintainer must push" — `alert3d#1` did exactly that, three times. An
+    implementation-authorized directive adopts that same checkout onto a branch
+    the run owns: the reviewed code is what the fixes apply to, so it is kept
+    rather than re-cloned.
     """
     review = SimpleNamespace(
         root=tmp_path,
@@ -593,7 +594,7 @@ async def test_implementation_directive_on_a_reviewed_pr_gets_a_writable_branch(
         pr_number=7,
     )
     ensured: dict[str, object] = {}
-    removed: list[tuple[str, int]] = []
+    adopted: list[object] = []
     called: dict[str, object] = {}
 
     class FakeGitHub:
@@ -614,10 +615,11 @@ async def test_implementation_directive_on_a_reviewed_pr_gets_a_writable_branch(
 
     def fake_ensure(**kwargs: object) -> object:
         ensured.update(kwargs)
-        return owned
+        return review
 
-    def fake_remove(*, repo: str, number: int) -> None:
-        removed.append((repo, number))
+    def fake_adopt(*, workspace: object, **_kwargs: object) -> object:
+        adopted.append(workspace)
+        return owned
 
     async def fake_attach_thread(_github, directive, repo, number, *, is_pr):
         return directive
@@ -638,16 +640,16 @@ async def test_implementation_directive_on_a_reviewed_pr_gets_a_writable_branch(
         settings=settings,
         db=db,
         github=FakeGitHub(),
-        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=fake_ensure, remove_workspace=fake_remove),
+        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=fake_ensure, adopt_review_workspace=fake_adopt),
         git_transport=SimpleNamespace(),
         payload=payload,
         delivery_id="d-pr-impl",
     )
 
-    # The read-only worktree was torn down and replaced by an owned branch.
-    assert removed == [("octo/widget", 42)]
-    assert ensured["pr_head"] is None
-    assert ensured["existing_branch"] is None
+    # The review checkout was mounted, then adopted in place — the code under
+    # review is exactly what the fixes apply to, so it is never re-cloned.
+    assert ensured["pr_head"] == 7
+    assert adopted == [review]
     row = db.get_issue("octo/widget#42")
     assert row is not None and row.branch == "carter-omp/deadbeef/apply-review-findings"
     assert called == {"task_kind": "handle_comment", "pr_number": 7}
@@ -743,3 +745,153 @@ async def test_review_pr_leaves_the_reviewing_state(db, settings, monkeypatch: p
     row = db.get_issue("octo/widget#7")
     assert row is not None
     assert row.state == "opened"
+
+
+async def test_maintainer_directive_on_an_unowned_same_repo_pr_is_handled(
+    db, tmp_path, settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A maintainer's mention on their own PR must not be thrown away.
+
+    `staminatimer#100` is authored by the maintainer, not by the bot, so the
+    unmapped-PR guard discarded six mentions in a row (`pr_conversation_unowned_pr`)
+    while the maintainer kept asking for the work to continue. The branch lives
+    in the repo the maintainer controls and the directive authorizes
+    implementation, so the run is allowed to work on it.
+    """
+    from carter_omp.github_client import PullRequestInfo
+
+    workspace = SimpleNamespace(
+        root=tmp_path,
+        repo_dir=tmp_path / "repo",
+        session_dir=tmp_path / "session",
+        branch="feat/cinematic-redesign",
+    )
+    workspace.repo_dir.mkdir(exist_ok=True)
+    workspace.session_dir.mkdir(exist_ok=True)
+    ensured: dict[str, object] = {}
+    called: dict[str, object] = {}
+
+    pr_info = PullRequestInfo(
+        repo="octo/widget",
+        number=100,
+        html_url="https://x/octo/widget/pull/100",
+        head_ref="feat/cinematic-redesign",
+        base_ref="main",
+        state="open",
+        author="carterlasalle",
+        head_repo="octo/widget",
+    )
+
+    async def unmapped(**_kwargs: object):
+        return None, pr_info
+
+    class FakeGitHub:
+        async def get_repo(self, repo: str) -> RepoInfo:
+            return RepoInfo(full_name=repo, default_branch="main", clone_url="https://x/octo/widget.git", private=False)
+
+        async def get_issue(self, repo: str, number: int) -> IssueInfo:
+            return IssueInfo(
+                repo=repo,
+                number=number,
+                title="compose cinematic training world",
+                body="",
+                state="open",
+                author="carterlasalle",
+                labels=(),
+                is_pull_request=True,
+            )
+
+    def fake_ensure(**kwargs: object) -> object:
+        ensured.update(kwargs)
+        return workspace
+
+    async def fake_run_task(*, task_kind: str, inputs, **kwargs: object) -> None:
+        del inputs
+        called["task_kind"] = task_kind
+        called["pr_number"] = kwargs.get("pr_number")
+
+    async def fake_attach_thread(_github, directive, repo, number, *, is_pr):
+        return directive
+
+    monkeypatch.setattr(tasks, "_resolve_issue_row_for_pr", unmapped)
+    monkeypatch.setattr(tasks, "_attach_thread", fake_attach_thread)
+    monkeypatch.setattr(tasks, "run_task", fake_run_task)
+
+    payload = _payload_with_directive(issue_number=100, body="@carter-omp finish and continue and pr")
+    issue_payload = payload["issue"]
+    assert isinstance(issue_payload, dict)
+    issue_payload["pull_request"] = {"url": "https://api.github.com/repos/octo/widget/pulls/100"}
+    await tasks.handle_pr_conversation(
+        settings=settings,
+        db=db,
+        github=FakeGitHub(),
+        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=fake_ensure),
+        git_transport=SimpleNamespace(),
+        payload=payload,
+        delivery_id="d-pr-maintainer",
+    )
+
+    # Handled on the PR's own branch rather than discarded: the run dispatches
+    # and no skip is recorded (the companion test covers the skip side).
+    assert ensured["existing_branch"] == "feat/cinematic-redesign"
+    assert called == {"task_kind": "handle_comment", "pr_number": 100}
+    assert db.get_event("d-pr-maintainer") is None
+
+
+async def test_unmapped_same_repo_pr_without_a_maintainer_directive_is_still_skipped(
+    db, tmp_path, settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The relaxation is the directive, not the repo: a stranger's PR stays out.
+
+    A bare comment (no mention, no authorization) on a PR the bot does not own
+    must still be dropped — otherwise any third-party PR in an allowlisted
+    owner's repo becomes writable by the bot.
+    """
+    from carter_omp.github_client import PullRequestInfo
+
+    pr_info = PullRequestInfo(
+        repo="octo/widget",
+        number=200,
+        html_url="https://x/octo/widget/pull/200",
+        head_ref="someone/topic",
+        base_ref="main",
+        state="open",
+        author="someone",
+        head_repo="octo/widget",
+    )
+
+    async def unmapped(**_kwargs: object):
+        return None, pr_info
+
+    monkeypatch.setattr(tasks, "_resolve_issue_row_for_pr", unmapped)
+    db.record_event(
+        delivery_id="d-pr-stranger",
+        event_type="issue_comment",
+        repo="octo/widget",
+        issue_key=None,
+        payload={"action": "created"},
+    )
+    payload: dict[str, object] = {
+        "repository": {"full_name": "octo/widget", "default_branch": "main"},
+        "issue": {"number": 200, "title": "x", "body": "", "state": "open", "user": {"login": "someone"}, "labels": []},
+        "comment": {
+            "id": 1,
+            "body": "looks good to me",
+            "created_at": "2026-01-01T00:00:00Z",
+            "user": {"login": "someone"},
+        },
+    }
+    await tasks.handle_pr_conversation(
+        settings=settings,
+        db=db,
+        github=SimpleNamespace(),
+        sandbox=SimpleNamespace(natives_cache=None),
+        git_transport=SimpleNamespace(),
+        payload=payload,
+        delivery_id="d-pr-stranger",
+    )
+
+    row = db.get_event("d-pr-stranger")
+    assert row is not None
+    assert row.state == "skipped"
+    assert row.last_error == "pr_conversation_unowned_pr"

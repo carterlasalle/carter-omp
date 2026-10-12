@@ -211,7 +211,7 @@ def install_coauthor_hook(pool: Path, coauthor: str) -> bool:
 
 
 # trace:v1 id=impl.sandbox-make-branch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-def make_branch(*, issue_number: int, title: str, seed: str | None = None) -> str:
+def make_branch(*, issue_number: int | str, title: str, seed: str | None = None) -> str:
     return f"carter-omp/{_short_hex(seed or f'{issue_number}-{title}')}/{_slug(title or f'issue-{issue_number}')}"
 
 
@@ -1223,6 +1223,53 @@ class SandboxManager:
             # the agent rebuilds, so the cached file is never mutated.
             self._populate_natives_cache(workspace, slot_uid=slot_uid)
             return workspace
+
+    # trace:v1 id=impl.sandbox-adopt-review-workspace work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def adopt_review_workspace(
+        self,
+        *,
+        workspace: Workspace,
+        title: str,
+        slot_uid: int | None = None,
+    ) -> Workspace:
+        """Give a read-only review worktree an owned, pushable branch at its HEAD.
+
+        A review worktree is detached at the PR head so a review can never write
+        to the PR. An implementation-authorized follow-up directive still has to
+        deliver, and the checkout it needs is exactly this one — the reviewed
+        code — so nothing is re-cloned: only the detached HEAD becomes a branch
+        the run owns. `-B` (create-or-reset) keeps a second adoption idempotent;
+        the name is derived from repo+issue, so it can only ever point here.
+        """
+        repo_dir = workspace.repo_dir
+        branch = make_branch(
+            issue_number=workspace.issue_number,
+            title=title,
+            seed=f"{workspace.repo_full_name}#{workspace.issue_number}",
+        )
+        command = ["git", "switch", "-B", branch]
+        proc = _safe_run(
+            command,
+            cwd=repo_dir,
+            env=_git_env_for_repo(repo_dir),
+            **_slot_subprocess_kwargs(slot_uid),
+        )
+        if proc.returncode != 0:
+            raise GitCommandError(command, proc.returncode, proc.stdout, proc.stderr)
+        log.info(
+            "adopted review worktree as an owned branch",
+            extra={"key": workspace.workspace_key, "branch": branch},
+        )
+        return Workspace(
+            root=workspace.root,
+            repo_dir=repo_dir,
+            session_dir=workspace.session_dir,
+            context_dir=workspace.context_dir,
+            artifacts_dir=workspace.artifacts_dir,
+            branch=branch,
+            repo_full_name=workspace.repo_full_name,
+            issue_number=workspace.issue_number,
+        )
 
     # trace:exempt reason=internal-detail
     def ensure_release_workspace(

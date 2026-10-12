@@ -2766,9 +2766,11 @@ def test_gh_push_branch_rejects_invalid_identity_scan_range(db: Database, tmp_pa
         tool = next(x for x in build(bindings) if x.name == "gh_push_branch")
         with pytest.raises(RpcCommandError) as exc:
             tool.execute({}, _ctx())
+        # A failed author scan is a refusal, not a silently empty scan: the
+        # message names the refusal and git's own error, and nothing is pushed.
         msg = str(exc.value)
-        assert "could not inspect commit authors" in msg
-        assert "origin/main..HEAD" in msg
+        assert msg.startswith("refusing to push:")
+        assert "could not inspect" in msg
         refs = subprocess.run(
             ["git", "-C", str(bare), "for-each-ref", "--format=%(refname)"],
             capture_output=True,
@@ -2779,8 +2781,11 @@ def test_gh_push_branch_rejects_invalid_identity_scan_range(db: Database, tmp_pa
         row = db._conn.execute(
             "SELECT error FROM tool_calls WHERE tool='gh_push_branch' ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        assert row is not None and "could not inspect commit authors" in row["error"]
-        assert "origin/main..HEAD" in row["error"]
+        # The audit row carries the same refusal, so the failure is inspectable
+        # after the fact instead of only in the run's output.
+        assert row is not None
+        assert row["error"].startswith("refusing to push:")
+        assert "could not inspect" in row["error"]
     finally:
         _stop_loop(loop, thread)
 
@@ -5298,3 +5303,59 @@ def test_push_gate_adds_the_coauthor_trailer_hooks_cannot(db: Database, tmp_path
     assert "Co-authored-by: Someone Else <someone@example.com>" in message
     # Commits that are already on the base branch are not rewritten.
     assert "Co-authored-by" not in git("log", "-1", "--format=%B", "refs/remotes/origin/main")
+
+
+def test_push_gate_leaves_published_foreign_history_alone(db: Database, tmp_path: Path, settings: Settings) -> None:
+    """Only the commits this push publishes are rewritten.
+
+    A branch starting at a PR head someone else authored carries that author's
+    commits inside `origin/<base>..HEAD` — `alert3d#1`'s review branch sits on a
+    `cursor/…` head. Rewriting those commits (adding our trailer to them) would
+    alter work the bot did not write, so the range excludes anything already
+    reachable from a remote; the run's own commits are still normalized.
+    """
+    bindings, loop, thread = _bindings(db, tmp_path, httpx.MockTransport(lambda _r: httpx.Response(500)))
+    settings.git_coauthor = "Someone Else <someone@example.com>"
+    object.__setattr__(bindings, "settings", settings)
+    repo = bindings.workspace.repo_dir
+
+    def git(*args: str) -> str:
+        done = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True)
+        return done.stdout
+
+    try:
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "bot@example.com")
+        git("config", "user.name", "bot")
+        (repo / "a.txt").write_text("a")
+        git("add", "-A")
+        git("commit", "-q", "-m", "chore: base")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+        # A foreign commit, already published on its own remote branch.
+        git("config", "user.email", "cursor@example.com")
+        git("config", "user.name", "cursor")
+        (repo / "b.txt").write_text("b")
+        git("add", "-A")
+        git("commit", "-q", "-m", "feat: foreign work")
+        git("update-ref", "refs/remotes/origin/topic", "HEAD")
+        foreign_sha = git("rev-parse", "HEAD").strip()
+
+        # The run's own unpublished commit.
+        git("config", "user.email", "bot@example.com")
+        git("config", "user.name", "bot")
+        (repo / "c.txt").write_text("c")
+        git("add", "-A")
+        git("commit", "-q", "-m", "fix: mine, no trailer")
+
+        host_tools._normalize_unpushed_messages(bindings, {}, tool_name="gh_push_branch")
+    finally:
+        _stop_loop(loop, thread)
+
+    assert "Co-authored-by: Someone Else <someone@example.com>" in git("log", "-1", "--format=%B")
+    # The published commit is still the parent of HEAD: untouched, not rewritten
+    # into a new SHA carrying our trailer.
+    assert git("rev-parse", "HEAD~1").strip() == foreign_sha
+    parent_message = git("log", "-1", "--format=%B", "HEAD~1")
+    assert "feat: foreign work" in parent_message
+    assert "Co-authored-by" not in parent_message
