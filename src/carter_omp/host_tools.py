@@ -47,6 +47,7 @@ from carter_omp.sandbox import (
     _slot_subprocess_kwargs,
     rename_workspace_branch,
     validate_branch_slug,
+    with_coauthor_trailer,
     workspace_key,
 )
 
@@ -1114,6 +1115,14 @@ def _repair_message_escapes(message: str) -> str | None:
     return "`".join(parts) if changed else None
 
 
+# trace:v1 id=impl.host-tools-configured-coauthor work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _configured_coauthor(bindings: ToolBindings) -> str:
+    """The deployment's configured co-author, or ``""`` when unset."""
+    settings = bindings.settings
+    return settings.git_coauthor if settings is not None else ""
+
+
+# trace:v1 id=impl.host-tools-repair-commit-message-escapes work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _repair_commit_message_escapes(bindings: ToolBindings, args: Mapping[str, Any], *, tool_name: str) -> None:
     """Rewrite unpushed commits whose messages carry literal ``\\n`` escapes.
 
@@ -1158,7 +1167,10 @@ def _repair_commit_message_escapes(bindings: ToolBindings, args: Mapping[str, An
         if fixed is not None:
             message = fixed
             repaired.append(sha)
-        messages[sha] = message
+        # `git commit-tree` below does not run the `commit-msg` hook, so the
+        # messages this path rebuilds opt into the same trailer every other
+        # commit gets (no-op when the deployment configures no co-author).
+        messages[sha] = with_coauthor_trailer(message, _configured_coauthor(bindings))
     if not repaired:
         return
 

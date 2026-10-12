@@ -152,6 +152,29 @@ def _git_env_for_repo(repo_dir: Path, *extra_safe: Path) -> dict[str, str]:
     return env
 
 
+# trace:v1 id=impl.sandbox-with-coauthor-trailer work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def with_coauthor_trailer(message: str, coauthor: str) -> str:
+    """Append the ``Co-authored-by:`` trailer unless the message already has it.
+
+    The `commit-msg` hook covers ordinary commits, but Git paths that rewrite
+    history without running hooks (`git commit-tree`, used when repairing
+    literal ``\\n`` escapes before a push) build the message themselves, so they
+    call this to keep the same invariant. Returns the message unchanged when the
+    deployment configures no co-author.
+    """
+    trailer = coauthor_trailer_line(coauthor)
+    if not trailer or trailer in message:
+        return message
+    return f"{message.rstrip()}\n\n{trailer}"
+
+
+# trace:v1 id=impl.sandbox-coauthor-trailer-line work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def coauthor_trailer_line(coauthor: str) -> str:
+    """The trailer line for ``coauthor``, or ``""`` when none is configured."""
+    who = coauthor.strip()
+    return f"Co-authored-by: {who}" if who else ""
+
+
 # trace:v1 id=impl.sandbox-install-coauthor-hook work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def install_coauthor_hook(pool: Path, coauthor: str) -> bool:
     """Credit ``coauthor`` on every commit made in this clone's worktrees.

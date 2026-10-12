@@ -43,6 +43,7 @@ from carter_omp.sandbox import (
     install_coauthor_hook,
     make_branch,
     rename_workspace_branch,
+    with_coauthor_trailer,
     workspace_key,
 )
 
@@ -2693,3 +2694,19 @@ def test_coauthor_hook_is_a_noop_when_disabled(tmp_path: Path) -> None:
 
     assert install_coauthor_hook(repo, "") is False
     assert not (repo / ".git" / "hooks" / "commit-msg").exists()
+
+
+def test_with_coauthor_trailer_is_idempotent_and_optional() -> None:
+    """History rewrites that bypass hooks still credit the co-author once."""
+    who = "Carter Lasalle <carterlasalle@gmail.com>"
+
+    once = with_coauthor_trailer("fix: thing\n\nFixes #1\n", who)
+    assert once.rstrip().endswith(f"Co-authored-by: {who}")
+    assert "\n\nCo-authored-by:" in once
+
+    # A message that already carries it is returned unchanged, so repeated
+    # repairs (or a hook that already ran) never stack trailers.
+    assert with_coauthor_trailer(once, who) == once
+
+    # No co-author configured: the message passes through untouched.
+    assert with_coauthor_trailer("fix: thing\n", "") == "fix: thing\n"

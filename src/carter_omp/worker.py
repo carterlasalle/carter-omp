@@ -1003,6 +1003,7 @@ def _run_rpc_blocking(
             issue=inputs.issue,
             workspace=inputs.workspace,
             bot_login=inputs.settings.bot_login,
+            coauthor=inputs.settings.git_coauthor,
         )
 
     # Telemetry for the GitHub message footer: which model ran, how long it has

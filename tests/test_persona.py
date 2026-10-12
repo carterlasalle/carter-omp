@@ -301,3 +301,32 @@ def test_system_prompts_prune_tracelayer() -> None:
     ):
         assert "TraceLayer (`trace`) is absent by design" in out
         assert "NEVER install, run, or wait on it" in out
+
+
+def test_system_append_renders_configured_coauthor_and_not_a_hardcoded_one() -> None:
+    """The trailer instruction comes from the deployment's config.
+
+    It used to be a literal address in the template, so an operator who changed
+    `CARTER_OMP_GIT_COAUTHOR` (or swapped author/co-author) got a prompt naming
+    an address the commit hook would not use — and a repo whose own
+    `core.hooksPath` replaces the hook had no other enforcement.
+    """
+    configured = persona.system_append(
+        repo=_Repo(),
+        issue=_Issue(),
+        workspace=_Workspace(),
+        bot_login="carter-omp",
+        coauthor="Someone Else <someone@example.com>",
+    )
+    assert "Co-authored-by: Someone Else <someone@example.com>" in configured
+    assert "carterlasalle@gmail.com" not in configured
+
+    disabled = persona.system_append(
+        repo=_Repo(),
+        issue=_Issue(),
+        workspace=_Workspace(),
+        bot_login="carter-omp",
+        coauthor="",
+    )
+    assert "do not add a `Co-authored-by:` trailer" in disabled
+    assert "carterlasalle@gmail.com" not in disabled

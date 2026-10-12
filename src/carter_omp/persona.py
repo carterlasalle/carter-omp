@@ -131,10 +131,44 @@ def classify_next_step(primary: str) -> str:
     )
 
 
-def system_append(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace, bot_login: str) -> str:
+# trace:v1 id=impl.persona-coauthor-rule work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+def coauthor_rule(coauthor: str) -> str:
+    """Instruction for the commit co-author trailer, from the configured value.
+
+    `CARTER_OMP_GIT_COAUTHOR` is the single source of truth: the same value is
+    installed as the clone's `commit-msg` hook (a repo whose own
+    `core.hooksPath` replaces that hook has no other enforcement) and rendered
+    into this prompt. Hardcoding the address here made the two disagree as soon
+    as an operator changed the setting.
+    """
+    who: str = coauthor.strip()
+    if not who:
+        return "This deployment configures no co-author: do not add a `Co-authored-by:` trailer."
+    return (
+        f"Every commit also carries a `Co-authored-by: {who}` trailer; the sandbox's "
+        "`commit-msg` hook appends it, so never strip it — and write it yourself when a "
+        "repo's own `core.hooksPath` replaces that hook."
+    )
+
+
+# trace:v1 id=impl.persona-system-append work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+def system_append(
+    *,
+    repo: RepoInfo,
+    issue: IssueInfo,
+    workspace: Workspace,
+    bot_login: str,
+    coauthor: str = "",
+) -> str:
     return render(
         _load("system_append.md"),
-        {"repo": repo, "issue": issue, "workspace": workspace, "bot_login": bot_login},
+        {
+            "repo": repo,
+            "issue": issue,
+            "workspace": workspace,
+            "bot_login": bot_login,
+            "coauthor_rule": coauthor_rule(coauthor),
+        },
     )
 
 
