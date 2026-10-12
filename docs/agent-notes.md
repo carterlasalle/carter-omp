@@ -78,6 +78,20 @@ Durable operational knowledge. Read this before touching Docker, CI, or trace co
   check dedupe needs a local record (we use `self_reports` keyed by
   `sha256(title)`) or it will file duplicates; search is laggier still.
 
+## Eval tool bridge
+<!-- trace:v1 id=doc.agent-notes-eval-bridge work=WORK-CO-Q8Z1HJJJ -->
+
+- `await tool.<name>(args)` in a JS eval cell must be given plain JSON values.
+  The cell worker serializes every call over its host IPC channel, so any
+  non-cloneable argument (a `Bun.file(...)` handle, an un-awaited handle
+  promise, an `AbortSignal`, a function, …) rejects with
+  `DOMException: "The object can not be cloned."` before the tool runs — and
+  the rendered cell output keeps only the stack frames, dropping the message
+  (carter-omp#42). `await` file reads to a string (`read('local://…')`,
+  `Bun.file(p).text()`) and unwrap bridged results (`(await
+  tool.read(...)).text`) before passing them on. This is the pinned OMP
+  binary's bridge, not host-tool code, so it cannot be fixed from carter-omp.
+
 ## Analyzers
 <!-- trace:v1 id=doc.agent-notes-analyzers work=WORK-CO-Q8Z1HJJJ -->
 
