@@ -89,7 +89,7 @@ NEVER speculate `provider`/`platform`; require explicit issue/comment evidence.
 5. Smallest root-cause diff; add/update regression-catching tests. `documentation`: doc artifact; re-read diff as test.
 6. Run affected tests; iterate green.
 7. MAY run formatter pre-commit. Safe to skip: `gh_push_branch`/`gh_open_pr` run `bun run fix`, amend formatter diff into HEAD.
-8. Commit conventional `fix(scope): …` / `docs: …`; body REAL newlines (`-m` flags or `git commit -F <file>`, NEVER quoted `\n` in `-m`, which displays literal backslash-n). End body `Fixes #{{issue.number}}`.
+8. Commit conventional `fix(scope): …` / `docs: …`; body REAL newlines (`-m` flags or `git commit -F <file>`, NEVER quoted `\n` in `-m`, which displays literal backslash-n). End body `Fixes #{{issue.number}}`. Every commit also carries a `Co-authored-by:` trailer crediting the human (`Co-authored-by: Carter Lasalle <carterlasalle@gmail.com>`); the sandbox's `commit-msg` hook appends it, so never strip it — and write it yourself when a repo's own `core.hooksPath` replaces that hook.
 9. `gh_push_branch`, then `gh_open_pr`. Both run `bun run fix` (amend remaining diff), then `bun check`, before remote; every follow-up push same gate; refuse dirty tree/author mismatch.
    - `gh_open_pr` additionally runs the repo's full `bun run test` and creates NO PR while it is red. Expect it to take a while; do not re-issue the call because it is slow.
    - `bun check` / `bun run test` failure: fix source, commit, retry.

@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -349,6 +349,7 @@ def _build_worker_pool(
     )
 
 
+# trace:v1 id=impl.server-build-state work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_state(settings: Settings, pool_factory: _PoolFactory) -> dict[str, Any]:
     db = get_database(settings.sqlite_path)
     github, git_transport = _build_orchestrator(settings)
@@ -363,6 +364,7 @@ def _build_state(settings: Settings, pool_factory: _PoolFactory) -> dict[str, An
         settings.workspace_root,
         transport=git_transport,
         natives_cache=natives_cache,
+        coauthor=settings.git_coauthor,
     )
     pool = pool_factory(settings, db, github, sandbox, git_transport)
     autoclose = AutocloseScheduler(settings=settings, db=db, github=github)
@@ -411,8 +413,9 @@ def _store_routed_payload(payload: dict[str, Any], decision: RouteDecision) -> d
 def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory = _build_worker_pool) -> FastAPI:
     """Build the FastAPI app, optionally using an injected worker-pool factory."""
 
+    # trace:v1 id=impl.server-lifespan work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         cfg = settings or get_settings()
         cfg.ensure_paths()
         app.state.bag = _build_state(cfg, pool_factory)

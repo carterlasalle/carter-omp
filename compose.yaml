@@ -59,6 +59,7 @@ services:
       CARTER_OMP_GITHUB_INSTALLATION_ID: ${CARTER_OMP_GITHUB_INSTALLATION_ID:-}
       CARTER_OMP_GIT_AUTHOR_NAME: ${CARTER_OMP_GIT_AUTHOR_NAME:-}
       CARTER_OMP_GIT_AUTHOR_EMAIL: ${CARTER_OMP_GIT_AUTHOR_EMAIL:-}
+      CARTER_OMP_GIT_COAUTHOR: "${CARTER_OMP_GIT_COAUTHOR:-Carter Lasalle <carterlasalle@gmail.com>}"
       CARTER_OMP_REPO_ALLOWLIST: ${CARTER_OMP_REPO_ALLOWLIST:-}
 
       # --- trigger policy (explicit invocation; strict by default) ---

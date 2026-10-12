@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     bot_login: str = Field(..., alias="CARTER_OMP_BOT_LOGIN")
     git_author_name: str | None = Field(None, alias="CARTER_OMP_GIT_AUTHOR_NAME")
     git_author_email: str = Field("carter-omp[bot]@users.noreply.github.com", alias="CARTER_OMP_GIT_AUTHOR_EMAIL")
+    # Trailer every commit the bot makes carries, so the human who asked for the
+    # work is credited as a GitHub co-author. Installed as a `commit-msg` hook in
+    # the shared clone (covers every worktree); the system prompt carries the
+    # same instruction for repos whose own `core.hooksPath` replaces our hook.
+    # Empty disables both.
+    git_coauthor: str = Field("Carter Lasalle <carterlasalle@gmail.com>", alias="CARTER_OMP_GIT_COAUTHOR")
     repo_allowlist_raw: str = Field("", alias="CARTER_OMP_REPO_ALLOWLIST")
     pr_review_enabled: bool = Field(True, alias="CARTER_OMP_PR_REVIEW_ENABLED")
 

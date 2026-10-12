@@ -13,6 +13,16 @@ versions are `Unreleased` until the first tagged release.
 
 ### Added
 
+- **Every commit the bot makes credits the human as a co-author.** A
+  `commit-msg` hook in the shared clone appends
+  `Co-authored-by: Carter Lasalle <carterlasalle@gmail.com>` to any commit that
+  does not already carry it, so GitHub shows them as a co-author on the PR. The
+  hook is idempotent and never fails a commit, and covers every worktree of a
+  repo (hooks live in the pool's shared git dir). A repo whose own
+  `core.hooksPath` (husky, lefthook) replaces our hook is covered by the same
+  instruction in the system prompt instead. Configure with
+  `CARTER_OMP_GIT_COAUTHOR`; empty disables both.
+
 - `report_pain_point`: any authorized run can now file the friction it hits in
   *the harness itself* — a host tool rejecting a valid call, an error message
   pointing at the wrong cause, a gate blocking work for the wrong reason, a run

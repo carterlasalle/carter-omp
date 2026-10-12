@@ -40,6 +40,7 @@ from carter_omp.sandbox import (
     _share_git_metadata_with_slots,
     _slot_pids,
     _slot_subprocess_kwargs,
+    install_coauthor_hook,
     make_branch,
     rename_workspace_branch,
     workspace_key,
@@ -2641,3 +2642,46 @@ def _head(repo_dir: Path) -> str:
     return subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=str(repo_dir), check=True, capture_output=True, text=True
     ).stdout.strip()
+
+
+def _commit_message(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "log", "-1", "--pretty=%B"], cwd=str(repo), capture_output=True, text=True, check=True
+    ).stdout
+
+
+def test_coauthor_hook_credits_every_commit_once(tmp_path: Path) -> None:
+    """Commits made in the clone's worktrees carry the co-author trailer.
+
+    The agent composes its own messages, so this is enforced by a `commit-msg`
+    hook rather than asked for. The trailer must appear exactly once: the hook
+    runs again on amend and on every later commit.
+    """
+    repo = tmp_path / "pool"
+    repo.mkdir()
+    _git(["init", "-q", "."], repo)
+    identity = ["-c", "user.email=b@example.com", "-c", "user.name=Bot"]
+
+    assert install_coauthor_hook(repo, "Carter Lasalle <carterlasalle@gmail.com>") is True
+    assert install_coauthor_hook(repo, "Carter Lasalle <carterlasalle@gmail.com>") is False  # idempotent
+
+    (repo / "a.txt").write_text("a")
+    _git(["add", "-A"], repo)
+    _git([*identity, "commit", "-q", "-m", "fix: first"], repo)
+    first = _commit_message(repo)
+    assert first.rstrip().endswith("Co-authored-by: Carter Lasalle <carterlasalle@gmail.com>")
+
+    (repo / "b.txt").write_text("b")
+    _git(["add", "-A"], repo)
+    _git([*identity, "commit", "-q", "-m", "fix: second"], repo)
+    assert _commit_message(repo).count("Co-authored-by:") == 1
+
+
+def test_coauthor_hook_is_a_noop_when_disabled(tmp_path: Path) -> None:
+    """An empty co-author disables the hook instead of writing a broken one."""
+    repo = tmp_path / "pool"
+    repo.mkdir()
+    _git(["init", "-q", "."], repo)
+
+    assert install_coauthor_hook(repo, "") is False
+    assert not (repo / ".git" / "hooks" / "commit-msg").exists()

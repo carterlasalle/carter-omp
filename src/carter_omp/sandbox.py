@@ -152,6 +152,41 @@ def _git_env_for_repo(repo_dir: Path, *extra_safe: Path) -> dict[str, str]:
     return env
 
 
+# trace:v1 id=impl.sandbox-install-coauthor-hook work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def install_coauthor_hook(pool: Path, coauthor: str) -> bool:
+    """Credit ``coauthor`` on every commit made in this clone's worktrees.
+
+    The agent composes its own commit messages, so the trailer is enforced rather
+    than requested: a `commit-msg` hook in the shared clone's git dir runs for
+    every linked worktree, which is why it lands next to the pool. The hook is
+    idempotent (it appends only when the trailer is absent) and never fails a
+    commit. A repo that sets its own `core.hooksPath` (husky, lefthook) keeps its
+    own hooks — those runs rely on the system prompt's trailer instruction — so
+    this never replaces a hook a repo depends on. Returns whether it wrote.
+    """
+    coauthor = coauthor.strip()
+    if not coauthor:
+        return False
+    hooks = pool / ".git" / "hooks"
+    if not hooks.is_dir():
+        return False
+    script = (
+        "#!/bin/sh\n"
+        "# Installed by carter-omp: keep the co-author trailer on every commit.\n"
+        'msg="$1"\n'
+        f'trailer="Co-authored-by: {coauthor}"\n'
+        'grep -qF "$trailer" "$msg" && exit 0\n'
+        'printf "\\n%s\\n" "$trailer" >> "$msg"\n'
+        "exit 0\n"
+    )
+    path = hooks / "commit-msg"
+    if path.is_file() and path.read_text() == script:
+        return False
+    path.write_text(script)
+    path.chmod(0o755)
+    return True
+
+
 # trace:v1 id=impl.sandbox-make-branch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def make_branch(*, issue_number: int, title: str, seed: str | None = None) -> str:
     return f"carter-omp/{_short_hex(seed or f'{issue_number}-{title}')}/{_slug(title or f'issue-{issue_number}')}"
@@ -860,11 +895,13 @@ class SandboxManager:
         *,
         transport: GitTransport | None = None,
         natives_cache: NativesCache | None = None,
+        coauthor: str = "",
     ) -> None:
         self.root = root
         self.pool = root / "_pool"
         self.transport: GitTransport = transport or LocalGitTransport(token=None)
         self.natives_cache = natives_cache
+        self.coauthor = coauthor
         root.mkdir(parents=True, exist_ok=True)
         self.pool.mkdir(parents=True, exist_ok=True)
         self._repo_locks: dict[str, threading.RLock] = {}
@@ -903,6 +940,8 @@ class SandboxManager:
             self._reset_origin_url(target, clone_url)
             if refresh:
                 self.transport.fetch_pool(repo=repo, pool_dir=target)
+            # Refresh the hook here too: an existing pool predates it.
+            install_coauthor_hook(target, self.coauthor)
             return target
         target.mkdir(parents=True, exist_ok=True)
         self.transport.clone_pool(
@@ -911,6 +950,7 @@ class SandboxManager:
             default_branch=default_branch,
             target=target,
         )
+        install_coauthor_hook(target, self.coauthor)
         return target
 
     # trace:exempt reason=internal-detail
