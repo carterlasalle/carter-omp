@@ -44,9 +44,10 @@ while [ $# -gt 0 ]; do
 done
 
 # In-flight work, read from the orchestrator's own DB so this agrees with what
-# the dispatcher believes. Prints "<running>|<one line per event>".
+# the dispatcher believes. Prints "running=<n>" then one line per event; the
+# first line is machine-read, the rest are shown verbatim (never re-split).
 inflight() {
-  docker compose exec -T carter-omp python3 - <<'PY' 2>/dev/null || echo "0|"
+  docker compose exec -T carter-omp python3 - <<'PY' 2>/dev/null || echo "running=0"
 import os
 import sqlite3
 
@@ -58,24 +59,35 @@ try:
         "WHERE state IN ('queued', 'running') ORDER BY state DESC, rowid"
     ).fetchall()
 except Exception:
-    print("0|")
-    raise SystemExit(0)
+    rows = []
 
-running = [r for r in rows if r[2] == "running"]
-print(f"{len(running)}|" + "|".join(f"{key or delivery} ({state}, attempt {attempts})" for key, delivery, state, attempts in rows))
+print(f"running={sum(1 for row in rows if row[2] == 'running')}")
+for key, delivery, state, attempts in rows:
+    print(f"{key or delivery} ({state}, attempt {attempts})")
 PY
 }
 
-snapshot="$(inflight)"
-running="${snapshot%%|*}"
-detail="${snapshot#*|}"
+report_inflight() {
+  snapshot="$1"
+  running="$(printf '%s\n' "$snapshot" | sed -n 's/^running=//p' | head -1)"
+  [ -z "$running" ] && running=0
+  if [ "$running" = "0" ]; then
+    echo "no runs in flight"
+    return
+  fi
+  echo "$running run(s) in flight:"
+  printf '%s\n' "$snapshot" | sed '1d' | while IFS= read -r line; do
+    [ -n "$line" ] && printf '  %s\n' "$line"
+  done
+}
 
-if [ "${running:-0}" = "0" ]; then
-  echo "no runs in flight"
-else
-  echo "${running} run(s) in flight:"
-  printf '  %s\n' ${detail//|/ }
-fi
+count_running() {
+  printf '%s\n' "$1" | sed -n 's/^running=//p' | head -1
+}
+
+snapshot="$(inflight)"
+running="$(count_running "$snapshot")"
+report_inflight "$snapshot"
 
 if [ "$check_only" = "1" ]; then
   exit 0
