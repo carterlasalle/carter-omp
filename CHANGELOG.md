@@ -106,6 +106,15 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **Slot-side tool caches no longer target the read-only template home.**
+  `HOME` for a run is the staged agent home, owned `root:root` — deliberately
+  read-only — and tools that ignore `XDG_*` hard-code `$HOME`: `corepack` died
+  with `EACCES … mkdir '/srv/agent-home/.cache/node/corepack/v1'` and npm writes
+  `~/.npm` the same way. The slot env now sets `COREPACK_HOME` and
+  `NPM_CONFIG_CACHE` to workspace-private caches, alongside the existing
+  `XDG_*`/`BUN_INSTALL_CACHE_DIR` overlay, so a slot-uid run can resolve the
+  package-manager version a repo pins instead of failing on its first write.
+
 - **`corepack enable` can no longer fail a run.** Enabling corepack writes shims
   into `/usr/local/bin`, which is root-owned, so a run executing as its slot uid
   got `EACCES: permission denied, symlink '…/pnpm.js' -> '/usr/local/bin/pnpm'`

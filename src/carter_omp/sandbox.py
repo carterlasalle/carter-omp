@@ -621,11 +621,15 @@ def _prepare_slot_runtime_env(workspace: Workspace, slot_uid: int | None) -> dic
     xdg_cache = xdg_root / "cache"
     xdg_config = xdg_root / "config"
     bun_cache = xdg_cache / "bun-install"
+    corepack_cache = xdg_cache / "corepack"
+    npm_cache = xdg_cache / "npm"
 
     for base in (xdg_data, xdg_state, xdg_cache, xdg_config):
         base.mkdir(parents=True, exist_ok=True)
         (base / "omp").mkdir(parents=True, exist_ok=True)
     bun_cache.mkdir(parents=True, exist_ok=True)
+    corepack_cache.mkdir(parents=True, exist_ok=True)
+    npm_cache.mkdir(parents=True, exist_ok=True)
 
     return {
         "TMPDIR": str(tmpdir),
@@ -641,6 +645,14 @@ def _prepare_slot_runtime_env(workspace: Workspace, slot_uid: int | None) -> dic
         # `Shared browser daemon unavailable` failure (carter-omp#41).
         "XDG_CONFIG_HOME": str(xdg_config),
         "BUN_INSTALL_CACHE_DIR": str(bun_cache),
+        # Tools that ignore XDG and hard-code `$HOME`: the read-only template
+        # made their first cache write fail with EACCES —
+        # `corepack enable`/version fetch died on
+        # `/srv/agent-home/.cache/node/corepack` (autolight#7's session), and
+        # `npm` writes `~/.npm` the same way. Point both at the workspace-private
+        # cache, like everything else here.
+        "COREPACK_HOME": str(corepack_cache),
+        "NPM_CONFIG_CACHE": str(npm_cache),
     }
 
 

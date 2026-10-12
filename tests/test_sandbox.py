@@ -925,6 +925,10 @@ def test_prepare_slot_runtime_env_returns_workspace_private_paths_without_chown(
     assert env["XDG_CACHE_HOME"] == str(ws.root / ".omp-xdg" / "cache")
     assert env["XDG_CONFIG_HOME"] == str(ws.root / ".omp-xdg" / "config")
     assert env["BUN_INSTALL_CACHE_DIR"] == str(bun_cache)
+    # Tools that hard-code `$HOME` (corepack, npm) must not write into the
+    # read-only root-owned template home; their caches stay workspace-private.
+    assert env["COREPACK_HOME"] == str(ws.root / ".omp-xdg" / "cache" / "corepack")
+    assert env["NPM_CONFIG_CACHE"] == str(ws.root / ".omp-xdg" / "cache" / "npm")
     for base in (
         ws.root / ".omp-xdg" / "data",
         ws.root / ".omp-xdg" / "state",
@@ -933,6 +937,10 @@ def test_prepare_slot_runtime_env_returns_workspace_private_paths_without_chown(
     ):
         assert base.is_dir()
         assert (base / "omp").is_dir()
+    # The HOME-hardcoding caches exist, but (unlike the XDG roots) carry no
+    # `omp` subdirectory.
+    assert (ws.root / ".omp-xdg" / "cache" / "corepack").is_dir()
+    assert (ws.root / ".omp-xdg" / "cache" / "npm").is_dir()
     assert bun_cache.is_dir()
     assert chowns == []
     assert calls == []
