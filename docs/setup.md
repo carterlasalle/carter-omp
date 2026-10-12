@@ -78,6 +78,7 @@ GITHUB_WEBHOOK_SECRET=<from step 2>
 CARTER_OMP_BOT_LOGIN=<bot login, e.g. carter-omp[bot]>
 CARTER_OMP_GIT_AUTHOR_NAME=Carter OMP
 CARTER_OMP_GIT_AUTHOR_EMAIL=<noreply address>
+CARTER_OMP_GIT_COAUTHOR="Carter Lasalle <carterlasalle@gmail.com>"
 
 CARTER_OMP_AUTHORIZED_USER_IDS=<your user ID>
 CARTER_OMP_AUTHORIZED_LOGINS=carterlasalle
@@ -91,6 +92,17 @@ CARTER_OMP_GITHUB_INSTALLATION_ID=<installation id>
 CARTER_OMP_GITHUB_PRIVATE_KEY_FILE=/run/secrets/github-app.pem
 CARTER_OMP_GH_PROXY_HMAC_KEY=<openssl rand -hex 32>
 ```
+
+Commit authorship is configurable. `CARTER_OMP_GIT_AUTHOR_NAME` /
+`CARTER_OMP_GIT_AUTHOR_EMAIL` set the commit author on bot-pushed branches
+(default: bot login + noreply email; `gh_push_branch` refuses to push unless
+every commit carries the configured pair). `CARTER_OMP_GIT_COAUTHOR` appends a
+`Co-authored-by:` trailer to every commit via a `commit-msg` hook in the shared
+clone (system-prompt fallback when a repo's own `core.hooksPath` replaces the
+hook); empty disables both. To flip the default — human as author, bot as
+co-author — set `CARTER_OMP_GIT_AUTHOR_NAME` / `CARTER_OMP_GIT_AUTHOR_EMAIL` to
+the human and `CARTER_OMP_GIT_COAUTHOR` to the bot (e.g.
+`"carter-omp[bot] <carter-omp[bot]@users.noreply.github.com>"`).
 
 Mount the private key where the proxy expects it (see `compose.yaml`
 secrets) — never paste it into `.env`.
