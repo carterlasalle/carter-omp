@@ -96,6 +96,15 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **Pre-publish gates can run a Yarn-pinned repo's suite (#50).** The runtime
+  image declared `ARG YARN_VERSION=4.9.2` but never consumed it, so the
+  published image had no `yarn` on PATH: a repo whose root `test` script
+  shells out to `yarn` (e.g. `yarn workspaces foreach --all run test`) failed
+  the `bun run test` gate before any test ran (`yarn: command not found`,
+  exit 127), and no PR could be opened for any diff. The image now activates
+  the pinned Yarn via `corepack prepare` after the Node install, so `yarn`
+  resolves on PATH for the slot user.
+
 - **A stranded run is re-dispatched instead of sitting there forever.**
   `CARTER_OMP_EVENT_MAX_RETRIES` retries *inside* one delivery; once that budget
   is spent the event is terminal and nothing re-dispatched the issue, so a 402

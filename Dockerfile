@@ -127,6 +127,19 @@ RUN case "${TARGETARCH:-amd64}" in \
     && node --version \
     && npm --version
 
+# Yarn — the package manager a Yarn-pinned repo's own scripts expect. Root
+# `test` scripts shell out to `yarn` directly (e.g. `yarn workspaces foreach
+# --all run test`), so without it on PATH the pre-publish `bun run test` gate
+# fails before any test runs (`yarn: command not found`, exit 127) and no PR
+# can be opened for any diff on such a repo. `corepack prepare` pins the exact
+# YARN_VERSION the repo declares via `packageManager` and activates a stable
+# `yarn` shim in /usr/local/bin (writable here at build time, unlike the slot's
+# PATH dirs at run time), so `COREPACK_ENABLE_PROJECT_SPEC` is unnecessary.
+# Node ships the corepack runtime, so this stays after the Node install above.
+RUN corepack enable \
+    && corepack prepare "yarn@${YARN_VERSION}" --activate \
+    && yarn --version
+
 # TraceLayer (`trace`) is deliberately NOT installed. Some repos wire their own
 # agent hooks/instructions to it (`.pi/hooks.json` -> `.pi/trace-hook.sh`), and
 # running a repo-provided gate inside this sandbox would bind our runs to that
