@@ -102,7 +102,7 @@ uv run carter-omp --help
 3. Resolve Carter's immutable user ID (`gh api users/carterlasalle --jq '{id, login, type}'`) and fill `CARTER_OMP_AUTHORIZED_USER_IDS`.
 4. Fill repo IDs (`CARTER_OMP_REPO_IDS`).
 5. Pick models: `carter-omp init-models` (interactive picker for provider, primary, and a cross-provider fallback chain) then put its `CARTER_OMP_MODEL` / `CARTER_OMP_FALLBACK_MODEL` values in `.env`. API keys stay where OMP keeps them.
-6. Start: `docker compose up -d --build`
+6. Start: `scripts/deploy.sh` — pulls, **waits for in-flight runs**, rebuilds, recreates, and runs `doctor`. A bare `docker compose up -d --build` cuts off whatever the bot is executing mid-run; the queue recovers it on the next boot (the agent resumes with `--continue`), but the run appears to stall on GitHub and the work in flight is lost. `scripts/deploy.sh --check` reports in-flight work without changing anything; `--force` deploys anyway.
 7. Validate: `docker compose exec carter-omp carter-omp doctor`
 8. Add the `carter-omp` label to selected repos.
 9. Test with a sandbox issue: open → nothing happens → add label → triage/fix/PR.

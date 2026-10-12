@@ -209,9 +209,17 @@ HTTPS and the container does not terminate TLS itself.
 <!-- trace:v1 id=doc.setup-start work=WORK-CO-Q8Z1HJJJ -->
 
 ```bash
-docker compose up -d --build
+scripts/deploy.sh                                    # pull + wait for in-flight runs + build + recreate + doctor
+scripts/deploy.sh --check                            # report in-flight work, change nothing
 docker compose exec carter-omp carter-omp doctor
 ```
+
+Use `scripts/deploy.sh` rather than a bare `docker compose up -d --build`: recreating
+the container interrupts whatever the bot is executing. The queue recovers those
+events on the next boot and the agent resumes its session (`--continue`), but the
+run stalls visibly on GitHub and the in-flight work is lost — a tag that "reacted
+and then vanished" is this. The script waits for `running` to drain (default 20
+minutes, `--timeout`/`--force` to change that).
 
 `doctor` verifies the DB, OMP binary, trigger mode, every identity mapping,
 the proxy channel, the model catalog + selectors, and the dashboard bundle —
