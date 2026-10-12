@@ -75,6 +75,12 @@ paths this repo extracted (`python/robomp/src` → `src/carter_omp`,
   tests` — only the `python/robomp/web` part applies: two duplicate live-event
   ordering tests dropped from `work-items.test.ts`. Ported; the `packages/**`
   TypeScript removals have no carter counterpart.
+- `6e6b130d705bfb6c26c7350c82d17ac90ee30865` (2026-10-07) `fix(robomp): kept
+  failed pr reviews out of the review-once ledger` (#14859) — dropped anchors
+  no longer emit an early error-free `submit_pr_review` audit row; they ride on
+  the terminal success/fallback row (`dropped` is now the anchor list), so a
+  rejected POST no longer satisfies `has_successful_tool_call`. Ported to
+  `src/carter_omp/host_tools.py` and `tests/test_host_tools.py`.
 
 ### Reviewed, not ported
 
