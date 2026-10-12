@@ -92,7 +92,9 @@ async def test_attach_thread_preserves_authorizes_impl(monkeypatch: pytest.Monke
     assert hydrated.authorizes_impl is True
 
 
-def _payload_with_directive(*, issue_number: int, body: str = "@carter_omp-bot ship it") -> dict[str, object]:
+def _payload_with_directive(
+    *, issue_number: int, body: str = "@carter_omp-bot ship it", authorizes_impl: bool = True
+) -> dict[str, object]:
     return {
         "repository": {
             "full_name": "octo/widget",
@@ -117,7 +119,7 @@ def _payload_with_directive(*, issue_number: int, body: str = "@carter_omp-bot s
         "_carter_omp_directive": {
             "body": body,
             "author": "owner",
-            "authorizes_impl": True,
+            "authorizes_impl": authorizes_impl,
         },
     }
 
@@ -471,9 +473,9 @@ async def test_pr_conversation_on_a_reviewed_pr_is_handled_not_dropped(
 ) -> None:
     """A reviewed PR stays addressable: the author's follow-up mention runs.
 
-    The row keeps `review/pr-N` as its branch, so the conversation run is
-    review-mode (read-only) — it can reply but never push. Dropping these left
-    replies unanswered (#64).
+    Without an implementation authorization the row keeps `review/pr-N` as its
+    branch, so the conversation run is review-mode (read-only) — it can reply but
+    never push. Dropping these left replies unanswered (#64).
     """
     workspace = SimpleNamespace(
         root=tmp_path,
@@ -521,6 +523,113 @@ async def test_pr_conversation_on_a_reviewed_pr_is_handled_not_dropped(
     monkeypatch.setattr(tasks, "_attach_thread", fake_attach_thread)
     monkeypatch.setattr(tasks, "run_task", fake_run_task)
 
+    ensured: dict[str, object] = {}
+    removed: list[tuple[str, int]] = []
+
+    def fake_ensure(**kwargs: object) -> object:
+        ensured.update(kwargs)
+        return workspace
+
+    async def fake_remove(*, repo: str, number: int) -> None:
+        removed.append((repo, number))
+
+    payload = _payload_with_directive(issue_number=7, authorizes_impl=False)
+    issue_payload = payload["issue"]
+    assert isinstance(issue_payload, dict)
+    issue_payload["pull_request"] = {"url": "https://api.github.com/repos/octo/widget/pulls/7"}
+    await tasks.handle_pr_conversation(
+        settings=settings,
+        db=db,
+        github=FakeGitHub(),
+        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=fake_ensure, remove_workspace=fake_remove),
+        git_transport=SimpleNamespace(),
+        payload=payload,
+        delivery_id="d-pr-reviewed",
+    )
+
+    assert called == {"task_kind": "handle_comment", "pr_number": 7}
+    # Reply-only directive: the review worktree is kept (re-pointed at the head).
+    assert ensured["pr_head"] == 7
+    assert ensured["existing_branch"] is None
+    assert removed == []
+    row = db.get_issue("octo/widget#42")
+    assert row is not None and row.branch == "review/pr-7"
+
+
+async def test_implementation_directive_on_a_reviewed_pr_gets_a_writable_branch(
+    db, tmp_path, settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A maintainer's "fix this and open a PR" must not land in a read-only tree.
+
+    Review worktrees are detached at the PR head and `gh_push_branch` refuses by
+    design, so an implementation request could only ever be answered with
+    "maintainer must push" — `alert3d#1` did exactly that across three sweeps.
+    An implementation-authorized directive drops the review worktree and gives
+    the run a branch it owns.
+    """
+    review = SimpleNamespace(
+        root=tmp_path,
+        repo_dir=tmp_path / "review-repo",
+        session_dir=tmp_path / "review-session",
+        branch="review/pr-7",
+    )
+    review.repo_dir.mkdir(exist_ok=True)
+    review.session_dir.mkdir(exist_ok=True)
+    owned = SimpleNamespace(
+        root=tmp_path,
+        repo_dir=tmp_path / "owned-repo",
+        session_dir=tmp_path / "owned-session",
+        branch="carter-omp/deadbeef/apply-review-findings",
+    )
+    owned.repo_dir.mkdir(exist_ok=True)
+    owned.session_dir.mkdir(exist_ok=True)
+    db.upsert_issue(
+        key="octo/widget#42",
+        repo="octo/widget",
+        number=42,
+        state="reviewing",
+        branch=review.branch,
+        session_dir=str(review.session_dir),
+        pr_number=7,
+    )
+    ensured: dict[str, object] = {}
+    removed: list[tuple[str, int]] = []
+    called: dict[str, object] = {}
+
+    class FakeGitHub:
+        async def get_repo(self, repo: str) -> RepoInfo:
+            return RepoInfo(full_name=repo, default_branch="main", clone_url="https://x/octo/widget.git", private=False)
+
+        async def get_issue(self, repo: str, number: int) -> IssueInfo:
+            return IssueInfo(
+                repo=repo,
+                number=number,
+                title="proposal",
+                body="issue body",
+                state="open",
+                author="alice",
+                labels=("proposal",),
+                is_pull_request=False,
+            )
+
+    def fake_ensure(**kwargs: object) -> object:
+        ensured.update(kwargs)
+        return owned
+
+    def fake_remove(*, repo: str, number: int) -> None:
+        removed.append((repo, number))
+
+    async def fake_attach_thread(_github, directive, repo, number, *, is_pr):
+        return directive
+
+    async def fake_run_task(*, task_kind: str, inputs, **kwargs: object) -> None:
+        del inputs
+        called["task_kind"] = task_kind
+        called["pr_number"] = kwargs.get("pr_number")
+
+    monkeypatch.setattr(tasks, "_attach_thread", fake_attach_thread)
+    monkeypatch.setattr(tasks, "run_task", fake_run_task)
+
     payload = _payload_with_directive(issue_number=7)
     issue_payload = payload["issue"]
     assert isinstance(issue_payload, dict)
@@ -529,12 +638,18 @@ async def test_pr_conversation_on_a_reviewed_pr_is_handled_not_dropped(
         settings=settings,
         db=db,
         github=FakeGitHub(),
-        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=lambda **_kwargs: workspace),
+        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=fake_ensure, remove_workspace=fake_remove),
         git_transport=SimpleNamespace(),
         payload=payload,
-        delivery_id="d-pr-reviewed",
+        delivery_id="d-pr-impl",
     )
 
+    # The read-only worktree was torn down and replaced by an owned branch.
+    assert removed == [("octo/widget", 42)]
+    assert ensured["pr_head"] is None
+    assert ensured["existing_branch"] is None
+    row = db.get_issue("octo/widget#42")
+    assert row is not None and row.branch == "carter-omp/deadbeef/apply-review-findings"
     assert called == {"task_kind": "handle_comment", "pr_number": 7}
 
 

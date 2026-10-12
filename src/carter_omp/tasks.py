@@ -1049,6 +1049,21 @@ async def handle_pr_conversation(
     # at the *current* head so a re-review is not answered from a stale
     # checkout. Owned branches are left untouched (local commits must survive).
     review_workspace = bool(existing_branch and existing_branch.startswith("review/pr-"))
+    # A maintainer directive that authorizes implementation has to be able to
+    # deliver. In a review worktree `gh_push_branch` refuses by design, so the
+    # agent can only answer "maintainer must push" — `alert3d#1` did exactly
+    # that across three sweeps while its author asked for the fixes and a PR.
+    # Drop the review worktree and let the run own a writable branch instead.
+    if review_workspace and directive is not None and directive.authorizes_impl and issue_row is not None:
+        log.info(
+            "implementation directive on a review worktree; rebranching",
+            extra={"key": issue_row.key, "pr": pr_number, "author": directive.author},
+        )
+        await _run_workspace_op(sandbox.remove_workspace, repo=issue_row.repo, number=issue_row.number)
+        db.upsert_issue(key=issue_row.key, repo=issue_row.repo, number=issue_row.number, state="reproducing")
+        issue_row = db.get_issue(issue_row.key) or issue_row
+        existing_branch = None
+        review_workspace = False
     workspace = await _run_workspace_op(
         sandbox.ensure_workspace,
         repo=repo.full_name,
