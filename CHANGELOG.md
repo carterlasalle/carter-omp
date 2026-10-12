@@ -96,6 +96,19 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **The sandbox ships a working tool set, not the bare minimum.** `corepack` was
+  present but never enabled, so a yarn- or pnpm-pinned repo's own gate died with
+  `yarn: command not found` (exit 127) *before* the pre-publish check could run —
+  autolight#7's finished fix sat on a branch with no PR for exactly that reason.
+  The runtime stage now enables corepack (so `yarn workspaces foreach` and
+  `pnpm -r` work in a repo that pins either, at the version it pins) and adds the
+  utilities and build tooling a repo's scripts assume: `jq`, `ripgrep`, `procps`
+  and `psmisc` (`ps`/`pgrep` were missing), `tree`, `file`, `make`, `g++`,
+  `pkg-config` (native builds and `node-gyp`), `openssl`, `shellcheck`, `xz`,
+  `zip`, and `git-lfs`. Anything a repo's *language* tooling needs beyond this,
+  it installs itself as the slot user; anything system-level that is still
+  missing becomes a `report_pain_point` rather than a silent gate failure.
+
 - **A stranded run is re-dispatched instead of sitting there forever.**
   `CARTER_OMP_EVENT_MAX_RETRIES` retries *inside* one delivery; once that budget
   is spent the event is terminal and nothing re-dispatched the issue, so a 402

@@ -63,9 +63,22 @@ ARG TARGETARCH
 
 # curl + CA certs for the pinned binary downloads below (python-slim
 # omits both). No `curl | sh`; every download is checksum-verified.
+#
+# The rest is the sandbox's working set. A run has no root and no package
+# manager, so a repo's own gate can only pass if the tool is already here —
+# each miss has cost a real run (Node for a Node-pinned repo, yarn for a
+# yarn-pinned repo, Chromium's shared libraries). Prefer including a small,
+# boring tool over having a run stall on it: `jq` for the JSON that repo
+# scripts pipe around, `ripgrep` to search without a full walk, `procps`/
+# `psmisc` because `ps`/`pgrep` are how a run checks what it started, `tree`/
+# `file` for inspection, `make`/`g++`/`pkg-config` because `node-gyp` and
+# native builds need a compiler, `openssl` for TLS debugging, `shellcheck`
+# because repos lint their own scripts, and `git-lfs` so an LFS repo clones
+# its assets instead of pointers.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-    ca-certificates curl unzip git tini sqlite3 \
+    ca-certificates curl unzip zip xz-utils git git-lfs tini sqlite3 \
+    jq ripgrep less procps psmisc tree file make g++ pkg-config openssl shellcheck \
  && rm -rf /var/lib/apt/lists/*
 # Chromium runtime libraries, so a *repo's own* browser suite can run
 # (`npx playwright test`, `npm run test:e2e`). The sandbox has no root, so
@@ -126,6 +139,18 @@ RUN case "${TARGETARCH:-amd64}" in \
     && rm -f /tmp/node.tar.gz \
     && node --version \
     && npm --version
+
+# Package-manager shims for JS repos. `corepack` ships with Node but stays
+# inert until enabled, so a yarn- or pnpm-pinned repo's own gate failed with
+# `yarn: command not found` (exit 127) *before* the pre-publish check could run
+# at all — which is why autolight#7's finished fix sat on a branch with no PR.
+# Enabling it makes `yarn workspaces foreach` / `pnpm -r` behave in a repo that
+# pins either, and corepack fetches the exact pinned version at run time. The
+# activated 1.22.22 is only the default for a repo that pins nothing; the
+# version this repo itself uses comes from its own `packageManager` field.
+RUN corepack enable \
+    && corepack prepare yarn@1.22.22 --activate \
+    && yarn --version
 
 # TraceLayer (`trace`) is deliberately NOT installed. Some repos wire their own
 # agent hooks/instructions to it (`.pi/hooks.json` -> `.pi/trace-hook.sh`), and
