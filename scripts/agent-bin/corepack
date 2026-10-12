@@ -1,0 +1,38 @@
+#!/bin/sh
+# trace:exempt reason=deploy-packaging-no-runtime-behavior
+#
+# Carter-omp agent shim. `corepack enable` and `corepack install -g` (re)write
+# the shims inside the Node bin directory, which is root-owned — so a run
+# executing as its slot uid gets
+#
+#     EACCES: permission denied, symlink '../lib/node_modules/corepack/dist/pnpm.js'
+#        -> '/usr/local/bin/pnpm'
+#
+# and then burns minutes working around it (carterlasalle/autolight#7 did). The
+# image already runs `corepack enable` at build time and fetches whatever
+# version a repo pins via its `packageManager` field, so those two subcommands
+# have nothing left to do. Everything else — `corepack yarn`, `corepack pnpm`,
+# `corepack use`, … — is handed to the real binary unchanged.
+#
+# This lives in a directory placed first on the *agent's* PATH, so it never
+# shadows corepack for the orchestrator or a repo's own tooling outside a run.
+set -eu
+
+real_corepack="/usr/local/bin/corepack"
+
+case "${1:-}" in
+  enable)
+    echo "carter-omp: corepack is already enabled in this image (yarn, pnpm, node and bun are on PATH); nothing to do." >&2
+    exit 0
+    ;;
+  install)
+    case "${2:-}" in
+      -g | --global)
+        echo "carter-omp: global package managers are already installed in this image; nothing to do." >&2
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+
+exec "$real_corepack" "$@"

@@ -106,6 +106,16 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **`corepack enable` can no longer fail a run.** Enabling corepack writes shims
+  into `/usr/local/bin`, which is root-owned, so a run executing as its slot uid
+  got `EACCES: permission denied, symlink '…/pnpm.js' -> '/usr/local/bin/pnpm'`
+  and then spent minutes working around it — `autolight#7` did, right before it
+  died on the torn-frame bug. The image enables corepack at build time and now
+  ships a shim on the *agent's* PATH (`/opt/agent-bin`, not writable by a run)
+  that turns `corepack enable` and `corepack install -g` into a no-op with an
+  explanation, while every other subcommand still reaches the real binary. The
+  orchestrator and repo tooling never see the shim.
+
 - **A frame torn in transit no longer kills the run (`omp-rpc` client).** The
   child's stdout was parsed one line at a time and a single frame that arrived
   split — a raw control character inside a string, so the line ends mid-value —

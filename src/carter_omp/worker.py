@@ -165,6 +165,9 @@ _AGENT_HOME = Path("/srv/agent-home")
 # world-readable file is both race-free and correct.
 _FALLBACK_OVERLAY_PATH = Path("/srv/carter-omp-fallback.yml")
 _AGENT_HOME_STAGE = Path("/srv/agent-home-stage")
+# Shims the image installs for the agent only (see `_build_extra_env`); it is
+# deliberately not writable by a run, so a run cannot replace the shim itself.
+_AGENT_BIN_DIR = "/opt/agent-bin"
 
 
 def _stage_agent_home() -> None:
@@ -334,6 +337,12 @@ def _build_extra_env(settings: Settings) -> dict[str, str]:
     # task. Nothing here is interactive, so run bash without a PTY — omp's own
     # escape hatch for non-interactive/daemon contexts.
     env["PI_NO_PTY"] = "1"
+    # Package managers are installed by the image (corepack enabled at build
+    # time). A repo script that calls `corepack enable` would otherwise fail on
+    # the root-owned Node bin dir with EACCES and detour the whole run
+    # (autolight#7 lost minutes to it), so a shim on the agent's PATH turns that
+    # subcommand into a no-op; everything else reaches the real binary.
+    env["PATH"] = f"{_AGENT_BIN_DIR}:{os.environ.get('PATH', '')}"
     if _AGENT_HOME.is_dir():
         env["HOME"] = str(_AGENT_HOME)
     return env

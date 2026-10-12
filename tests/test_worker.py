@@ -1546,7 +1546,12 @@ def test_agent_env_disables_pty(tmp_path: Path, settings: Settings, monkeypatch:
     monkeypatch.setattr(worker, "_AGENT_HOME_STAGE", tmp_path / "missing-stage")
     monkeypatch.setattr(worker, "_AGENT_HOME", tmp_path / "agent-home")
 
-    assert worker._build_extra_env(settings)["PI_NO_PTY"] == "1"
+    env = worker._build_extra_env(settings)
+    assert env["PI_NO_PTY"] == "1"
+    # The corepack shim must win on the agent's PATH: `corepack enable` writes
+    # into the root-owned Node bin dir, so a slot-uid run that calls it (a repo
+    # script, or an agent looking for yarn) gets EACCES and detours the run.
+    assert env["PATH"].startswith("/opt/agent-bin:")
 
 
 @pytest.mark.asyncio

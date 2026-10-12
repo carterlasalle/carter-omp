@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -81,3 +82,32 @@ def test_ci_coverage_gate_is_not_masked() -> None:
         if "--cov-fail-under" in (step.get("run") or "") and ("|| true" in step["run"] or "|| :" in step["run"])
     ]
     assert masked == [], f"coverage thresholds whose failure is swallowed by the shell: {masked}"
+
+
+def test_agent_corepack_shim_makes_enable_a_noop() -> None:
+    """`corepack enable` must not fail a run on the root-owned Node bin dir.
+
+    Enabling corepack writes shims into `/usr/local/bin`, so a run executing as
+    its slot uid got
+
+        EACCES: permission denied, symlink '../lib/node_modules/corepack/dist/pnpm.js'
+           -> '/usr/local/bin/pnpm'
+
+    and lost minutes working around it (carterlasalle/autolight#7). The image
+    enables corepack at build time, so the shim on the agent's PATH reports that
+    and exits 0. Real subcommands still reach the real binary, which the last
+    block checks when corepack is installed on the test machine.
+    """
+    shim = ROOT / "scripts" / "agent-bin" / "corepack"
+    assert os.access(shim, os.X_OK), "the shim must be executable in the image"
+
+    for args in (["enable"], ["install", "-g", "pnpm"]):
+        done = subprocess.run([str(shim), *args], capture_output=True, text=True, check=False)
+        assert done.returncode == 0, done.stderr
+        assert "already" in done.stderr, done.stderr
+
+    real = Path("/usr/local/bin/corepack")
+    if real.exists():
+        done = subprocess.run([str(shim), "--version"], capture_output=True, text=True, check=False)
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.strip(), "a real subcommand must reach corepack"

@@ -152,6 +152,15 @@ RUN corepack enable \
     && corepack prepare yarn@1.22.22 --activate \
     && yarn --version
 
+# Agent-visible shim in front of `corepack`. Enabling it writes into the
+# root-owned Node bin dir, so a run executing as its slot uid gets EACCES and
+# burns minutes working around it (autolight#7 did). The image already enabled
+# corepack above; this makes exactly those subcommands no-ops for the agent.
+# `worker._build_extra_env` puts this directory first on the agent's PATH, so the
+# orchestrator and repo tooling never see the shim.
+COPY scripts/agent-bin/ /opt/agent-bin/
+RUN chmod 0755 /opt/agent-bin/corepack
+
 # TraceLayer (`trace`) is deliberately NOT installed. Some repos wire their own
 # agent hooks/instructions to it (`.pi/hooks.json` -> `.pi/trace-hook.sh`), and
 # running a repo-provided gate inside this sandbox would bind our runs to that
