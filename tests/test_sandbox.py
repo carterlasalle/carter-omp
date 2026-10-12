@@ -757,7 +757,12 @@ def test_provision_runtime_dirs_replaces_tmpdir_symlink_and_creates_xdg_tree(tmp
     assert not tmpdir.is_symlink()
     assert target.is_dir()
     assert stat.S_IMODE(tmpdir.stat().st_mode) == 0o700
-    for base in (tmp_path / ".omp-xdg" / "data", tmp_path / ".omp-xdg" / "state", tmp_path / ".omp-xdg" / "cache"):
+    for base in (
+        tmp_path / ".omp-xdg" / "data",
+        tmp_path / ".omp-xdg" / "state",
+        tmp_path / ".omp-xdg" / "cache",
+        tmp_path / ".omp-xdg" / "config",
+    ):
         assert base.is_dir()
         assert (base / "omp").is_dir()
     assert (tmp_path / ".omp-xdg" / "cache" / "bun-install").is_dir()
@@ -825,8 +830,14 @@ def test_prepare_slot_runtime_env_returns_workspace_private_paths_without_chown(
 
     assert env["TMPDIR"] == str(ws.root / ".omp-tmp")
     assert env["XDG_CACHE_HOME"] == str(ws.root / ".omp-xdg" / "cache")
+    assert env["XDG_CONFIG_HOME"] == str(ws.root / ".omp-xdg" / "config")
     assert env["BUN_INSTALL_CACHE_DIR"] == str(bun_cache)
-    for base in (ws.root / ".omp-xdg" / "data", ws.root / ".omp-xdg" / "state", ws.root / ".omp-xdg" / "cache"):
+    for base in (
+        ws.root / ".omp-xdg" / "data",
+        ws.root / ".omp-xdg" / "state",
+        ws.root / ".omp-xdg" / "cache",
+        ws.root / ".omp-xdg" / "config",
+    ):
         assert base.is_dir()
         assert (base / "omp").is_dir()
     assert bun_cache.is_dir()

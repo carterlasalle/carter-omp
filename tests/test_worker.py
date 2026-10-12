@@ -464,7 +464,7 @@ async def test_run_rpc_uses_workspace_xdg_dirs_without_slot(tmp_path: Path, sett
 
     env = _FakeRpcClient.instances[0].kwargs["env"]
     xdg_root = inputs.workspace.root / ".omp-xdg"
-    for key in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+    for key in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"):
         path = Path(env[key])
         assert path.is_relative_to(xdg_root)
         assert (path / "omp").is_dir()
@@ -503,7 +503,7 @@ async def test_run_rpc_uses_workspace_xdg_dirs_for_slot_without_chown(
     )
 
     env = _FakeRpcClient.instances[0].kwargs["env"]
-    for key in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+    for key in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"):
         base = Path(env[key])
         assert base.is_dir()
         assert (base / "omp").is_dir()
