@@ -1633,6 +1633,70 @@ HANGING_SERVER = textwrap.dedent(
 )
 
 
+TORN_FRAME_SERVER = r'''
+import json
+import sys
+import time
+
+READY = {
+    "type": "ready",
+    "protocolVersion": 1,
+    "supportedProtocolVersions": [1, 2],
+    "maxFrameBytes": 1024 * 1024,
+    "maxReassembledFrameBytes": 64 * 1024 * 1024,
+}
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+print(json.dumps(READY), flush=True)
+
+for raw_line in sys.stdin:
+    command = json.loads(raw_line)
+    kind = command["type"]
+    rid = command["id"]
+    if kind == "negotiate_protocol":
+        emit({"id": rid, "type": "response", "command": kind, "success": True,
+              "data": {"protocolVersion": 2}})
+        continue
+    if kind == "torn_response":
+        # A frame carrying a raw newline inside a string: what the stream looks
+        # like when a large streaming payload arrives split (the live failure).
+        pad = "a" + chr(10) + "b"
+        sys.stdout.write('{"id": "' + rid + '", "type": "response", "command": "torn_response",'
+                         ' "success": true, "data": {"pad": "' + pad)
+        sys.stdout.flush()
+        time.sleep(0.05)
+        sys.stdout.write('"}}\n')
+        sys.stdout.flush()
+        continue
+    emit({"id": rid, "type": "response", "command": kind, "success": True, "data": {}})
+'''
+
+
+class TornFrameTests(unittest.TestCase):
+    def test_torn_response_frame_is_reassembled(self) -> None:
+        """A response torn in transit must still answer its request.
+
+        Live runs died with "Unterminated string starting at ..." when a large
+        frame arrived split; the same tear on a *response* is worse — it kills
+        the reader while a caller waits. The frame below carries a raw newline
+        inside a string, which is exactly what split it in the field.
+        """
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", TORN_FRAME_SERVER],
+            startup_timeout=2.0,
+            request_timeout=2.0,
+        )
+        try:
+            client.start()
+            data = client._request("torn_response")
+            self.assertEqual(data, {"pad": "a\nb"})
+        finally:
+            client.stop()
+
+
 class StopUnblocksPromptAndWaitTests(unittest.TestCase):
     """Regression: stop() must wake `_wait_for_agent_end` immediately.
 

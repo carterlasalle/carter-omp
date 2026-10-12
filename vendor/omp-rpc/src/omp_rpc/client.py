@@ -119,6 +119,22 @@ _DEFAULT_ERROR_HISTORY_LIMIT = 128
 _TODO_STATUS_VALUES = frozenset({"pending", "in_progress", "completed", "abandoned"})
 _MAX_RPC_FRAME_BYTES = 1024 * 1024
 _MAX_RPC_REASSEMBLED_BYTES = 64 * 1024 * 1024
+# How many consecutive lines a torn frame may span before the reader gives up.
+# A frame arrives torn when a newline lands inside it or a write is partial and
+# the remainder follows on the next line; a handful of lines covers both.
+_MAX_TORN_FRAME_LINES = 8
+
+
+def _frame_snippet(text: str, limit: int = 240) -> str:
+    """Head *and* tail of an undecodable frame.
+
+    The head alone cannot say whether the data was truncated or merely split, so
+    the next occurrence is diagnosable from the message itself.
+    """
+    if len(text) <= limit:
+        return repr(text)
+    half = (limit - 5) // 2
+    return repr(f"{text[:half]} ... {text[-half:]}")
 _RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024
 _RPC_MESSAGES_PAGE_BUSY_ERROR = "Cannot page messages while the session is changing"
 _RPC_MESSAGES_PAGE_STALE_ERROR = "RPC message cursor is stale"
@@ -2006,22 +2022,43 @@ class RpcClient:
             return
 
         line_number = 0
+        # Raw lines of a frame that did not parse on its own. Glueing the next
+        # lines back on reconstructs the byte stream exactly, because text-mode
+        # iteration splits at a newline but keeps it in the returned line.
+        pending = ""
+        pending_first_line = 0
         try:
-            for line in process.stdout:
+            for raw_line in process.stdout:
                 line_number += 1
-                stripped = line.strip()
-                if not stripped:
+                candidate = pending + raw_line
+                attempt = candidate.strip()
+                if not attempt:
+                    pending = ""
                     continue
-
                 try:
-                    raw_payload = json.loads(stripped)
+                    # `strict=False` tolerates a raw control character inside a
+                    # string: a frame that carries one is still the frame the
+                    # child meant to send, and rejecting it kills the run.
+                    raw_payload = json.loads(attempt, strict=False)
                 except json.JSONDecodeError as exc:
-                    snippet = stripped
-                    if len(snippet) > 240:
-                        snippet = f"{snippet[:237]}..."
+                    if not pending:
+                        pending_first_line = line_number
+                    glued_lines = line_number - pending_first_line
+                    if (
+                        glued_lines < _MAX_TORN_FRAME_LINES
+                        and len(candidate) <= _MAX_RPC_FRAME_BYTES
+                    ):
+                        # Torn frame (a split newline, or a partial write whose
+                        # remainder lands on the following line). Retry once the
+                        # rest arrives instead of raising; the bounded attempts
+                        # below keep a genuinely corrupt stream loud.
+                        pending = candidate
+                        continue
                     raise RpcError(
-                        f"Failed to decode RPC output on line {line_number}: {exc}. Frame: {snippet!r}"
+                        f"Failed to decode RPC output on line {line_number}: {exc}. "
+                        f"Frame: {_frame_snippet(attempt)} ({len(candidate)} bytes over {glued_lines} lines)"
                     ) from exc
+                pending = ""
                 if (
                     isinstance(raw_payload, dict)
                     and raw_payload.get("type") == "rpc_chunk"
@@ -2129,6 +2166,13 @@ class RpcClient:
                     event.type,
                     self._typed_event_listeners.get(event.type, []),
                     event,
+                )
+            # A frame still buffered when the stream ends never completed. Report
+            # it rather than dropping it: a truncated or non-JSON child stays loud.
+            if pending:
+                raise RpcError(
+                    "Failed to decode RPC output: unterminated frame at end of stream. "
+                    f"Frame: {_frame_snippet(pending.strip())} ({len(pending)} bytes)"
                 )
         except Exception as exc:
             self._mark_closed(exc)

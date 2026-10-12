@@ -106,6 +106,19 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **A frame torn in transit no longer kills the run (`omp-rpc` client).** The
+  child's stdout was parsed one line at a time and a single frame that arrived
+  split — a raw control character inside a string, so the line ends mid-value —
+  raised `Failed to decode RPC output … Unterminated string starting at: line 1
+  column N` and took the whole run down with it. Live runs hit this repeatedly
+  (both of `carterlasalle/autolight#7`'s, once while diagnosing an unrelated
+  `yarn install` EACCES), and it predates every other fix here. The reader now
+  glues a torn frame back together (bounded to 8 lines / 1 MiB, then it raises
+  with the frame's head *and* tail) and parses with `strict=False`, so a raw
+  control character inside a string is accepted rather than fatal. A frame still
+  incomplete when the stream ends is still reported, so a truncated or non-JSON
+  child stays loud instead of silently dropping work.
+
 - **The sandbox ships a working tool set, not the bare minimum.** `corepack` was
   present but never enabled, so a yarn- or pnpm-pinned repo's own gate died with
   `yarn: command not found` (exit 127) *before* the pre-publish check could run —
