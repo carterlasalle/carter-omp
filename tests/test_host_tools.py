@@ -5256,3 +5256,45 @@ def test_review_body_carries_the_telemetry_footer(db: Database, tmp_path: Path) 
 def test_footer_suffix_is_empty_outside_a_run() -> None:
     bindings = SimpleNamespace(stats=None)
     assert host_tools._footer_suffix(bindings) == ""  # type: ignore[arg-type]
+
+
+def test_push_gate_adds_the_coauthor_trailer_hooks_cannot(db: Database, tmp_path: Path, settings: Settings) -> None:
+    """A repo that replaces `core.hooksPath` still ships the trailer.
+
+    `personal_website#82` published commits with no `Co-authored-by:` because
+    the repo sets `core.hooksPath=.husky/_` (husky), so Git never runs the
+    `commit-msg` hook the sandbox installs in the clone. The push is the last
+    point where the invariant can be guaranteed, so it is enforced there.
+    """
+    bindings, loop, thread = _bindings(db, tmp_path, httpx.MockTransport(lambda _r: httpx.Response(500)))
+    settings.git_coauthor = "Someone Else <someone@example.com>"
+    object.__setattr__(bindings, "settings", settings)
+    repo = bindings.workspace.repo_dir
+
+    def git(*args: str) -> str:
+        done = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True)
+        return done.stdout
+
+    try:
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "bot@example.com")
+        git("config", "user.name", "bot")
+        # The bypass under test: our clone hook in `.git/hooks` is ignored.
+        git("config", "core.hooksPath", ".husky/_")
+        (repo / "a.txt").write_text("a")
+        git("add", "-A")
+        git("commit", "-q", "-m", "chore: base")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+        (repo / "b.txt").write_text("b")
+        git("add", "-A")
+        git("commit", "-q", "-m", "feat: no trailer at all")
+
+        host_tools._normalize_unpushed_messages(bindings, {}, tool_name="gh_push_branch")
+    finally:
+        _stop_loop(loop, thread)
+
+    message = git("log", "-1", "--format=%B")
+    assert "Co-authored-by: Someone Else <someone@example.com>" in message
+    # Commits that are already on the base branch are not rewritten.
+    assert "Co-authored-by" not in git("log", "-1", "--format=%B", "refs/remotes/origin/main")

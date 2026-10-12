@@ -1123,8 +1123,20 @@ def _configured_coauthor(bindings: ToolBindings) -> str:
 
 
 # trace:v1 id=impl.host-tools-repair-commit-message-escapes work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-def _repair_commit_message_escapes(bindings: ToolBindings, args: Mapping[str, Any], *, tool_name: str) -> None:
-    """Rewrite unpushed commits whose messages carry literal ``\\n`` escapes.
+def _normalize_unpushed_messages(bindings: ToolBindings, args: Mapping[str, Any], *, tool_name: str) -> None:
+    """Rewrite unpushed commits whose messages break a published invariant.
+
+    Two invariants, both enforced here because no hook can be trusted to run:
+
+    * literal ``\\n`` escapes (``git commit -m 'subject\\n\\nbody'`` in single
+      quotes) are converted to real newlines;
+    * every commit carries the configured ``Co-authored-by:`` trailer.
+
+    Hooks are the normal mechanism for the trailer, but Git skips them for
+    ``git commit-tree`` and ignores the clone's ``commit-msg`` entirely when a
+    repo sets its own ``core.hooksPath`` — husky does, and
+    ``personal_website#82`` published commits with no trailer for exactly that
+    reason. The push is the last point where the invariant can be guaranteed.
 
     Rebuilds ``origin/<base>..HEAD`` with ``git commit-tree``, preserving
     every tree, parent topology, identity, and date — only messages change.
@@ -1135,11 +1147,13 @@ def _repair_commit_message_escapes(bindings: ToolBindings, args: Mapping[str, An
     very end, so a refusal never leaves partial state).
     """
 
+    # trace:exempt reason=internal-detail
     def fail(step: str, proc: subprocess.CompletedProcess[str]) -> NoReturn:
         err = (proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}"
         msg = (
-            f"refusing to push: commit messages contain literal `\\n` escapes and the "
-            f"automatic repair failed at `{step}`: {err}\n"
+            f"refusing to push: unpushed commit messages needed rewriting (literal `\\n` "
+            f"escapes or the co-author trailer) and the automatic repair failed at "
+            f"`{step}`: {err}\n"
             "Reword the affected commits yourself (`git rebase -i origin/"
             + bindings.repo.default_branch
             + "`, real newlines via `git commit -F <file>` or multiple `-m` flags) and retry."
@@ -1164,13 +1178,15 @@ def _repair_commit_message_escapes(bindings: ToolBindings, args: Mapping[str, An
             return
         message = show.stdout
         fixed = _repair_message_escapes(message)
-        if fixed is not None:
-            message = fixed
+        candidate = fixed if fixed is not None else message
+        # `git commit-tree` below does not run the `commit-msg` hook, and a repo
+        # with its own `core.hooksPath` never runs our hook at all, so the
+        # trailer is applied here too — and a missing trailer alone is reason
+        # enough to rewrite (no-op when the deployment configures none).
+        candidate = with_coauthor_trailer(candidate, _configured_coauthor(bindings))
+        if candidate != message:
             repaired.append(sha)
-        # `git commit-tree` below does not run the `commit-msg` hook, so the
-        # messages this path rebuilds opt into the same trailer every other
-        # commit gets (no-op when the deployment configures no co-author).
-        messages[sha] = with_coauthor_trailer(message, _configured_coauthor(bindings))
+        messages[sha] = candidate
     if not repaired:
         return
 
@@ -1215,13 +1231,13 @@ def _repair_commit_message_escapes(bindings: ToolBindings, args: Mapping[str, An
     old_head, new_head = shas[-1], rewritten[shas[-1]]
     update = _run_repo_command(
         bindings,
-        ["git", "update-ref", "-m", "carter_omp: repaired commit message escapes", "HEAD", new_head, old_head],
+        ["git", "update-ref", "-m", "carter_omp: normalized commit messages", "HEAD", new_head, old_head],
     )
     if update.returncode != 0:
         fail("git update-ref", update)
-    _audit(bindings, tool_name, args, result={"repaired_commit_messages": [sha[:12] for sha in repaired]})
+    _audit(bindings, tool_name, args, result={"normalized_commit_messages": [sha[:12] for sha in repaired]})
     log.info(
-        "repaired commit message escapes",
+        "normalized unpushed commit messages",
         extra={"issue": bindings.issue_key, "commits": [sha[:12] for sha in repaired]},
     )
 
@@ -1239,9 +1255,10 @@ def _guarded_push_branch(bindings: ToolBindings, args: Mapping[str, Any], tool_n
     # Re-pin the configured identity right before push (cheap; idempotent).
     _run_repo_command(bindings, ["git", "config", "user.email", bindings.author_email])
     _run_repo_command(bindings, ["git", "config", "user.name", bindings.author_name])
-    # Cosmetic repair BEFORE the head snapshot: commits whose messages carry
-    # shell-literal `\n` escapes are rewritten in place (message-only).
-    _repair_commit_message_escapes(bindings, args, tool_name=tool_name)
+    # Message invariants BEFORE the head snapshot: shell-literal `\n` escapes
+    # and a missing co-author trailer are both rewritten in place (message-only),
+    # because hooks cannot be relied on here (see the function docstring).
+    _normalize_unpushed_messages(bindings, args, tool_name=tool_name)
     repo_dir_path = bindings.workspace.repo_dir
     head_proc = _run_repo_command(bindings, ["git", "rev-parse", "HEAD"])
     if head_proc.returncode != 0:
