@@ -106,6 +106,18 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **A maintainer-directed run on someone else's PR can now push.** The proxy's
+  push gate only accepted `carter-omp/*`, while `handle_pr_conversation` puts a
+  maintainer-authorized run directly on the PR's own head branch — the gate
+  exact-matched the branch on the HMAC-signed run token and then 403'd it as
+  outside the namespace, twice in the observed run. The gate now also accepts
+  the exact branch pinned on the run's token; unpinned foreign branches
+  (including an attacker's `main`) still 403.
+
+- **Bot-message footers now carry the run id.** The model/duration/cost footer
+  on comments, PR bodies, and review bodies appends `run \`<id>\`` when the
+  worker threads the trigger's id into `RunStats`, so a message maps to exactly
+  one run's logs.
 - **Slot-side tool caches no longer target the read-only template home.**
   `HOME` for a run is the staged agent home, owned `root:root` — deliberately
   read-only — and tools that ignore `XDG_*` hard-code `$HOME`: `corepack` died

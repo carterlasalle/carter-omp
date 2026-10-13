@@ -478,10 +478,19 @@ def _require_run_branch(token: RunToken, branch: str) -> None:
     )
 
 
-def _require_push_namespace(branch: str) -> None:
-    """Normal pushes land only on `carter-omp/*`; releases use the elevated endpoint."""
-    if not branch.startswith("carter-omp/"):
-        raise HTTPException(403, "branch outside carter-omp/* namespace")
+# trace:v1 id=impl.proxy-push-namespace work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _require_push_namespace(branch: str, token: RunToken | None = None) -> None:
+    """Normal pushes land on `carter-omp/*` — or on the PR head branch pinned on
+    this run's verified token (a maintainer-directed run on a foreign PR works
+    there; `_require_run_branch` already exact-matched it, and the token is
+    HMAC-signed by the orchestrator, so this admits no third party). Releases
+    use the elevated endpoint. Callers without a token keep today's behavior.
+    """
+    if branch.startswith("carter-omp/"):
+        return
+    if token is not None and token.branch is not None and token.pull_request is not None and branch == token.branch:
+        return
+    raise HTTPException(403, "branch outside carter-omp/* namespace")
 
 
 def _github_url_for_repo(repo: str) -> str:
@@ -1332,7 +1341,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         _require_run_cap(token, "push_branch")
         _require_run_repo(token, repo)
         _require_run_branch(token, branch)
-        _require_push_namespace(branch)
+        _require_push_namespace(branch, token)
         expected_head = _require_str(data.get("expected_head"), "expected_head")
         slot_uid = _optional_slot_uid(data.get("slot_uid"))
         # Sanity-check workspace_key matches the repo claim.

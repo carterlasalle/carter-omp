@@ -1009,8 +1009,13 @@ def _run_rpc_blocking(
     # Telemetry for the GitHub message footer: which model ran, how long it has
     # been going, and what it has cost so far (accumulated from the
     # `message_end` usage events below), so any comment or PR body can report
-    # all three.
-    stats = host_tools.RunStats(model=chosen_model, started_monotonic=time.monotonic())
+    # all three. The run id rides along so a reader can match the message to
+    # the exact run; TriggerContext import stays function-local like the other
+    # per-call imports in this module.
+    from carter_omp.github_events import TriggerContext
+
+    run_id = inputs.trigger.run_id if isinstance(inputs.trigger, TriggerContext) else None
+    stats = host_tools.RunStats(model=chosen_model, started_monotonic=time.monotonic(), run_id=run_id)
     object.__setattr__(bindings, "stats", stats)
 
     with RpcClient(

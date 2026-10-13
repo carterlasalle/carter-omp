@@ -5135,7 +5135,20 @@ def test_run_stats_footer_reports_model_duration_and_cost() -> None:
     assert footer.startswith("\n\n---\n<sub>")
     assert "`opencode-go/muse-spark`" in footer
     assert ("30s" in footer) or ("31s" in footer)
-    assert "$0.0000" in footer
+    assert "run `" not in footer  # no run id threaded in: footer renders nothing
+
+
+def test_run_stats_footer_renders_the_run_id_when_threaded() -> None:
+    """A bot message must identify the exact run that wrote it, so a reader can
+    match the comment to one run's logs."""
+    stats = host_tools.RunStats(
+        model="opencode-go/muse-spark", started_monotonic=time.monotonic() - 30, run_id="abc123"
+    )
+
+    footer = stats.footer()
+
+    assert "`opencode-go/muse-spark`" in footer
+    assert "run `abc123`" in footer
 
 
 def test_run_stats_accumulates_usage_and_ignores_junk() -> None:

@@ -1666,6 +1666,39 @@ async def test_push_outside_namespace_rejected(proxy_settings: Settings, upstrea
     assert resp.status_code == 403
 
 
+async def test_push_to_the_runs_pinned_pr_head_branch_is_allowed(proxy_settings: Settings, upstream_repo: Path) -> None:
+    """A maintainer-directed run on a foreign PR works on the branch the
+    orchestrator pinned on its verified token — the namespace guard must not
+    403 the exact branch `_require_run_branch` already accepted."""
+    branch = "feat/cinematic-redesign"
+    _, head = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    app = _build_app(proxy_settings)
+    body = (
+        b'{"repo":"octo/widget","workspace_key":"octo__widget__1","branch":"'
+        + branch.encode()
+        + b'","expected_head":"'
+        + head.encode()
+        + b'"}'
+    )
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/git/push",
+            content=body,
+            headers={
+                **_signed(
+                    "POST",
+                    "/gh/v1/git/push",
+                    body,
+                    run_token=_attack_token(branch=branch, pull_request=7),
+                ),
+                "Content-Type": "application/json",
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"head": head, "branch": branch}
+    assert _bare_has_branch(upstream_repo, branch)
+
+
 async def test_release_push_without_release_caps_rejected(proxy_settings: Settings) -> None:
     import json as _json
 

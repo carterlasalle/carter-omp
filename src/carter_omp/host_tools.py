@@ -117,6 +117,10 @@ class RunStats:
 
     model: str
     started_monotonic: float
+    # Stable run identifier for the footer (worker threads it from the trigger;
+    # None in unit tests that build RunStats directly). Lets a reader match a
+    # bot message to the exact run that wrote it.
+    run_id: str | None = None
     # Set when omp switched providers mid-run (or when a message names a model
     # other than the configured one): the footer then names both, so a reader
     # never mistakes the configured model for the one that answered.
@@ -180,12 +184,14 @@ class RunStats:
 
     # trace:v1 id=impl.run-stats-footer work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def footer(self) -> str:
-        """Markdown footer: model (with fallback), wall clock, spend, usage."""
+        """Markdown footer: run id, model (with fallback), wall clock, spend, usage."""
         cost = f"${self.cost_usd:.4f}" if self.cost_usd < 1 else f"${self.cost_usd:.2f}"
         model = f"`{self.model}`"
         if self.fallback_model and self.fallback_model != self.model:
             model += f" → `{self.fallback_model}`"
         headline = [model, _format_duration(self.elapsed_seconds()), cost]
+        if self.run_id:
+            headline.append(f"run `{self.run_id}`")
         usage: list[str] = []
         if self.miss_tokens:
             usage.append(f"miss {_format_tokens(self.miss_tokens)}")

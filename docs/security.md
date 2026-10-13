@@ -45,7 +45,7 @@ rights, `main` mutation, check bypass, or cross-issue/repo actions.
 | Replayed webhook | `X-GitHub-Delivery` dedup; one-shot trigger consumption; replay reuses stored `TriggerContext`, never re-authorizes |
 | Stale labels | Trigger label consumed on accept (removed, replaced by `carter-omp:running` → `done`/`needs-input`/`failed`); state labels never trigger |
 | Capability escalation | Model cannot request caps; subagents inherit parent caps; release caps expire with the run |
-| Branch/ref injection | `carter-omp/*` namespace enforced; no force push; expected-HEAD, clean-tree, identity, remote-URL guards retained |
+| Branch/ref injection | `carter-omp/*` namespace enforced, plus the one PR-head branch pinned on the run's own HMAC-signed token (maintainer-directed PR runs); no force push; expected-HEAD, clean-tree, identity, remote-URL guards retained |
 | Git remote substitution | HTTPS-only, no embedded credentials, no helper tricks, no refspec injection, expected-repo checks retained |
 
 ## Fail-closed rules
