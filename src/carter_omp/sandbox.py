@@ -1247,7 +1247,11 @@ class SandboxManager:
             title=title,
             seed=f"{workspace.repo_full_name}#{workspace.issue_number}",
         )
-        command = ["git", "switch", "-B", branch]
+        # `git checkout -B`, not `git switch -B`: the switch subcommand
+        # predates `-B` on some container git builds (busybox-style usage
+        # output, `unknown switch 'B'`), while checkout has accepted `-B`
+        # since 1.7. Semantics are identical: create-or-reset then switch.
+        command = ["git", "checkout", "-B", branch]
         proc = _safe_run(
             command,
             cwd=repo_dir,

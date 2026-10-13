@@ -106,6 +106,13 @@ versions are `Unreleased` until the first tagged release.
 
 ### Fixed
 
+- **Review-workspace adoption no longer depends on `git switch -B`.** The
+  container git answers that flag with `unknown switch 'B'`, so every
+  `adopt_review_workspace` died before the run could push anything
+  (`alert3d#1` sat `queued` on its third attempt with exactly that error).
+  Same create-or-reset semantics via `git checkout -B`, which that git has
+  accepted since 1.7. Sole `switch` call site in the tree — audited, no
+  siblings.
 - **A maintainer-directed run on someone else's PR can now push.** The proxy's
   push gate only accepted `carter-omp/*`, while `handle_pr_conversation` puts a
   maintainer-authorized run directly on the PR's own head branch — the gate
