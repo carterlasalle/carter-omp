@@ -27,12 +27,13 @@ carter-omp is extracted from the `python/robomp` implementation in the
 ## Later upstream commits cherry-picked or manually incorporated
 
 Reviewed against extraction `3d3ec7e` through upstream `fd4542b`
-(2026-10-03; `packages/coding-agent/package.json` → `18.5.0`). Ports target the
-paths this repo extracted (`python/robomp/src` → `src/carter_omp`,
-`python/robomp/tests` → `tests`, `python/robomp/web` → `web`,
-`python/omp-rpc` → `vendor/omp-rpc`) with the package/env/branch renames
-(`robomp` → `carter_omp`, `ROBOMP_*` → `CARTER_OMP_*`, `farm/*` →
-`carter-omp/*`, `gh-proxy` → `github-proxy`) applied.
+(2026-10-03; merge of #13586 on top of the evaluated 18.5.0 wire-schema move
+`c4d3204`). Ports target the paths this repo extracted
+(`python/robomp/src` → `src/carter_omp`, `python/robomp/tests` → `tests`,
+`python/robomp/web` → `web`, `python/omp-rpc` → `vendor/omp-rpc`) with the
+package/env/branch renames (`robomp` → `carter_omp`, `ROBOMP_*` →
+`CARTER_OMP_*`, `farm/*` → `carter-omp/*`, `gh-proxy` → `github-proxy`)
+applied.
 
 ### Ported
 
@@ -81,6 +82,19 @@ paths this repo extracted (`python/robomp/src` → `src/carter_omp`,
   the terminal success/fallback row (`dropped` is now the anchor list), so a
   rejected POST no longer satisfies `has_successful_tool_call`. Ported to
   `src/carter_omp/host_tools.py` and `tests/test_host_tools.py`.
+- `fd4542b21d503007d9c589cd3b6beac9a2f254d2` (2026-10-03, merge of #13586 on
+  top of `c4d3204`) — the merge carries the main-side `set_todos` merge
+  simplification from the 18.5.0 wire-schema move (`c4d3204`): follow-up runs
+  now pass live phases straight through (`set_todos([*get_todos(), *phases])`)
+  instead of rebuilding phase dicts by hand. Safe here because the vendored
+  18.2.11 client already round-trips live `TodoPhase` objects through
+  `_normalize_todo_phases` with ids/status intact. Ported to
+  `src/carter_omp/worker.py`. Companion merges `f7055447` (portable test
+  fixtures) and `e0e356fe` (local rpc install) were already satisfied by the
+  earlier ports / local `[tool.uv.sources]` resolution; the monorepo
+  `oh-my-pi` → `omp` branding rename stays an intentional divergence, and the
+  `python/omp-rpc` → `sdk/python/omp-rpc` move plus new wire features stay
+  deferred behind the deliberate `OMP_VERSION` pin.
 
 ### Reviewed, not ported
 
