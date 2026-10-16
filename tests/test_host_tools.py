@@ -5372,3 +5372,106 @@ def test_push_gate_leaves_published_foreign_history_alone(db: Database, tmp_path
     parent_message = git("log", "-1", "--format=%B", "HEAD~1")
     assert "feat: foreign work" in parent_message
     assert "Co-authored-by" not in parent_message
+
+
+def test_push_gate_excludes_adopted_base_without_remote_cover(db: Database, tmp_path: Path, settings: Settings) -> None:
+    """An adopted fork head is judged on the run's commits only.
+
+    A PR head from a fork arrives via `FETCH_HEAD` only: no `origin/*` ref
+    reaches it, so the `--not --remotes=origin` exclusion from the earlier
+    fix (`alert3d#1`) has nothing to exclude and the identity gate would
+    demand the bot's authorship on the human-authored base — the
+    `mockingbird#413` refusal this fixes. `adopt_review_workspace` records
+    the inherited head in `refs/carter-omp/base/<branch>`; the gate anchors
+    there instead.
+    """
+    from carter_omp.sandbox import _adopted_base_ref
+
+    bindings, loop, thread = _bindings(db, tmp_path, httpx.MockTransport(lambda _r: httpx.Response(500)))
+    settings.git_coauthor = "Someone Else <someone@example.com>"
+    object.__setattr__(bindings, "settings", settings)
+    repo = bindings.workspace.repo_dir
+
+    def git(*args: str) -> str:
+        done = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True)
+        return done.stdout
+
+    try:
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "bot@example.com")
+        git("config", "user.name", "bot")
+        (repo / "a.txt").write_text("a")
+        git("add", "-A")
+        git("commit", "-q", "-m", "chore: base")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+        # A human-authored base with no remote cover (fork head via FETCH_HEAD).
+        git("config", "user.email", "human@example.com")
+        git("config", "user.name", "human")
+        (repo / "b.txt").write_text("b")
+        git("add", "-A")
+        git("commit", "-q", "-m", "feat: human base")
+        base_sha = git("rev-parse", "HEAD").strip()
+        git("update-ref", _adopted_base_ref(bindings.workspace.branch), base_sha)
+
+        # The run's own unpublished commits.
+        git("config", "user.email", "bot@example.com")
+        git("config", "user.name", "bot")
+        (repo / "c.txt").write_text("c")
+        git("add", "-A")
+        git("commit", "-q", "-m", "fix: mine, no trailer")
+
+        host_tools._normalize_unpushed_messages(bindings, {}, tool_name="gh_push_branch")
+    finally:
+        _stop_loop(loop, thread)
+
+    assert "Co-authored-by: Someone Else <someone@example.com>" in git("log", "-1", "--format=%B")
+    # The adopted base is untouched: same SHA, no trailer appended.
+    assert git("rev-parse", "HEAD~1").strip() == base_sha
+    parent_message = git("log", "-1", "--format=%B", "HEAD~1")
+    assert "feat: human base" in parent_message
+    assert "Co-authored-by" not in parent_message
+
+
+def test_unpushed_range_ignores_stale_adopted_base(db: Database, tmp_path: Path, settings: Settings) -> None:
+    """A marker that no longer ancestors HEAD is not honored.
+
+    A rebase may move the branch past the recorded base; anchoring there
+    would sweep base-branch history into the scan. The range falls back to
+    the remote-reachability form instead.
+    """
+    from carter_omp.sandbox import _adopted_base_ref
+
+    bindings, loop, thread = _bindings(db, tmp_path, httpx.MockTransport(lambda _r: httpx.Response(500)))
+    object.__setattr__(bindings, "settings", settings)
+    repo = bindings.workspace.repo_dir
+
+    def git(*args: str) -> str:
+        done = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True)
+        return done.stdout
+
+    try:
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "bot@example.com")
+        git("config", "user.name", "bot")
+        (repo / "a.txt").write_text("a")
+        git("add", "-A")
+        git("commit", "-q", "-m", "chore: base")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        (repo / "b.txt").write_text("b")
+        git("add", "-A")
+        git("commit", "-q", "-m", "fix: mine")
+        # A stale marker pointing at a side branch, not an ancestor of HEAD.
+        git("checkout", "-q", "-b", "side", "HEAD~1")
+        (repo / "side.txt").write_text("side")
+        git("add", "-A")
+        git("commit", "-q", "-m", "feat: unrelated side work")
+        side_sha = git("rev-parse", "HEAD").strip()
+        git("checkout", "-q", "main")
+        git("update-ref", _adopted_base_ref(bindings.workspace.branch), side_sha)
+
+        rev_range = host_tools._unpushed_rev_range(bindings)
+    finally:
+        _stop_loop(loop, thread)
+
+    assert rev_range == [f"origin/{bindings.repo.default_branch}..HEAD", "--not", "--remotes=origin"]
