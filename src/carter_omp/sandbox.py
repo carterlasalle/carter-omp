@@ -864,15 +864,39 @@ def _find_node_modules(repo_dir: Path, *, max_depth: int = _NODE_MODULES_SCAN_DE
     return found
 
 
+# trace:v1 id=impl.sandbox--node-modules-tracked-guard work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _node_modules_is_reclaimable(repo_dir: Path, candidate: Path) -> bool:
+    """True when no git-tracked file lives under ``candidate``.
+
+    Dependency installs are untracked by convention, but some checkouts track
+    tooling trees that happen to be named ``node_modules`` (e.g.
+    ``.codeops/plugin/node_modules``). Reclaiming one of those deletes tracked
+    files out from under the worktree and trips integrity guards. A checkout
+    that is not a git repo (or a failed probe) keeps the old behavior and
+    stays reclaimable.
+    """
+    try:
+        rel = candidate.relative_to(repo_dir).as_posix()
+    except ValueError:
+        return True
+    probe = _safe_run(["git", "ls-files", "--", rel], cwd=repo_dir)
+    if probe.returncode != 0:
+        return True
+    if probe.stdout.strip():
+        log.info("skipping reclaim of tracked node_modules", extra={"path": str(candidate)})
+        return False
+    return True
+
+
 # trace:v1 id=impl.sandbox--stage-workspace-trash work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _stage_workspace_trash(ws_root: Path) -> tuple[Path, ...]:
     """Rename reclaimable cache dirs into `.trash-*` staging dirs.
 
     Rename is atomic and near-free on the same filesystem, so a caller can
     hold a lock across this and defer the slow ``rmtree`` to after the lock
-    is dropped. Targets: every ``node_modules`` in the checkout, the
-    workspace-private XDG cache (bun install cache lives there) and the
-    tmpdir — all re-created by ``ensure_workspace`` +
+    is dropped. Targets: every ``node_modules`` in the checkout that holds no
+    git-tracked files, the workspace-private XDG cache (bun install cache
+    lives there) and the tmpdir — all re-created by ``ensure_workspace`` +
     ``ensure_workspace_dependencies`` on the next run. Session transcripts,
     context, artifacts and the git worktree are never touched.
 
@@ -882,10 +906,11 @@ def _stage_workspace_trash(ws_root: Path) -> tuple[Path, ...]:
     if not ws_root.is_dir():
         return ()
     staged = [p for p in ws_root.iterdir() if p.name.startswith(_TRASH_PREFIX)]
+    repo_dir = ws_root / "repo"
     candidates = [
         ws_root / ".omp-xdg" / "cache",
         ws_root / ".omp-tmp",
-        *_find_node_modules(ws_root / "repo"),
+        *(c for c in _find_node_modules(repo_dir) if _node_modules_is_reclaimable(repo_dir, c)),
     ]
     trash_root: Path | None = None
     for index, victim in enumerate(candidates):
