@@ -40,6 +40,7 @@ from carter_omp.manual_triage import ManualTriageConflict, enqueue_manual_triage
 from carter_omp.sandbox import (
     GitTransport,
     Workspace,
+    _adopted_base_ref,
     _prepare_slot_runtime_env,
     _safe_directory_env,
     _share_git_metadata_with_slots,
@@ -1190,8 +1191,29 @@ def _unpushed_rev_range(bindings: ToolBindings) -> list[str]:
     review branch is based on a `cursor/…` PR head). Excluding everything
     already reachable from a remote leaves exactly the commits this push
     publishes — the ones it is allowed to rewrite.
+
+    Remote reachability alone is not enough: an adopted review branch inherits
+    a PR head that may live on no `origin/*` ref at all (a fork head arrives
+    via `FETCH_HEAD` only; a same-repo head whose branch was since deleted is
+    pruned away). `adopt_review_workspace` records that inherited head in
+    `refs/carter-omp/base/<branch>`; anchoring the range there keeps the
+    human-authored base out of both the identity scan and the message
+    rewrite. The marker is honored only when it still resolves to an
+    ancestor of HEAD (a later rebase may have moved on); otherwise, and when
+    no marker exists, behavior is unchanged. Note the anchored form must be
+    `<base>..HEAD`, not `origin/<base>..HEAD --not <base>`: a trailing
+    `--not` after a `..` range does not exclude as expected (measured).
     """
-    return [f"origin/{bindings.repo.default_branch}..HEAD", "--not", "--remotes=origin"]
+    default_range = [f"origin/{bindings.repo.default_branch}..HEAD", "--not", "--remotes=origin"]
+    marker = _adopted_base_ref(bindings.workspace.branch)
+    resolved = _run_repo_command(bindings, ["git", "rev-parse", "--verify", "--quiet", marker])
+    base_sha = resolved.stdout.strip() if resolved.returncode == 0 else ""
+    if not base_sha:
+        return default_range
+    ancestor = _run_repo_command(bindings, ["git", "merge-base", "--is-ancestor", base_sha, "HEAD"])
+    if ancestor.returncode != 0:
+        return default_range
+    return [f"{base_sha}..HEAD", "--not", "--remotes=origin"]
 
 
 # trace:v1 id=impl.host-tools-configured-coauthor work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
@@ -1217,7 +1239,8 @@ def _normalize_unpushed_messages(bindings: ToolBindings, args: Mapping[str, Any]
     ``personal_website#82`` published commits with no trailer for exactly that
     reason. The push is the last point where the invariant can be guaranteed.
 
-    Rebuilds ``origin/<base>..HEAD`` with ``git commit-tree``, preserving
+    Rebuilds the unpushed range (`_unpushed_rev_range`: commits this push
+    publishes, never the inherited base) with ``git commit-tree``, preserving
     every tree, parent topology, identity, and date — only messages change.
     Safe against already-pushed commits: the push transport uses
     ``--force-with-lease``. Once a broken message is detected the repair is
@@ -1345,7 +1368,8 @@ def _guarded_push_branch(bindings: ToolBindings, args: Mapping[str, Any], tool_n
         _raise_command(f"git rev-parse failed: {err}")
     head_sha = head_proc.stdout.strip()
 
-    # Identity gate: every commit between the base branch and HEAD must
+    # Identity gate: every commit this push publishes (after the base branch
+    # and, on adopted review branches, after the inherited PR head) must
     # carry the configured author. Refuse to push otherwise so the agent
     # fixes it (`git commit --amend --reset-author --no-edit`).
     base = bindings.repo.default_branch

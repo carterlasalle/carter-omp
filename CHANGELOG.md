@@ -105,6 +105,7 @@ versions are `Unreleased` until the first tagged release.
   human never triggers, and neither does `unassigned`.
 
 ### Fixed
+- **Adopted review branches no longer trip the push identity gate on the inherited PR history.** The gate (and the co-author-trailer normalizer) excluded only commits reachable from an `origin/*` ref, but an adopted PR head can live on no such ref — a fork head arrives via `FETCH_HEAD` only, a same-repo head whose branch was since deleted is pruned away — so all of the human-authored base landed in the identity scan and the run was told to `amend --reset-author` work it must not rewrite (`mockingbird#413`: four author commits listed, run stalled, maintainer pushed by hand). `adopt_review_workspace` now records the inherited head in local-only `refs/carter-omp/base/<branch>` (moved on re-adoption, never pushed — the push refspec ships just the branch), and the unpushed range anchors there when it still ancestors `HEAD`, falling back to the remote-reachability form otherwise. Fixes #61.
 
 - **Review-workspace adoption no longer depends on `git switch -B`.** The
   container git answers that flag with `unknown switch 'B'`, so every

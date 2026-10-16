@@ -215,6 +215,19 @@ def make_branch(*, issue_number: int | str, title: str, seed: str | None = None)
     return f"carter-omp/{_short_hex(seed or f'{issue_number}-{title}')}/{_slug(title or f'issue-{issue_number}')}"
 
 
+# trace:v1 id=impl.sandbox-adopted-base-ref work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _adopted_base_ref(branch: str) -> str:
+    """Local-only marker for the adopted base of an owned branch.
+
+    `adopt_review_workspace` records the inherited PR head here so the push
+    gates can exclude it even when no `origin/*` ref reaches it (fork head,
+    deleted head branch). Kept outside `refs/heads/` and `refs/remotes/` on
+    purpose: the push refspec ships just the branch, so the marker never
+    leaves, and `--not --remotes=...` exclusions never see it.
+    """
+    return f"refs/carter-omp/base/{branch}"
+
+
 _BRANCH_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
@@ -1265,6 +1278,18 @@ class SandboxManager:
         code — so nothing is re-cloned: only the detached HEAD becomes a branch
         the run owns. `-B` (create-or-reset) keeps a second adoption idempotent;
         the name is derived from repo+issue, so it can only ever point here.
+
+        Records the adopted HEAD in `refs/carter-omp/base/<branch>` so the
+        push gates can tell the commits this run publishes (after the base)
+        from the inherited PR history (at or before the base). A PR head from
+        a fork — or a same-repo head whose branch was since deleted — is
+        reachable from no `origin/*` ref, so `origin/<base>..HEAD
+        --not --remotes=origin` would otherwise sweep those human-authored
+        commits into the identity scan and demand `amend --reset-author` on
+        work the bot must not rewrite. Re-adoption moves the marker with the
+        new base; the marker is local-only (the push refspec ships just the
+        branch) and doubles as the merge-base fallback when the base branch
+        itself is missing.
         """
         repo_dir = workspace.repo_dir
         branch = make_branch(
@@ -1272,6 +1297,14 @@ class SandboxManager:
             title=title,
             seed=f"{workspace.repo_full_name}#{workspace.issue_number}",
         )
+        env = _git_env_for_repo(repo_dir)
+        kwargs = _slot_subprocess_kwargs(slot_uid)
+        base_proc = _safe_run(["git", "rev-parse", "HEAD"], cwd=repo_dir, env=env, **kwargs)
+        if base_proc.returncode != 0:
+            raise GitCommandError(
+                ["git", "rev-parse", "HEAD"], base_proc.returncode, base_proc.stdout, base_proc.stderr
+            )
+        base_sha = base_proc.stdout.strip()
         # `git checkout -B`, not `git switch -B`: the switch subcommand
         # predates `-B` on some container git builds (busybox-style usage
         # output, `unknown switch 'B'`), while checkout has accepted `-B`
@@ -1285,6 +1318,12 @@ class SandboxManager:
         )
         if proc.returncode != 0:
             raise GitCommandError(command, proc.returncode, proc.stdout, proc.stderr)
+        marker = _adopted_base_ref(branch)
+        update = _safe_run(["git", "update-ref", marker, base_sha], cwd=repo_dir, env=env, **kwargs)
+        if update.returncode != 0:
+            raise GitCommandError(
+                ["git", "update-ref", marker, base_sha], update.returncode, update.stdout, update.stderr
+            )
         log.info(
             "adopted review worktree as an owned branch",
             extra={"key": workspace.workspace_key, "branch": branch},

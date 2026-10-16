@@ -2742,3 +2742,92 @@ def test_with_coauthor_trailer_is_idempotent_and_optional() -> None:
 
     # No co-author configured: the message passes through untouched.
     assert with_coauthor_trailer("fix: thing\n", "") == "fix: thing\n"
+
+
+def test_adopt_review_workspace_records_the_inherited_base(tmp_path: Path, upstream_repo: Path) -> None:
+    """Adoption marks the inherited head for the push gates.
+
+    A review checkout sits detached at the PR head; adopting it onto an
+    owned branch must record that head in `refs/carter-omp/base/<branch>`
+    so the push gates exclude the human-authored base even when no
+    `origin/*` ref reaches it (fork head, deleted head branch). The marker
+    is local-only and moves with re-adoption.
+    """
+    from carter_omp.sandbox import _adopted_base_ref
+
+    contributor = tmp_path / "contributor"
+    _git(["clone", str(upstream_repo), str(contributor)], cwd=tmp_path)
+    (contributor / "README.md").write_text("hello from pr\n", encoding="utf-8")
+    _git(["-C", str(contributor), "add", "README.md"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "pr change"],
+        cwd=str(contributor),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "GIT_AUTHOR_NAME": "c",
+            "GIT_AUTHOR_EMAIL": "c@t",
+            "GIT_COMMITTER_NAME": "c",
+            "GIT_COMMITTER_EMAIL": "c@t",
+        },
+    )
+    _git(["-C", str(contributor), "push", "origin", "HEAD:refs/pull/9/head"], cwd=tmp_path)
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=9,
+        title="incoming PR",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        pr_head=9,
+        author_name="carter_omp-bot",
+        author_email="carter_omp-bot@example.invalid",
+    )
+    base_sha = _head(ws.repo_dir)
+
+    owned = mgr.adopt_review_workspace(workspace=ws, title="apply review findings")
+
+    assert owned.branch.startswith("carter-omp/")
+    marker = _adopted_base_ref(owned.branch)
+    recorded = subprocess.run(
+        ["git", "rev-parse", "--verify", marker],
+        cwd=str(owned.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert recorded == base_sha
+    # Still the same checkout: adoption renames, never re-clones.
+    assert _head(owned.repo_dir) == base_sha
+
+    # Re-adoption after new work moves the marker to the new base.
+    (owned.repo_dir / "fix.txt").write_text("fix\n", encoding="utf-8")
+    _git(["-C", str(owned.repo_dir), "add", "fix.txt"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "fix: review finding"],
+        cwd=str(owned.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "GIT_AUTHOR_NAME": "b",
+            "GIT_AUTHOR_EMAIL": "b@t",
+            "GIT_COMMITTER_NAME": "b@t",
+            "GIT_COMMITTER_EMAIL": "b@t",
+        },
+    )
+    new_base = _head(owned.repo_dir)
+    assert new_base != base_sha
+    mgr.adopt_review_workspace(workspace=owned, title="apply review findings")
+    moved = subprocess.run(
+        ["git", "rev-parse", "--verify", marker],
+        cwd=str(owned.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert moved == new_base
