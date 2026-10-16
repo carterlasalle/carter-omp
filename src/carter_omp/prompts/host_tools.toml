@@ -31,14 +31,23 @@ event = "Ignored except for schema compatibility; the orchestrator always sends 
 
 # trace:v1 id=ops.host-tool-report-pain-point work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 [report_pain_point]
-description = "File a friction report about the *harness itself* against the carter-omp repo (the tool that rejected a valid call, the misleading error, the gate that blocked work for the wrong reason, the run that lost an hour to infrastructure). Opens one issue, labelled for triage, deduped by title so a repeat appends evidence instead of filing another. NEVER use it for defects in the repo you are working on — those are the job, not a report."
+description = "Vent any annoyance or pain point you hit in this run — the harness, a tool, a gate, the instructions, anything that made the work harder than it should have been. Opens one issue on the carter-omp repo, labelled for triage, deduped by title so a repeat appends evidence instead of filing another. Use it whenever something feels wrong, not just when something breaks. WANT: `bun check` passes locally but the push gate rejects with a different error (gate/reality mismatch); a tool description promises X but the call does Y; the third run in a row lost 10 minutes to the same confusing retry; these instructions told you to do something that turned out to be wrong. DO NOT WANT: narrating normal work (`I had to think for a moment`); restating the task; speculation about internals you cannot see; defects in the repo you are working on (those are the job, not a report). Max 3 per issue — spend them on what stung most."
 
 # trace:v1 id=ops.host-tool-report-pain-point-parameters work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 [report_pain_point.parameters]
-title = "One-line, specific summary of the fault (imperative or noun phrase, e.g. `gh_push_branch rejects a renamed workspace branch`)."
+title = "One-line, specific summary of the annoyance (imperative or noun phrase, e.g. `gh_push_branch rejects a renamed workspace branch`)."
 details = "Markdown: what you expected, what happened, the exact error text, and what you tried. Facts only; no speculation about internals you cannot see."
 severity = "`low` (annoyance), `medium` (default: wasted effort or a misleading failure), `high` (blocked publication or lost work)."
-area = "Optional short bucket: `harness`, `tool`, `gate`, `infra`, `docs`."
+area = "Optional short bucket: `harness`, `tool`, `gate`, `infra`, `docs`, `prompt`."
+
+# trace:v1 id=ops.host-tool-record-solution work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+[record_solution]
+description = "Write down what this run learned the hard way so the next run facing the same wall gets the answer at kickoff instead of re-deriving it. Call it when you burned real effort on something a short note would have skipped: state WHEN the next run should receive this (`trigger`: the situation in the next run's own words) and WHAT to inject (`body`: the answer, commands, paths, gotchas — concrete, under a paragraph). WANT: `trigger: bun check passes but push gate rejects with a different tsc error` + the actual cause/fix you found. DO NOT WANT: restating the task, narrating the whole run, speculation, anything already obvious from the repo docs."
+
+# trace:v1 id=ops.host-tool-record-solution-parameters work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+[record_solution.parameters]
+trigger = "The next run's situation in its own words — matched against the incoming directive at kickoff. Concrete symptoms, tool names, error text."
+body = "The answer to inject verbatim: cause, fix, commands, paths, gotchas. Concrete and short."
 
 [gh_post_comment]
 description = "Post a comment on the inbound thread (PR for PR conversations/reviews, originating issue otherwise). Pass `number` ONLY to post elsewhere."

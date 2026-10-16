@@ -249,8 +249,8 @@ def _slot_writable_tree(path: Path) -> None:
     except KeyError:
         return
     try:
-        path.mkdir(parents=True, exist_ok=True)
         start = path if path.is_dir() else path.parent
+        start.mkdir(parents=True, exist_ok=True)
         for root, dirs, files in os.walk(start):
             root_path = Path(root)
             os.chown(root_path, -1, gid)
@@ -828,6 +828,29 @@ async def _ack_pickup_reaction(inputs: TaskInputs, bindings: ToolBindings) -> No
             await bindings.github.add_issue_reaction(trigger.repository_full_name, number, "eyes")
     except Exception as exc:
         log.debug("pickup ack failed", extra={"delivery": inputs.delivery_id, "err": str(exc)[:120]})
+
+
+# trace:v1 id=impl.worker-solution-inject work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _solution_injection(db: Database, issue: IssueInfo | None, directive: DirectiveInfo | None) -> str:
+    """A past run's hard-won answer matching this task, or "".
+
+    Matches the incoming text (directive body for mentions, issue title+body
+    otherwise) against stored solution entries. One hit max, injected verbatim
+    above the kickoff — the retrieval half of the vent loop. Resumed runs
+    skip it: they already have the context.
+    """
+    if issue is None:
+        return ""
+    query = directive.body if directive is not None and directive.body.strip() else (f"{issue.title} {issue.body}")
+    try:
+        hit = db.match_solution_entry(query)
+    except Exception as exc:
+        log.warning("solution match failed", extra={"err": str(exc)[:160]})
+        return ""
+    if hit is None:
+        return ""
+    log.info("solution injected", extra={"id": hit["id"], "issue": issue.number})
+    return f"<past-solution>\nA previous run facing this wall left this note:\n\n{hit['body']}\n</past-solution>\n\n"
 
 
 # trace:v1 id=impl.worker-build-prompt work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
@@ -1458,6 +1481,8 @@ async def run_task(
         thread=thread,
         resuming=resuming,
     )
+    if not resuming:
+        prompt = _solution_injection(inputs.db, inputs.issue, directive) + prompt
     try:
         result = await asyncio.to_thread(
             _run_rpc_blocking,

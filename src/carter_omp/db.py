@@ -239,6 +239,40 @@ CREATE TABLE IF NOT EXISTS self_reports (
   updated_at   TEXT NOT NULL
 );
 
+-- Solution entries: what a run learned the hard way, written so the *next*
+-- run facing the same wall gets the answer at kickoff instead of
+-- re-deriving it. `trigger_desc` decides retrieval (FTS-matched against the
+-- incoming directive); `body` is injected verbatim. `hits`/`last_hit_at`
+-- record reuse; `stale` marks entries a human pruned (kept for audit, never
+-- retrieved).
+CREATE TABLE IF NOT EXISTS solution_entries (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  trigger_desc TEXT NOT NULL,
+  body         TEXT NOT NULL,
+  source_key   TEXT NOT NULL DEFAULT '',
+  hits         INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL,
+  last_hit_at  TEXT NOT NULL DEFAULT '',
+  stale        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS solution_entries_fts USING fts5(
+  trigger_desc, body, content='solution_entries', content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS solution_entries_ai AFTER INSERT ON solution_entries BEGIN
+  INSERT INTO solution_entries_fts(rowid, trigger_desc, body) VALUES (new.rowid, new.trigger_desc, new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS solution_entries_ad AFTER DELETE ON solution_entries BEGIN
+  INSERT INTO solution_entries_fts(solution_entries_fts, rowid, trigger_desc, body)
+    VALUES ('delete', old.rowid, old.trigger_desc, old.body);
+END;
+CREATE TRIGGER IF NOT EXISTS solution_entries_au AFTER UPDATE ON solution_entries BEGIN
+  INSERT INTO solution_entries_fts(solution_entries_fts, rowid, trigger_desc, body)
+    VALUES ('delete', old.rowid, old.trigger_desc, old.body);
+  INSERT INTO solution_entries_fts(rowid, trigger_desc, body) VALUES (new.rowid, new.trigger_desc, new.body);
+END;
+
 -- Per-repo reconcile watermark: the max `updated_at` the sync has fully
 -- ingested. Absent row = repo never backfilled.
 CREATE TABLE IF NOT EXISTS issue_index_sync (
@@ -1439,6 +1473,66 @@ class Database:
                 (issue_key, tool),
             ).fetchone()
         return row is not None
+
+    # trace:v1 id=impl.db-count-successful-tool-calls work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def count_successful_tool_calls(self, issue_key: str, tool: str) -> int:
+        """Successful calls of `tool` on this issue (anti-flood accounting)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM tool_calls WHERE issue_key=? AND tool=? AND error IS NULL",
+                (issue_key, tool),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    # trace:v1 id=impl.db-solution-entries work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def record_solution_entry(self, *, trigger_desc: str, body: str, source_key: str = "") -> int:
+        """Store a solution entry; returns its id. Dedupe is by exact trigger text."""
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC).isoformat()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM solution_entries WHERE trigger_desc=? AND stale=0",
+                (trigger_desc,),
+            ).fetchone()
+            if row is not None:
+                return int(row[0])
+            cur = self._conn.execute(
+                "INSERT INTO solution_entries (trigger_desc, body, source_key, created_at) VALUES (?, ?, ?, ?)",
+                (trigger_desc, body, source_key, now),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid or 0)
+
+    # trace:v1 id=impl.db-match-solution-entry work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def match_solution_entry(self, query: str) -> dict[str, object] | None:
+        """Best non-stale solution entry for `query` (FTS5, bm25), or None.
+
+        Terms are quoted so reporter/directive text can never inject FTS5
+        syntax (same quoting as the issue-index search).
+        """
+        from datetime import UTC, datetime
+
+        terms = [t for t in query.split() if t.strip()]
+        if not terms:
+            return None
+        quoted = " OR ".join(f'"{t.strip().replace(chr(34), "")}"' for t in terms[:12])
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT s.id, s.trigger_desc, s.body FROM solution_entries_fts f "
+                "JOIN solution_entries s ON s.rowid = f.rowid "
+                "WHERE solution_entries_fts MATCH ? AND s.stale=0 "
+                "ORDER BY bm25(solution_entries_fts) LIMIT 1",
+                (quoted,),
+            ).fetchone()
+            if row is None:
+                return None
+            self._conn.execute(
+                "UPDATE solution_entries SET hits=hits+1, last_hit_at=? WHERE id=?",
+                (datetime.now(UTC).isoformat(), int(row[0])),
+            )
+            self._conn.commit()
+            return {"id": int(row[0]), "trigger_desc": str(row[1]), "body": str(row[2])}
 
     # ---- PR review comment staging ----
     def stage_review_comment(

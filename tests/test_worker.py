@@ -21,6 +21,7 @@ import pytest
 from carter_omp import worker
 from carter_omp.config import Settings
 from carter_omp.git_ops import DirtyState
+from carter_omp.github_client import IssueInfo
 
 
 class _FakeRpcClient:
@@ -158,7 +159,7 @@ def _make_inputs(
         branch="carter_omp/issue-1",
     )
     repo = SimpleNamespace(full_name="acme/widgets", owner="acme", name="widgets")
-    issue = SimpleNamespace(repo="acme/widgets", number=1, title="bug")
+    issue = SimpleNamespace(repo="acme/widgets", number=1, title="bug", body="")
 
     db = SimpleNamespace(set_event_model=lambda _did, _model: None, get_issue=lambda _key: None)
     github = SimpleNamespace()
@@ -1531,6 +1532,49 @@ def test_run_token_ttl_outlives_the_task_budget(settings: Settings) -> None:
 
     assert ttl > 3600.0  # the longest task budget the run can be given
     assert ttl >= int(3600.0 + 60.0)
+
+
+def test_solution_injection_matches_directive_words(db, settings: Settings) -> None:
+    """A stored solution matching the directive is injected above the kickoff."""
+    del settings
+    db.record_solution_entry(
+        trigger_desc="push gate rejects what bun check passes",
+        body="Run the gate command locally first.",
+        source_key="octo/widget#7",
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=7,
+        title="gate confusion",
+        body="bun check green, push rejected",
+        state="open",
+        author="carter",
+        labels=(),
+        is_pull_request=False,
+    )
+    directive = worker.DirectiveInfo(body="push gate keeps rejecting my green check", author="carter")
+
+    out = worker._solution_injection(db, issue, directive)
+
+    assert "<past-solution>" in out
+    assert "Run the gate command locally first." in out
+
+
+def test_solution_injection_empty_without_match_or_issue(db, settings: Settings) -> None:
+    """No entry, no issue, or blank directive text → no injection."""
+    del settings
+    assert worker._solution_injection(db, None, None) == ""
+    bare = IssueInfo(
+        repo="octo/widget",
+        number=7,
+        title="t",
+        body="b",
+        state="open",
+        author="carter",
+        labels=(),
+        is_pull_request=False,
+    )
+    assert worker._solution_injection(db, bare, None) == ""
 
 
 def test_attach_run_token_mints_with_the_run_budget(

@@ -583,3 +583,68 @@ def test_report_pain_point_does_not_double_the_area_prefix(db, tmp_path: Path, s
         _stop_loop(loop, thread)
 
     assert seen["title"] == "[bot-report] infra: App token lacks workflows"
+
+
+def test_report_pain_point_caps_vents_per_issue(db, tmp_path: Path, settings: Settings) -> None:
+    """The 4th vent on one issue is refused: anti-flood, not a silent drop.
+
+    One run spiraling into dozens of meta-vents helps nobody; the refusal
+    tells the model to spend its remaining effort on the task.
+    """
+    bindings, loop, thread = _bindings(db, tmp_path, httpx.MockTransport(_self_report_handler([])))
+    settings.self_report_repo = SELF_REPO
+    settings.self_report_dispatch = False
+    object.__setattr__(bindings, "settings", settings)
+    try:
+        tool = next(x for x in build(bindings) if x.name == "report_pain_point")
+        for n in range(3):
+            tool.execute({"title": f"annoyance {n}", "details": "d"}, _ctx())
+        with pytest.raises(Exception, match="spent for this issue"):
+            tool.execute({"title": "annoyance 3", "details": "d"}, _ctx())
+    finally:
+        _stop_loop(loop, thread)
+
+    assert db.count_successful_tool_calls(bindings.issue_key, "report_pain_point") == 3
+
+
+def test_record_solution_roundtrip_and_kickoff_match(db) -> None:
+    """A recorded solution is FTS-matched by the next run's words."""
+    entry_id = db.record_solution_entry(
+        trigger_desc="bun check passes but push gate rejects with a different tsc error",
+        body="The gate runs tsc with the repo tsconfig, not the workspace one. Run bunx tsc --noEmit -p tsconfig.json first.",
+        source_key="octo/widget#7",
+    )
+    assert entry_id > 0
+    # Exact trigger dedupes: same wall, same entry.
+    assert (
+        db.record_solution_entry(
+            trigger_desc="bun check passes but push gate rejects with a different tsc error",
+            body="other body",
+            source_key="octo/widget#9",
+        )
+        == entry_id
+    )
+
+    hit = db.match_solution_entry("push gate rejects tsc error after bun check passed")
+    assert hit is not None and hit["id"] == entry_id
+    assert "tsconfig" in str(hit["body"])
+    assert db.match_solution_entry("something entirely unrelated aboutDNS") is None
+
+
+def test_record_solution_tool_registers_and_validates(db, tmp_path: Path, settings: Settings) -> None:
+    """The tool is exposed under REPORT_UPSTREAM and rejects empty fields."""
+    bindings, loop, thread = _bindings(db, tmp_path, httpx.MockTransport(_self_report_handler([])))
+    object.__setattr__(bindings, "settings", settings)
+    try:
+        tool = next(x for x in build(bindings) if x.name == "record_solution")
+        raw = tool.execute(
+            {"trigger": "gate rejects what local check passes", "body": "Run the gate command locally first."},
+            _ctx(),
+        )
+        assert isinstance(raw, str)
+        result = json.loads(raw)
+        assert result["id"] > 0
+        with pytest.raises(Exception, match="requires 'trigger'"):
+            tool.execute({"trigger": "  ", "body": "b"}, _ctx())
+    finally:
+        _stop_loop(loop, thread)

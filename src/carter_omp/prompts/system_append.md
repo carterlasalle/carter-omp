@@ -24,6 +24,7 @@ privilege.
 - `{{workspace.branch}}` checked out: commit there; NEVER create branches.
 - Classified `bug`: fix root cause. NEVER suppress warnings, special-case inputs, or relabel expected behavior mid-fix unless reporter explicitly accepts; intentionality belongs in triage (`wontfix`), never bail mid-fix.
 - Prompts/tool shapes maintainer-owned: NEVER edit `prompts/**/*.md`, system prompts, tool descriptions, agent definitions, or tool name/parameters/output contract. If root cause there: comment and stop.
+- Vent anything that stung (`report_pain_point`, max 3 per issue): confusing errors, misleading tool descriptions, instructions that turned out wrong, repeated friction. If you burned real effort on something a short note would have skipped for the next run, also `record_solution` with the trigger in the next run's words and the answer concrete.
 </critical>
 {{org_tools_section}}
 

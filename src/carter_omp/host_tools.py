@@ -904,6 +904,13 @@ def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
     # trace:v1 id=impl.host-tools-report-pain-point-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
         bindings.require(Capability.REPORT_UPSTREAM, "report_pain_point", args)
+        # Anti-flood: max 3 successful vents per issue. One run spiraling
+        # into dozens of meta-vents helps nobody; the dedupe already merges
+        # repeats by title, so beyond 3 the marginal report is noise.
+        if bindings.db.count_successful_tool_calls(bindings.issue_key, "report_pain_point") >= 3:
+            msg = "report_pain_point spent for this issue (3 vents filed); keep working the task."
+            _audit(bindings, "report_pain_point", args, error=msg)
+            _raise_command(msg)
         settings = bindings.settings
         target = (settings.self_report_repo if settings is not None else "").strip()
         title = args.get("title")
@@ -1030,6 +1037,57 @@ def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
                 },
             },
             "required": ["title", "details"],
+            "additionalProperties": False,
+        },
+        execute=execute,
+    )
+
+
+# ---------- record_solution ----------
+# trace:v1 id=impl.host-tools-record-solution work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _build_record_solution(bindings: ToolBindings) -> HostTool[Any, Any]:
+    """Store what this run learned the hard way for the next run facing the same wall.
+
+    The knowledge half of the vent loop: `report_pain_point` voices what
+    hurt; this writes the *answer* once the run fought through it, so the
+    next kickoff injects it instead of re-deriving it. Same capability gate
+    (a solution entry is an upstream write), same per-issue accounting.
+    """
+
+    # trace:v1 id=impl.host-tools-record-solution-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+        bindings.require(Capability.REPORT_UPSTREAM, "record_solution", args)
+        trigger = args.get("trigger")
+        body = args.get("body")
+        if not isinstance(trigger, str) or not trigger.strip():
+            _raise_command("record_solution requires 'trigger': when the next run should receive this.")
+        if not isinstance(body, str) or not body.strip():
+            _raise_command("record_solution requires 'body': the answer to inject.")
+        entry_id = bindings.db.record_solution_entry(
+            trigger_desc=trigger.strip()[:500],
+            body=body.strip()[:2000],
+            source_key=bindings.issue_key,
+        )
+        result = {"id": entry_id, "trigger": trigger.strip()[:500]}
+        _audit(bindings, "record_solution", args, result=result)
+        return json.dumps(result, indent=2)
+
+    return host_tool(
+        name="record_solution",
+        description=persona.host_tool_description("record_solution"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "trigger": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("record_solution", "trigger"),
+                },
+                "body": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("record_solution", "body"),
+                },
+            },
+            "required": ["trigger", "body"],
             "additionalProperties": False,
         },
         execute=execute,
@@ -3057,6 +3115,7 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
         tools.append(_build_request_review(bindings))
     if Capability.REPORT_UPSTREAM in caps:
         tools.append(_build_report_pain_point(bindings))
+        tools.append(_build_record_solution(bindings))
     if Capability.READ_GITHUB in caps:
         tools += [_build_release_ci_status(bindings), _build_release_job_log(bindings)]
     if Capability.UPDATE_DEFAULT_BRANCH in caps and Capability.MOVE_RELEASE_TAG in caps:
