@@ -1432,6 +1432,90 @@ async def test_run_rpc_omits_config_without_fallback(
     assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--no-extensions",)
 
 
+_ORG_TOML = """\
+[[tool]]
+name = "sentry"
+owners = ["phoenix-fire-labs"]
+command = "npx"
+args = ["-y", "@sentry/mcp-server"]
+env = ["SENTRY_ACCESS_TOKEN"]
+skills = []
+prompt_hint = "Sentry available."
+"""
+
+
+def _org_settings(tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Settings:
+    toml = tmp_path / "org_tools.toml"
+    toml.write_text(_ORG_TOML, encoding="utf-8")
+    monkeypatch.setattr(worker, "_AGENT_HOME", tmp_path / "agent-home")
+    return settings.model_copy(update={"org_tools_file": toml})
+
+
+def test_org_launch_writes_mcp_json_into_profile_agent_dir(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mcp.json must land where omp's `--profile` discovery reads it.
+
+    It used to go to `/srv/carter-omp-org-mcp/<profile>/mcp.json` while omp
+    read `~/.omp/profiles/<profile>/agent/mcp.json` — servers silently never
+    loaded (#391/#392/#393 triaged past this to the EACCES crash first).
+    """
+    import json
+
+    cfg = _org_settings(tmp_path, settings, monkeypatch)
+
+    env_overlay, argv, _section = worker._org_tool_launch(cfg, "Phoenix-Fire-Labs/mockingbird")
+
+    profile = "carter-omp-org-phoenix-fire-labs"
+    assert argv[:2] == ("--profile", profile)
+    mcp_path = tmp_path / "agent-home" / ".omp" / "profiles" / profile / "agent" / "mcp.json"
+    assert mcp_path.is_file(), "mcp.json not in the profile agent dir omp reads"
+    assert json.loads(mcp_path.read_text(encoding="utf-8"))["mcpServers"]["sentry"]["command"] == "npx"
+    assert env_overlay == {}
+
+
+def test_org_launch_removes_stale_profile_mcp_json(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An org that loses its tools must not keep its old MCP servers."""
+    cfg = _org_settings(tmp_path, settings, monkeypatch)
+    worker._org_tool_launch(cfg, "Phoenix-Fire-Labs/mockingbird")
+    profile = "carter-omp-org-phoenix-fire-labs"
+    mcp_path = tmp_path / "agent-home" / ".omp" / "profiles" / profile / "agent" / "mcp.json"
+    assert mcp_path.is_file()
+
+    empty_toml = tmp_path / "org_tools_empty.toml"
+    empty_toml.write_text("", encoding="utf-8")
+    cfg_empty = settings.model_copy(update={"org_tools_file": empty_toml})
+    env_overlay, argv, section = worker._org_tool_launch(cfg_empty, "Phoenix-Fire-Labs/mockingbird")
+
+    assert (env_overlay, argv, section) == ({}, (), "")
+    assert not mcp_path.exists(), "stale mcp.json would keep serving removed tools"
+
+
+def test_staging_normalization_skips_slot_writable_profiles(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`profiles/` must survive staging with slot-writable perms.
+
+    The normalization walk root-owns everything under the agent home except
+    `run/`; without the `profiles` exclusion every run start re-broke the
+    profile tree and omp died EACCES `mkdir profiles` (all of #391-393).
+    """
+    del settings
+    agent_home = tmp_path / "agent-home"
+    stage = tmp_path / "agent-home-stage"
+    profiles = agent_home / ".omp" / "profiles" / "p" / "agent"
+    profiles.mkdir(parents=True)
+    (profiles / "mcp.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(worker, "_AGENT_HOME", agent_home)
+    monkeypatch.setattr(worker, "_AGENT_HOME_STAGE", stage)
+
+    worker._stage_agent_home()
+
+    assert (profiles / "mcp.json").is_file(), "staging deleted the profile mcp.json"
+
+
 def test_run_token_ttl_outlives_the_task_budget(settings: Settings) -> None:
     """One token covers a whole run: a 10-minute TTL expired mid-run and every
     later mutation 401'd, leaving work committed but unpublished."""

@@ -170,6 +170,7 @@ _AGENT_HOME_STAGE = Path("/srv/agent-home-stage")
 _AGENT_BIN_DIR = "/opt/agent-bin"
 
 
+# trace:exempt reason=internal-detail
 def _stage_agent_home() -> None:
     """Copy late-appearing staged agent config into the runtime HOME."""
     if not _AGENT_HOME_STAGE.exists():
@@ -201,7 +202,10 @@ def _stage_agent_home() -> None:
         if root_path == _AGENT_HOME / ".omp":
             # ~/.omp/run is slot-writable daemon presence state, not template
             # config; keep it out of the read-only normalization below.
-            dirs[:] = [d for d in dirs if d != "run"]
+            # ~/.omp/profiles is the same class: omp creates per-profile
+            # state dirs (sessions, MCP sockets) as the slot user at startup,
+            # and root-owning them here EACCES-crashes the child (#391-393).
+            dirs[:] = [d for d in dirs if d not in ("run", "profiles")]
         try:
             root_path.chmod(0o755)
             if chown_to_root:
@@ -228,26 +232,26 @@ def _stage_agent_home() -> None:
                 log.warning("Failed to normalize agent home file %s: %s", path, exc)
 
 
-# trace:v1 id=impl.worker-run-dir work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-def _ensure_agent_run_dir() -> None:
-    """Keep ``~/.omp/run`` writable by every sandbox slot.
+# trace:v1 id=impl.worker-slot-writable work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _slot_writable_tree(path: Path) -> None:
+    """Chown a tree to group `omp`, dirs setgid+group-writable, files group-writable.
 
-    omp registers daemon project presence under ``~/.omp/run`` at startup,
-    nesting per-project dirs (``daemons/<hash>/clients``) that any slot user
-    must be able to create or enter regardless of which slot made them first.
-    The tree stays group ``omp``, setgid, group-writable; slot subprocesses
-    spawn with umask 0002 so their entries inherit group write.
+    Shared by the run-dir/profiles-dir ensures and the per-run mcp.json
+    write: the orchestrator runs as root and creates these paths, but the
+    omp child runs as the slot user. Without group ownership the slot user
+    gets EACCES on first write (profiles: all of #391/#392/#393, RPC exit 1).
+    No-op when not root or when the `omp` group is absent (local dev).
     """
     if os.geteuid() != 0:
         return
-    run_dir = _AGENT_HOME / ".omp" / "run"
     try:
         gid = grp.getgrnam("omp").gr_gid
     except KeyError:
         return
     try:
-        run_dir.mkdir(parents=True, exist_ok=True)
-        for root, dirs, files in os.walk(run_dir):
+        path.mkdir(parents=True, exist_ok=True)
+        start = path if path.is_dir() else path.parent
+        for root, dirs, files in os.walk(start):
             root_path = Path(root)
             os.chown(root_path, -1, gid)
             root_path.chmod(0o2770)
@@ -260,7 +264,35 @@ def _ensure_agent_run_dir() -> None:
                     os.chown(child, -1, gid)
                     child.chmod(0o660)
     except OSError as exc:
-        log.warning("Failed to prepare agent run dir %s: %s", run_dir, exc)
+        log.warning("Failed to prepare slot-writable tree %s: %s", path, exc)
+
+
+# trace:v1 id=impl.worker-run-dir work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _ensure_agent_run_dir() -> None:
+    """Keep ``~/.omp/run`` writable by every sandbox slot.
+
+    omp registers daemon project presence under ``~/.omp/run`` at startup,
+    nesting per-project dirs (``daemons/<hash>/clients``) that any slot user
+    must be able to create or enter regardless of which slot made them first.
+    The tree stays group ``omp``, setgid, group-writable; slot subprocesses
+    spawn with umask 0002 so their entries inherit group write.
+    """
+    _slot_writable_tree(_AGENT_HOME / ".omp" / "run")
+
+
+# trace:v1 id=impl.worker-profiles-dir work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _ensure_agent_profiles_dir() -> None:
+    """Keep ``~/.omp/profiles`` writable by every sandbox slot.
+
+    `--profile <name>` makes omp create its state tree
+    (``profiles/<name>/agent/{sessions,mcp sockets,...}``) as the slot user
+    at startup. The agent home is otherwise root-owned read-only, so without
+    this the child dies with EACCES `mkdir profiles` before the first tool
+    call (all of #391/#392/#393, attempts=3, RPC exit 1). Same group/setgid
+    shape as `_ensure_agent_run_dir`; the staging normalization above
+    explicitly skips `profiles` so the two never fight.
+    """
+    _slot_writable_tree(_AGENT_HOME / ".omp" / "profiles")
 
 
 _ORG_MCP_PROFILE_PREFIX = "carter-omp-org-"
@@ -289,17 +321,34 @@ def _org_tool_launch(settings: Settings, repo_full_name: str) -> tuple[dict[str,
         log.warning("org tools misconfigured, running without them", extra={"err": str(exc)[:200]})
         return empty
     matched = catalog.for_owner(owner)
+    profile = _ORG_MCP_PROFILE_PREFIX + "".join(c if c.isalnum() or c == "-" else "-" for c in owner.lower())
+    profile_mcp = _AGENT_HOME / ".omp" / "profiles" / profile / "agent" / "mcp.json"
     if not matched:
+        # No tools for this owner: remove a stale mcp.json from a previous
+        # config so the profile stops serving removed servers, then run bare.
+        if profile_mcp.is_file():
+            try:
+                profile_mcp.unlink()
+            except OSError:
+                pass
         return empty
     env_overlay = catalog.forwarded_env(owner)
     argv: list[str] = []
     # One omp profile per owner: `~/.omp/profiles/<name>/agent/mcp.json` is
-    # the per-run MCP discovery point omp actually reads (verified against
-    # the binary), so concurrent runs for different orgs never share servers.
-    profile = _ORG_MCP_PROFILE_PREFIX + "".join(c if c.isalnum() or c == "-" else "-" for c in owner.lower())
-    mcp_path = org_tools.write_run_mcp_json(catalog, owner, _ORG_MCP_DIR / profile / "mcp.json")
+    # the MCP discovery point omp actually reads (verified against the
+    # binary), so concurrent runs for different orgs never share servers.
+    # `_ensure_agent_profiles_dir` (via `_build_extra_env`) guarantees the
+    # tree is slot-writable before the child starts; without it omp dies
+    # with EACCES `mkdir profiles` (all of #391/#392/#393, RPC exit 1).
+    mcp_path = org_tools.write_run_mcp_json(catalog, owner, profile_mcp)
     if mcp_path is not None:
+        _slot_writable_tree(profile_mcp)
         argv += ["--profile", profile]
+    elif profile_mcp.is_file():
+        try:
+            profile_mcp.unlink()
+        except OSError:
+            pass
     skill_dirs = sorted({s for tool in matched for s in tool.skills})
     overlay_path = _write_org_tools_overlay(skill_dirs)
     if overlay_path is not None:
@@ -407,6 +456,7 @@ def _build_extra_env(settings: Settings) -> dict[str, str]:
     del settings  # kept for future hooks (model-specific env, etc.)
     _stage_agent_home()
     _ensure_agent_run_dir()
+    _ensure_agent_profiles_dir()
     env = dict.fromkeys(_SCRUBBED_ENV_KEYS, "")
     for key in os.environ:
         if key.startswith(_SCRUBBED_ENV_PREFIXES):
