@@ -2576,6 +2576,38 @@ def test_reclaim_all_caches_sweeps_workspaces_not_pool(tmp_path: Path) -> None:
     assert mgr.reclaim_all_caches() == 0
 
 
+def test_reclaim_workspace_caches_preserves_tracked_node_modules(tmp_path: Path) -> None:
+    # Regression: a checkout that tracks files under a `node_modules`-named
+    # tooling dir (e.g. `.codeops/plugin/node_modules`) must survive reclaim —
+    # deleting it reads as worktree damage to integrity guards. Untracked
+    # installs still go.
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws_root = _seed_reclaimable_workspace(mgr, "octo/widget", 9)
+    tracked = ws_root / "repo/.codeops/plugin/node_modules/pkg.js"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("x", encoding="utf-8")
+    _git(["init", "-q", "."], cwd=ws_root / "repo")
+    _git(
+        ["-c", "user.email=t@t", "-c", "user.name=t", "add", ".codeops/plugin/node_modules/pkg.js"],
+        cwd=ws_root / "repo",
+    )
+    _git(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], cwd=ws_root / "repo")
+
+    assert mgr.reclaim_workspace_caches(repo="octo/widget", number=9) is True
+
+    assert tracked.exists()
+    deleted = subprocess.run(
+        ["git", "ls-files", "--deleted"],
+        cwd=str(ws_root / "repo"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert deleted == ""
+    assert not (ws_root / "repo/node_modules").exists()
+    assert not (ws_root / "repo/packages/tui/node_modules").exists()
+
+
 def test_ensure_workspace_refreshes_review_worktree_to_the_new_pr_head(tmp_path: Path, upstream_repo: Path) -> None:
     """A re-review must inspect the PR's *current* head, not the original one.
 
