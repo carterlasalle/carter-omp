@@ -9,6 +9,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import click
+import httpx
 import uvicorn
 
 from carter_omp.config import Settings, get_settings
@@ -218,6 +219,40 @@ def status() -> None:
             f"{release_row.key:<40} state={release_row.state:<12} rounds={release_row.rounds:<2} "
             f"sha={release_row.current_sha[:12]} updated={release_row.updated_at}{error}"
         )
+
+
+# trace:v1 id=impl.cli-stop work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+@main.command()
+@click.argument("issue_ref")
+def stop(issue_ref: str) -> None:
+    """Cancel every running run on an issue, like `@bot stop` from the CLI.
+
+    ISSUE_REF is `owner/repo#NN`. Queues a `stop` control-command event the
+    running pool consumes — same path a mention takes, so no model turn and
+    no GitHub comment. Reports the running deliveries found; the stop event
+    cancels them when the dispatcher reaches it (same wake latency as any
+    queued event).
+    """
+    from carter_omp.manual_triage import enqueue_stop, parse_issue_ref
+
+    cfg = _settings_or_die()
+    cfg.ensure_paths()
+    try:
+        repo_full, number = parse_issue_ref(issue_ref)
+    except InvalidIssueRef as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(2)
+    if not cfg.allows(repo_full):
+        click.echo(f"refusing: {repo_full} not in CARTER_OMP_REPO_ALLOWLIST", err=True)
+        sys.exit(2)
+    db = get_database(cfg.sqlite_path)
+
+    # trace:exempt reason=internal-detail
+    async def _go() -> None:
+        delivery, running = await enqueue_stop(db=db, repo_full=repo_full, number=number)
+        click.echo(json.dumps({"delivery": delivery, "state": "queued", "running": running}, indent=2))
+
+    asyncio.run(_go())
 
 
 @main.command()
@@ -640,7 +675,9 @@ def _upsert_env_file(path: Path, updates: Mapping[str, str]) -> list[str]:
 
 
 # trace:v1 id=impl.cli-app-get work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
-def _app_get(path: str, *, app_id: str, private_key_pem: str, transport: object | None = None) -> object | None:
+def _app_get(
+    path: str, *, app_id: str, private_key_pem: str, transport: httpx.BaseTransport | None = None
+) -> httpx.Response | None:
     """`app_auth.app_get` that yields None instead of raising.
 
     Network hiccups and JWT problems must not turn a "is the App installed
@@ -650,31 +687,31 @@ def _app_get(path: str, *, app_id: str, private_key_pem: str, transport: object 
     from carter_omp.app_auth import app_get
 
     try:
-        return app_get(path, app_id=app_id, private_key_pem=private_key_pem, transport=transport)  # type: ignore[arg-type]
+        return app_get(path, app_id=app_id, private_key_pem=private_key_pem, transport=transport)
     except Exception:
         return None
 
 
 # trace:v1 id=impl.cli-app-slug work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
-def _app_slug(*, app_id: str, private_key_pem: str, transport: object | None = None) -> str | None:
+def _app_slug(*, app_id: str, private_key_pem: str, transport: httpx.BaseTransport | None = None) -> str | None:
     """The App's public slug, for building the one-click install URL."""
     resp = _app_get("/app", app_id=app_id, private_key_pem=private_key_pem, transport=transport)
-    if resp is None or getattr(resp, "status_code", 500) >= 400:
+    if resp is None or resp.status_code >= 400:
         return None
-    slug = resp.json().get("slug")  # type: ignore[attr-defined]
+    slug = resp.json().get("slug")
     return str(slug) if isinstance(slug, str) and slug else None
 
 
 # trace:v1 id=impl.cli-installation-for-owner work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def _installation_for_owner(
-    owner: str, *, app_id: str, private_key_pem: str, transport: object | None = None
+    owner: str, *, app_id: str, private_key_pem: str, transport: httpx.BaseTransport | None = None
 ) -> int | None:
     """Installation id for an org or user account, or None when not installed."""
     for path in (f"/orgs/{owner}/installation", f"/users/{owner}/installation"):
         resp = _app_get(path, app_id=app_id, private_key_pem=private_key_pem, transport=transport)
-        if resp is None or getattr(resp, "status_code", 500) != 200:
+        if resp is None or resp.status_code != 200:
             continue
-        installation_id = resp.json().get("id")  # type: ignore[attr-defined]
+        installation_id = resp.json().get("id")
         if isinstance(installation_id, int):
             return installation_id
     return None

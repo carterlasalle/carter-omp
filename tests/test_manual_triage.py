@@ -19,7 +19,7 @@ from carter_omp.capabilities import ISSUE_RUN_CAPABILITIES, Capability
 from carter_omp.db import issue_key
 from carter_omp.github_client import IssueInfo, RepoInfo
 from carter_omp.github_events import TriggerContext
-from carter_omp.manual_triage import ManualTriageConflict, enqueue_manual_triage, manual_delivery_id
+from carter_omp.manual_triage import ManualTriageConflict, enqueue_manual_triage, enqueue_stop, manual_delivery_id
 
 
 def _github() -> SimpleNamespace:
@@ -81,3 +81,31 @@ async def test_enqueue_manual_triage_reuses_the_slot_and_refuses_active_rows(db)
     again = await enqueue_manual_triage(db=db, github=cast(Any, _github()), repo_full="octo/self", number=7)
     assert again == first
     assert db.get_event(again).state == "queued"
+
+
+async def test_enqueue_stop_queues_control_command(db) -> None:
+    """The stop event carries the shape `_handle_control_command` consumes."""
+    from carter_omp.queue import _control_command
+
+    delivery, running = await enqueue_stop(db=db, repo_full="octo/self", number=7)
+    assert running == []
+    row = db.get_event(delivery)
+    assert row is not None and row.state == "queued"
+    assert row.event_type == "issue_comment"
+    assert row.issue_key == issue_key("octo/self", 7)
+    directive = row.payload.get("_carter_omp_directive")
+    assert _control_command(directive.get("body")) == "stop"
+    assert row.payload.get("_carter_omp_task") == "handle_comment"
+    assert "_carter_omp_trigger" in row.payload
+
+
+async def test_enqueue_stop_reports_running_deliveries(db) -> None:
+    """Running rows on the issue are named so the CLI can report them."""
+
+    first = await enqueue_manual_triage(db=db, github=cast(Any, _github()), repo_full="octo/self", number=7)
+    # Simulate a claimed run: manual triage leaves rows queued; the stop
+    # path reads whatever the dispatcher marked running.
+    db.mark_event(first, "running")
+    delivery, running = await enqueue_stop(db=db, repo_full="octo/self", number=7)
+    assert delivery == "manual-stop-octo__self-7"
+    assert running == [first]

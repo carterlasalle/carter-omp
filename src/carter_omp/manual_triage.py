@@ -182,6 +182,57 @@ async def enqueue_manual_triage(
     return delivery
 
 
+# trace:v1 id=impl.manual-stop-enqueue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+async def enqueue_stop(
+    *,
+    db: Database,
+    repo_full: str,
+    number: int,
+    actor_login: str = "",
+) -> tuple[str, list[str]]:
+    """Queue a `stop` control-command event for an issue, like `@bot stop`.
+
+    Returns `(delivery_id, running)`: the queued stop event plus the running
+    deliveries found at enqueue time (informational — the stop event cancels
+    them when the pool consumes it).
+    """
+    key = issue_key(repo_full, number)
+    running = [str(e.get("delivery_id") or "") for e in db.list_running_events() if e.get("issue_key") == key]
+    running = [d for d in running if d]
+    delivery = f"manual-stop-{repo_full.replace('/', '__')}-{number}"
+    payload: dict[str, Any] = {
+        "action": "created",
+        "issue": {"number": number},
+        "comment": {"body": "stop"},
+        "repository": {"full_name": repo_full},
+        "_carter_omp_directive": {
+            "body": "stop",
+            "author": actor_login or "cli",
+            "pragmas": [],
+            "authorizes_impl": False,
+        },
+        "_carter_omp_trigger": build_manual_trigger(
+            repo_full=repo_full,
+            number=number,
+            delivery_id=delivery,
+            actor_login=actor_login,
+            tool="cli-stop",
+            capabilities=frozenset(),
+        ).to_record(),
+        "_carter_omp_task": "handle_comment",
+    }
+    db.replace_event_if_state_in(
+        delivery_id=delivery,
+        event_type="issue_comment",
+        repo=repo_full,
+        issue_key=key,
+        payload=payload,
+        state="queued",
+        allowed_existing_states=INACTIVE_EVENT_STATES,
+    )
+    return delivery, running
+
+
 _TERMINAL_STATES: tuple[str, ...] = ("done", "failed", "skipped")
 
 
@@ -225,6 +276,7 @@ __all__ = [
     "await_terminal_state",
     "build_issues_opened_payload",
     "enqueue_manual_triage",
+    "enqueue_stop",
     "manual_delivery_id",
     "parse_issue_ref",
 ]
