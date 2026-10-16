@@ -43,7 +43,7 @@ package-dir = { "carter_omp" = "src/carter_omp" }
 packages = ["carter_omp", "carter_omp.proxy"]
 
 [tool.setuptools.package-data]
-carter_omp = ["prompts/*", "py.typed", "static/*", "static/assets/*"]
+carter_omp = ["prompts/*", "py.typed", "static/*", "static/assets/*", "skills/*/SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -49,12 +49,16 @@ def _load(name: str) -> str:
     return resources.files("carter_omp.prompts").joinpath(name).read_text(encoding="utf-8")
 
 
+# trace:v1 id=impl.persona-load-toml work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 @cache
 def _load_toml(name: str) -> Mapping[str, Any]:
-    data = tomllib.loads(_load(name))
-    if not isinstance(data, Mapping):
-        raise ValueError(f"prompt data file {name!r} must contain a TOML table")
-    return data
+    # `tomllib.loads` always returns a dict or raises, so there is no
+    # non-table case to guard — the real failure mode is a malformed file,
+    # whose bare `TOMLDecodeError` names no file. Wrap it with the name.
+    try:
+        return tomllib.loads(_load(name))
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"prompt data file {name!r} is not valid TOML: {exc}") from exc
 
 
 def _require_mapping(value: Any, context: str) -> Mapping[str, Any]:
@@ -151,7 +155,7 @@ def coauthor_rule(coauthor: str) -> str:
     )
 
 
-# trace:v1 id=impl.persona-system-append work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+# trace:v1 id=impl.persona-system-append work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def system_append(
     *,
     repo: RepoInfo,
@@ -159,6 +163,7 @@ def system_append(
     workspace: Workspace,
     bot_login: str,
     coauthor: str = "",
+    org_tools_section: str = "",
 ) -> str:
     return render(
         _load("system_append.md"),
@@ -168,23 +173,35 @@ def system_append(
             "workspace": workspace,
             "bot_login": bot_login,
             "coauthor_rule": coauthor_rule(coauthor),
+            "org_tools_section": org_tools_section,
         },
     )
 
 
-def system_append_pr_review(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace, bot_login: str) -> str:
+# trace:v1 id=impl.persona-system-append-pr-review work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def system_append_pr_review(
+    *, repo: RepoInfo, issue: IssueInfo, workspace: Workspace, bot_login: str, org_tools_section: str = ""
+) -> str:
     return render(
         _load("system_append_pr_review.md"),
-        {"repo": repo, "issue": issue, "workspace": workspace, "bot_login": bot_login},
+        {
+            "repo": repo,
+            "issue": issue,
+            "workspace": workspace,
+            "bot_login": bot_login,
+            "org_tools_section": org_tools_section,
+        },
     )
 
 
+# trace:v1 id=impl.persona-system-append-release work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def system_append_release(
     *,
     repo: RepoInfo,
     release: ReleaseTaskContext,
     workspace: Workspace,
     release_commit_prefix: str,
+    org_tools_section: str = "",
 ) -> str:
     """Render the invariant release-repair instructions for every round."""
     return render(
@@ -194,6 +211,7 @@ def system_append_release(
             "release": release,
             "workspace": workspace,
             "release_commit_prefix": release_commit_prefix,
+            "org_tools_section": org_tools_section,
         },
     )
 

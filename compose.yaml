@@ -113,6 +113,19 @@ services:
       # Credential for the OpenRouter leg of the fallback chain. Same sharing
       # caveat as above.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # --- org-scoped agent tools (`org_tools.toml`) ---
+      # Path to the org-tools TOML file inside the container. Empty (default)
+      # disables the feature. To enable: copy `org_tools.toml.example` to
+      # `./org_tools.toml`, uncomment the bind mount under `volumes:` below,
+      # and set the path here. Each `[[tool]]` entry names orchestrator env
+      # vars forwarded ONLY to runs for its bound owners — e.g.
+      # SENTRY_ACCESS_TOKEN reaches phoenix-firelabs runs, never other orgs.
+      CARTER_OMP_ORG_TOOLS_FILE: ${CARTER_OMP_ORG_TOOLS_FILE:-}
+      # Sentry User Auth Token (org:read project:read event:read minimum)
+      # for the `sentry` MCP server on phoenix-firelabs runs. Create at
+      # Sentry → Settings → Auth Tokens. Forwarded per-org, never written
+      # to disk; the MCP stdio child inherits it from the omp run env.
+      SENTRY_ACCESS_TOKEN: ${SENTRY_ACCESS_TOKEN:-}
 
       # --- runtime tuning ---
       CARTER_OMP_MAX_CONCURRENCY: ${CARTER_OMP_MAX_CONCURRENCY:-8}
@@ -168,6 +181,10 @@ services:
       # CARTER_OMP_MODEL.
       - ${HOME}/.agent/AGENTS.md:/srv/agent-home-stage/.agent/AGENTS.md:ro
       - ${HOME}/.agent/rules:/srv/agent-home-stage/.agent/rules:ro
+      # Org-scoped agent tools: uncomment with CARTER_OMP_ORG_TOOLS_FILE to
+      # enable. Read-only; the file holds tool definitions only, never
+      # secrets (those stay in `.env` → `environment:` above).
+      # - ./org_tools.toml:/srv/org_tools.toml:ro
     # Localhost-only: the only ingress is a TLS reverse proxy (see Caddyfile)
     # that forwards /webhook/* and 404s everything else. Nothing here is
     # directly reachable from the host network, let alone the internet.

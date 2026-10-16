@@ -197,7 +197,7 @@ def _patch_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("carter_omp.worker.host_tools.build", lambda _b: ())
     monkeypatch.setattr(
         "carter_omp.worker.persona.system_append",
-        lambda *, repo, issue, workspace, bot_login, coauthor="": "SYS",
+        lambda *, repo, issue, workspace, bot_login, coauthor="", org_tools_section="": "SYS",
     )
     monkeypatch.setattr(
         "carter_omp.worker.persona.seed_phases",

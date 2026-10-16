@@ -296,6 +296,45 @@ Three things stay true across accounts:
 Finish with `docker compose exec carter-omp carter-omp doctor` (it prints the
 allowlist, owners, installation ids, and both model selectors).
 
+## 11. Org-scoped agent tools (MCP, skills, secrets)
+
+<!-- trace:v1 id=doc.setup-org-tools work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P -->
+
+One deployment serves many owners, but third-party tooling is per-org: a
+Sentry token belongs to one org, a staging credential to another. `org_tools.toml`
+(pointed at by `CARTER_OMP_ORG_TOOLS_FILE`) binds named tools to the owners
+they may serve — runs for other owners never see the tool, its skills, or its
+secrets. Adding a tool for a new org is config-only, no code:
+
+```bash
+cp org_tools.toml.example org_tools.toml   # then add a [[tool]] block
+# uncomment the org_tools.toml bind mount in compose.yaml
+# set CARTER_OMP_ORG_TOOLS_FILE=/srv/org_tools.toml in .env
+# put the tool's secret in .env (e.g. SENTRY_ACCESS_TOKEN=sntryu_...)
+docker compose up -d                        # env-only change — no rebuild
+```
+
+Passing a secret safely: the TOML file holds tool *definitions* only, never
+credentials. `env = [...]` names orchestrator env vars; the worker forwards
+them ONLY into runs for the bound owners, and the MCP stdio child inherits
+them from the run's env — so the token never lands on disk, in `ps` output,
+or in another org's `printenv`. Create scoped tokens (Sentry: Settings →
+Auth Tokens, minimum `org:read project:read event:read`).
+
+MCP vs CLI: prefer the MCP server when one exists. A CLI needs a binary in
+the image plus per-invocation flags the agent must get right, and its output
+is shell-scraped text; an MCP server gives the model typed tools it calls
+natively (`sentry` exposes `inspect`/`triage`), versions via `npx`, and
+scopes via per-server config. The hosted OAuth flavor
+(`mcp.sentry.dev`) needs an interactive browser flow a headless bot cannot
+complete — use the stdio server with a scoped User Auth Token instead.
+
+Fix discipline is built in, not per-org: the `ci-fix-dont-freeze` skill ships
+in the image and every system prompt mandates loading it before any fix — a
+CI/type/lint/test failure is a CLUE of unfinished code to finish, never a
+nuisance to suppress or baseline. Org entries may add their own skills via
+`skills = [...]` for tool-specific guidance.
+
 ## Reference
 
 <!-- trace:v1 id=doc.setup-reference work=WORK-CO-Q8Z1HJJJ -->

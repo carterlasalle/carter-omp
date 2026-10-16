@@ -20,6 +20,7 @@ from carter_omp.natives_cache import (
     CACHE_KEY_PATHS,
     NativesCache,
     _atomic_link,
+    _normalize_platform,
     compute_key,
 )
 
@@ -172,8 +173,8 @@ def test_compute_key_raises_on_non_repo(tmp_path: Path) -> None:
 # ---- populate / capture ----
 
 
-def _cache(tmp_path: Path, **kwargs: object) -> NativesCache:
-    return NativesCache(tmp_path / "natives-cache", **kwargs)  # type: ignore[arg-type]
+def _cache(tmp_path: Path, **kwargs: int) -> NativesCache:
+    return NativesCache(tmp_path / "natives-cache", **kwargs)
 
 
 def test_populate_workspace_miss_is_noop(tmp_path: Path) -> None:
@@ -282,7 +283,8 @@ def test_populate_cross_device_falls_back_to_copy(tmp_path: Path, monkeypatch: p
     # Simulate cross-device hardlink failure for every os.link call.
     real_link = os.link
 
-    def fake_link(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_link(src, dst):
+        del dst  # arity must match os.link; the fake always raises EXDEV
         raise OSError(errno.EXDEV, "Cross-device link", str(src))
 
     monkeypatch.setattr(os, "link", fake_link)
@@ -415,3 +417,19 @@ def test_atomic_link_replaces_existing_target(tmp_path: Path) -> None:
     _atomic_link(src, dst)
     assert dst.read_bytes() == b"new"
     assert dst.stat().st_ino == src.stat().st_ino
+
+
+# ---- _normalize_platform ----
+
+
+def test_normalize_platform_covers_every_branch() -> None:
+    """Every platform branch is reachable on any host via the parameter."""
+    assert _normalize_platform("linux") == "linux"
+    assert _normalize_platform("linux-musl") == "linux"
+    assert _normalize_platform("darwin") == "darwin"
+    assert _normalize_platform("win32") == "win32"
+    assert _normalize_platform("cygwin") == "win32"
+    assert _normalize_platform("freebsd") == "freebsd"
+    import sys
+
+    assert _normalize_platform() == _normalize_platform(sys.platform)

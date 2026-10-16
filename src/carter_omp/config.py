@@ -318,6 +318,12 @@ class Settings(BaseSettings):
     # repo has a sync watermark.
     issue_index_sync_seconds: float = Field(900.0, alias="CARTER_OMP_ISSUE_INDEX_SYNC_SECONDS")
 
+    # Org-scoped agent tools. Path to a TOML file of `[[tool]]` entries, each
+    # binding a named third-party tool (MCP server, skills, prompt hint) to
+    # the repo owners it may serve, e.g. Sentry for one org. Empty disables.
+    # See `carter_omp.org_tools` and `org_tools.toml.example`.
+    org_tools_file: Path | None = Field(None, alias="CARTER_OMP_ORG_TOOLS_FILE")
+
     # pi-natives build-output cache. Hardlinks pre-built
     # `packages/natives/native/*.node` (and its companions) into new
     # workspaces keyed by the git tree-hashes of inputs that determine the

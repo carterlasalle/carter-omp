@@ -33,13 +33,9 @@ APP_JWT_TTL_SECONDS = 540
 INSTALLATION_TOKEN_TTL_SECONDS = 3600
 
 
-# trace:exempt reason=trivial-base64-codec-helpers
+# trace:exempt reason=trivial-base64-codec-helper
 def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
-def _b64url_decode(data: str) -> bytes:
-    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
 
 
 def _read_der_length(buf: bytes, offset: int) -> tuple[int, int]:
@@ -90,7 +86,7 @@ def _parse_rsa_private_key(pem: str) -> tuple[int, int, int]:
 # trace:v1 id=impl.github-app-auth work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def mint_app_jwt(*, app_id: str, private_key_pem: str, now: float | None = None) -> str:
     now_int = int(now if now is not None else time.time())
-    n, e, d = _parse_rsa_private_key(private_key_pem)
+    n, _, d = _parse_rsa_private_key(private_key_pem)
     header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
     payload = _b64url(json.dumps({"iat": now_int - 60, "exp": now_int + APP_JWT_TTL_SECONDS, "iss": app_id}).encode())
     signing_input = f"{header}.{payload}".encode("ascii")

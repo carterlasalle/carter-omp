@@ -17,7 +17,7 @@ import logging
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -136,15 +136,22 @@ class GitHubProxyClient:
             run_token=run_token,
         )
 
+    # trace:exempt reason=internal-detail
     def _async_client(self) -> httpx.AsyncClient:
+        # The field admits sync transports because tests inject dual-protocol
+        # `MockTransport` (it implements `handle_async_request` despite its
+        # `BaseTransport` ABC). The cast states that runtime truth the union
+        # cannot derive; a genuinely sync-only transport would fail here, as
+        # it would inside `AsyncClient` itself.
         return httpx.AsyncClient(
             base_url=self._base_url,
-            transport=self._transport,  # type: ignore[arg-type]
+            transport=cast("httpx.AsyncBaseTransport | None", self._transport),
             timeout=self._timeout,
         )
 
     _TRANSIENT_RETRY_DELAYS = (1.0, 3.0, 10.0)
 
+    # trace:exempt reason=internal-detail
     async def _request(
         self,
         method: str,
@@ -187,7 +194,11 @@ class GitHubProxyClient:
                     extra={"method": method, "path": path, "attempt": attempt + 1, "delay": delay, "error": str(exc)},
                 )
                 await asyncio.sleep(delay)
-        raise last_exc  # type: ignore[misc]
+        # The retry schedule always ends with `delay=None`, which breaks with
+        # `last_exc` set — reaching here with None is impossible, and the
+        # assert makes that loop invariant explicit instead of trusting it.
+        assert last_exc is not None
+        raise last_exc
 
     # ---- reads ----
     async def get_repo(self, repo: str) -> RepoInfo:
@@ -532,6 +543,7 @@ class ProxyGitTransport:
             run_token=run_token,
         )
 
+    # trace:exempt reason=internal-detail
     def _post(self, path: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
         body_bytes = json.dumps(body).encode("utf-8")
         last_exc: Exception | None = None
@@ -558,7 +570,10 @@ class ProxyGitTransport:
                     extra={"path": path, "attempt": attempt + 1, "delay": delay, "error": str(exc)},
                 )
                 time.sleep(delay)
-        raise last_exc  # type: ignore[misc]
+        # Same loop invariant as the async path above: the schedule ends with
+        # `delay=None`, which breaks with `last_exc` set.
+        assert last_exc is not None
+        raise last_exc
 
     def clone_pool(self, *, repo: str, clone_url: str, default_branch: str, target: Path) -> None:
         del target  # remote-resolved on the proxy side from `repo`

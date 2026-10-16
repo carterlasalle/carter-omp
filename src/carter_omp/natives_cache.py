@@ -75,10 +75,13 @@ _LOCKFILE_NAME = ".lock"
 _NULL_TREE_HASH = "0" * 40  # placeholder for paths missing from HEAD
 
 
-def _normalize_platform() -> str:
+# trace:v1 id=impl.natives-normalize-platform work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def _normalize_platform(value: str | None = None) -> str:
     """Mirror node's ``process.platform`` so the cache key matches
-    ``build-native.ts``'s filename convention."""
-    s = sys.platform
+    ``build-native.ts``'s filename convention. The platform is a parameter
+    (defaulting to this host) so every branch is reachable and testable on
+    any host — not just the one the checker happens to run on."""
+    s = sys.platform if value is None else value
     if s.startswith("linux"):
         return "linux"
     if s == "darwin":
@@ -464,11 +467,12 @@ class NativesCache:
         return evicted
 
 
+# trace:exempt reason=internal-detail
 def _dir_size(path: Path) -> int:
     """Sum of file sizes under ``path``. Symlinks counted as their lstat
     size (not the target). Errors swallowed — GC is best-effort."""
     total = 0
-    for root, _dirs, files in os.walk(path):
+    for root, _, files in os.walk(path):
         for name in files:
             try:
                 total += os.lstat(os.path.join(root, name)).st_size

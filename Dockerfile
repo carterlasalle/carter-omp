@@ -152,6 +152,12 @@ RUN corepack enable \
     && corepack prepare yarn@1.22.22 --activate \
     && yarn --version
 
+# Pre-installed org-tool MCP servers. `npx -y <pkg>` would fetch at run time;
+# a cold fetch blows past omp's MCP startup timeout and the run loses the
+# server exactly when it needs it. Pinning here matches the image's pinned
+# OMP/Node/Bun policy; bump alongside `org_tools.toml.example`.
+RUN npm install --global --no-audit --no-fund @sentry/mcp-server@0.42.0 \
+    && sentry-mcp --version
 # Agent-visible shim in front of `corepack`. Enabling it writes into the
 # root-owned Node bin dir, so a run executing as its slot uid gets EACCES and
 # burns minutes working around it (autolight#7 did). The image already enabled

@@ -1,0 +1,36 @@
+# trace:v1 id=ops.org-tools-example work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+# Org-scoped agent tools for carter-omp.
+#
+# Copy to `org_tools.toml`, uncomment the bind mount in compose.yaml, and set
+# `CARTER_OMP_ORG_TOOLS_FILE=/srv/org_tools.toml` in `.env`. Each `[[tool]]`
+# binds a named third-party tool to the repo owners it may serve; runs for
+# other owners never see the tool, its skills, or its secrets.
+#
+# Secrets NEVER go here: `env` names orchestrator env vars (from `.env` →
+# compose `environment:`), and the worker forwards them ONLY to runs for the
+# bound owners. The generated per-run `mcp.json` carries server commands
+# only; the MCP stdio child inherits credentials from the run's env, so they
+# never land on disk or in `ps` output.
+#
+# To add another tool for another org (e.g. Datadog for `acme-corp`): append
+# a `[[tool]]` block, add its secret to `.env` + compose `environment:`, and
+# `docker compose up -d` (env-only, no rebuild).
+
+[[tool]]
+name = "sentry"
+owners = ["phoenix-fire-labs"]
+# Only `mcp-stdio` today: the worker writes this server into the run's
+# per-org-profile `mcp.json` and launches omp with `--profile`.
+kind = "mcp-stdio"
+command = "npx"
+args = ["-y", "@sentry/mcp-server@0.42.0"]
+# Orchestrator env vars forwarded into runs for the bound owners.
+# Sentry User Auth Token; minimum scopes org:read project:read event:read
+# (add event:write project:write for write-oriented skills).
+# Create at Sentry → Settings → Auth Tokens.
+env = ["SENTRY_ACCESS_TOKEN"]
+# Vendored skill dirs (under `src/carter_omp/skills/`) staged via the
+# run's `--config` overlay (`skills.customDirectories`).
+skills = ["ci-fix-dont-freeze"]
+# One-liner rendered into the run's system prompt when this tool is active.
+prompt_hint = "Sentry MCP `sentry` is available: query recent issues/events for this repo to ground the diagnosis in production signal, not just code reading."
