@@ -106,6 +106,14 @@ applied.
   document local omp-rpc install` — monorepo `bun run robomp:install` recipe;
   carter already resolves `omp-rpc` locally via `[tool.uv.sources]` in
   `pyproject.toml`. No carter counterpart.
+- `f7055447f2021d20e718f76510ba1bda0da09287` (2026-10-01, merge of #12358 on
+  top of `e0e356fe`) `test: make fixtures portable across non-FHS hosts` —
+  test-only: `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM`
+  isolation and `shutil.which("sleep")` in `tests/test_sandbox.py` /
+  `tests/test_natives_cache.py`; the companion `e0e356fe` local-rpc-install
+  doc is already satisfied by carter's `[tool.uv.sources]` resolution. Both
+  hunks already present in the carter tree (via the earlier `8cf9d2ec`
+  port); reviewed, no new diff.
 - `1459332dc8f48b65124fcd0b831f28881e02bb1c` (2026-09-24) prompt results /
   session-settled frames / headless host mode, `c867895e83b1672db67244d4455ebbb2cefcaf30`
   (2026-09-29) queued groups + Python binding, `b493cf68658b0fce88e78c745514d10c2775c14b`
