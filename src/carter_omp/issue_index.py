@@ -39,6 +39,9 @@ log = logging.getLogger(__name__)
 _SYNC_OVERLAP = timedelta(minutes=2)
 _PAGE_SIZE = 100
 _MAX_PAGES_PER_TICK = 30
+# Deletions are invisible to `?since=` syncs, so a full enumeration sweeps for
+# them on this cadence. Hourly is far more often than issues are deleted.
+_PRUNE_INTERVAL = timedelta(hours=1)
 
 
 @dataclass(slots=True, frozen=True)
@@ -218,6 +221,7 @@ class IssueIndexSync:
         for repo in self.repos():
             try:
                 await self.sync_repo(repo)
+                await self.prune_repo(repo)
             except GitHubError as exc:
                 log.warning(
                     "issue index sync failed; will retry next tick",
@@ -255,6 +259,39 @@ class IssueIndexSync:
             extra={"repo": repo, "ingested": ingested, "backfill": watermark is None, "complete": exhausted},
         )
         return ingested
+
+    # trace:v1 id=impl.issue-index-prune work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    async def prune_repo(self, repo: str) -> int:
+        """Drop index rows for issues/PRs deleted on GitHub. Returns rows removed.
+
+        `?since=` never reports deletions, so they are only detectable by
+        enumerating the repo. Runs hourly and only deletes when the enumeration
+        completed — a page-budget cut leaves live rows untouched.
+        """
+        last = self._db.issue_index_last_pruned(repo)
+        if last is not None:
+            try:
+                last_at = datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+            except ValueError:
+                last_at = None
+            if last_at is not None and datetime.now(UTC) - last_at < _PRUNE_INTERVAL:
+                return 0
+        keep: set[int] = set()
+        complete = False
+        for page in range(1, _MAX_PAGES_PER_TICK + 1):
+            batch = await self._github.list_issue_index_entries(repo, page=page, per_page=_PAGE_SIZE)
+            keep.update(entry.number for entry in batch)
+            if len(batch) < _PAGE_SIZE:
+                complete = True
+                break
+        if not complete:
+            log.warning("issue index prune skipped; enumeration incomplete", extra={"repo": repo})
+            return 0
+        removed = self._db.prune_issue_index(repo, keep)
+        self._db.set_issue_index_last_pruned(repo, _utcnow_iso())
+        if removed:
+            log.info("issue index pruned deleted rows", extra={"repo": repo, "removed": removed})
+        return removed
 
 
 __all__ = [
