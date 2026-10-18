@@ -114,6 +114,11 @@ applied.
   doc is already satisfied by carter's `[tool.uv.sources]` resolution. Both
   hunks already present in the carter tree (via the earlier `8cf9d2ec`
   port); reviewed, no new diff.
+- `e0e356fe67088b780f20b980deea2f8a7cf0fc26` (2026-10-01, merge of #12463)
+  `fix(robomp): install local rpc dependency` — the merge's only
+  `python/robomp`-scoped hunk is the `AGENTS.md` local-install recipe
+  (carried from `ff8a98362e`); carter already resolves `omp-rpc` locally via
+  `[tool.uv.sources]` in `pyproject.toml`. Reviewed, no new diff.
 - `1459332dc8f48b65124fcd0b831f28881e02bb1c` (2026-09-24) prompt results /
   session-settled frames / headless host mode, `c867895e83b1672db67244d4455ebbb2cefcaf30`
   (2026-09-29) queued groups + Python binding, `b493cf68658b0fce88e78c745514d10c2775c14b`
