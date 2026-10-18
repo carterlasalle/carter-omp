@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from carter_omp import issue_index as issue_index_module
 from carter_omp.db import Database
 from carter_omp.github_client import IssueIndexEntry
 from carter_omp.issue_index import IssueIndexSync, ingest_webhook_payload, parse_search_query
@@ -208,4 +211,34 @@ async def test_tick_reconciles_owner_scoped_repos(db: Database) -> None:
 
     await sync.tick()
 
-    assert backend.repos == ["carterlasalle/personal_website", "octo/widget"]
+    # Sync plus the deletion sweep both visit each repo; order and count are
+    # implementation details, coverage is not.
+    assert set(backend.repos) == {"carterlasalle/personal_website", "octo/widget"}
+
+
+async def test_prune_repo_drops_deleted_issues_and_respects_cadence(db: Database) -> None:
+    """A deleted issue (invisible to `?since=`) leaves the index on the sweep."""
+    db.upsert_issue_index(_entry(427, title="client_payload_invalid"))
+    db.upsert_issue_index(_entry(1, title="alive"))
+    backend = _FakeBackend({1: [_entry(1, title="alive")]})
+    sync = IssueIndexSync(settings=_SyncSettings(), db=db, github=backend)  # type: ignore[arg-type]
+
+    assert await sync.prune_repo("octo/widget") == 1
+    assert db.search_issue_index("octo/widget", keywords=("client_payload_invalid",)) == []
+    assert [e.number for e in db.search_issue_index("octo/widget", keywords=("alive",))] == [1]
+
+    # Within the hourly window the sweep is a no-op: no GitHub calls at all.
+    backend.calls.clear()
+    assert await sync.prune_repo("octo/widget") == 0
+    assert backend.calls == []
+
+
+async def test_prune_skips_incomplete_enumeration(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A page-budget cut must never be read as 'everything else was deleted'."""
+    monkeypatch.setattr(issue_index_module, "_MAX_PAGES_PER_TICK", 1)
+    db.upsert_issue_index(_entry(999, title="must survive"))
+    backend = _FakeBackend({1: [_entry(n) for n in range(1, 101)]})  # full page = budget hit
+    sync = IssueIndexSync(settings=_SyncSettings(), db=db, github=backend)  # type: ignore[arg-type]
+
+    assert await sync.prune_repo("octo/widget") == 0
+    assert [e.number for e in db.search_issue_index("octo/widget", keywords=("survive",))] == [999]

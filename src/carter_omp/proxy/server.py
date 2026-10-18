@@ -215,14 +215,11 @@ def _pool_dir(cfg: Settings, repo: str) -> Path:
     return Path(cfg.workspace_root) / "_pool" / repo.replace("/", "__")
 
 
-_WORKSPACE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*__(?:[0-9]+|release)$")
-
-
-# trace:v1 id=impl.proxy-workspace-key-shape work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _workspace_repo_dir(cfg: Settings, workspace_key: str) -> Path:
     # `sandbox.workspace_key` only ever produces `<repo_with_underscores>__<number>`
     # (or `__release` for release workspaces). Anything outside that shape — even
     # with the right repo prefix — must not reach the path join (py/path-injection).
+    # The trailing-alnum anchor also kills `..`-style escapes by construction.
     if not _WORKSPACE_KEY_RE.fullmatch(workspace_key):
         raise HTTPException(400, f"invalid workspace_key {workspace_key!r}")
     repo_dir = Path(cfg.workspace_root) / workspace_key / "repo"
@@ -331,6 +328,8 @@ _ORIGIN_READ_TIMEOUT_SECONDS = 5.0
 _REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 _FORBIDDEN_URL_BYTES_RE = re.compile(r"[\x00-\x1f\x7f]|%(?:00|0a|0d)", re.IGNORECASE)
 _GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$")
+# trace:v1 id=impl.proxy-workspace-key-shape work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+_WORKSPACE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*__(?:[0-9]+|release)$")
 _GIT_PROBE_SCRUBBED_ENV_KEYS = (
     "CARTER_OMP_GIT_HTTP_AUTH",
     "GITHUB_TOKEN",

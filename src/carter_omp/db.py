@@ -279,6 +279,13 @@ CREATE TABLE IF NOT EXISTS issue_index_sync (
   repo        TEXT PRIMARY KEY,
   last_synced TEXT NOT NULL
 );
+
+-- Per-repo deletion-sweep timestamp. Incremental syncs cannot see deletions,
+-- so a full enumeration runs on this cadence and drops vanished rows.
+CREATE TABLE IF NOT EXISTS issue_index_prune (
+  repo        TEXT PRIMARY KEY,
+  last_pruned TEXT NOT NULL
+);
 """
 
 
@@ -1959,6 +1966,42 @@ class Database:
                 """,
                 (repo, last_synced),
             )
+
+    # trace:v1 id=impl.db-issue-index-last-pruned work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def issue_index_last_pruned(self, repo: str) -> str | None:
+        """When `repo` last got a full-enumeration deletion sweep; None = never."""
+        with self._lock:
+            row = self._conn.execute("SELECT last_pruned FROM issue_index_prune WHERE repo = ?", (repo,)).fetchone()
+        return str(row["last_pruned"]) if row is not None else None
+
+    # trace:v1 id=impl.db-set-issue-index-last-pruned work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def set_issue_index_last_pruned(self, repo: str, last_pruned: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO issue_index_prune (repo, last_pruned) VALUES (?, ?)
+                ON CONFLICT(repo) DO UPDATE SET last_pruned = excluded.last_pruned
+                """,
+                (repo, last_pruned),
+            )
+
+    # trace:v1 id=impl.db-prune-issue-index work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def prune_issue_index(self, repo: str, keep: set[int]) -> int:
+        """Drop indexed rows for `repo` whose number is absent from `keep`.
+
+        `keep` must be the repo's complete live issue/PR number set from a full
+        enumeration; an incomplete view would delete live rows.
+        """
+        with self._lock:
+            self._conn.execute("CREATE TEMP TABLE IF NOT EXISTS _issue_index_keep (number INTEGER PRIMARY KEY)")
+            self._conn.execute("DELETE FROM _issue_index_keep")
+            self._conn.executemany("INSERT INTO _issue_index_keep (number) VALUES (?)", [(n,) for n in keep])
+            cur = self._conn.execute(
+                "DELETE FROM issue_index WHERE repo = ? AND number NOT IN (SELECT number FROM _issue_index_keep)",
+                (repo,),
+            )
+            self._conn.execute("DELETE FROM _issue_index_keep")
+            return int(cur.rowcount)
 
     # trace:v1 id=impl.db-issue-index-status work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     def issue_index_status(self) -> list[dict[str, Any]]:

@@ -1060,6 +1060,10 @@ async def test_git_push_workspace_key_mismatch(proxy_settings: Settings) -> None
         "octo__widget__1/evil",  # path separator smuggled into the key
         "octo__widget__..",  # dot-dot suffix, no slash needed
         ".hidden__1",  # hidden-directory probe with a valid-looking suffix
+        "octo__widget__../x",  # traversal via the suffix
+        "octo__widget__~root",  # tilde outside the allowlisted charset
+        "octo__widget__a b",  # whitespace outside the allowlisted charset
+        "nodelim",  # missing the double-underscore delimiter entirely
     ],
 )
 async def test_git_push_rejects_malformed_workspace_key(proxy_settings: Settings, workspace_key: str) -> None:
@@ -1080,7 +1084,7 @@ async def test_git_push_rejects_malformed_workspace_key(proxy_settings: Settings
                 "Content-Type": "application/json",
             },
         )
-    assert resp.status_code == 400
+    assert resp.status_code == 400, (workspace_key, resp.text)
     assert "workspace_key" in resp.text
 
 
