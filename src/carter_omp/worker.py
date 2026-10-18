@@ -806,14 +806,22 @@ def _attach_run_token(inputs: TaskInputs, bindings: _TokenBindings) -> None:
     key = inputs.settings.github_proxy_hmac_key
     if key is None:
         return
-    thread = trigger.pull_request_number if trigger.pull_request_number is not None else trigger.issue_number
+    # A PR-triggered run works the originating issue's workspace (the proxy
+    # pins `gh_push_branch` to the workspace thread), but the trigger above
+    # only carries the PR number — a token minted from the trigger alone
+    # 403s the run's own push/comment with `run token thread mismatch`
+    # (carter-omp#70). Bind both threads when the run resolved back to an
+    # originating issue; the proxy already accepts either bound thread.
+    issue_thread = inputs.issue.number if inputs.issue is not None else None
+    pr_thread = trigger.pull_request_number
     secret = key.get_secret_value().encode("utf-8")
     capabilities = frozenset(c.value for c in trigger.capabilities)
     ttl_seconds = _run_token_ttl(inputs.settings)
     # Live claims, not a snapshot: `refresh` mutates these and re-mints.
     claims: dict[str, str | int | None] = {
         "branch": inputs.workspace.branch,
-        "pull_request": trigger.pull_request_number,
+        "pull_request": pr_thread,
+        "issue": issue_thread,
     }
 
     # trace:v1 id=impl.worker-run-token-apply work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
@@ -830,7 +838,7 @@ def _attach_run_token(inputs: TaskInputs, bindings: _TokenBindings) -> None:
             run_id=trigger.run_id,
             repo_id=trigger.repository_id,
             repo=trigger.repository_full_name,
-            issue=thread,
+            issue=claims["issue"] if isinstance(claims["issue"], int) else None,
             pull_request=claims["pull_request"] if isinstance(claims["pull_request"], int) else None,
             workspace=None,
             branch=claims["branch"] if isinstance(claims["branch"], str) else None,
