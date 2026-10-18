@@ -128,9 +128,7 @@ def test_global_http_tool_applies_to_every_owner(tmp_path: Path) -> None:
             "headers": {"X-API-Key": "${TINYFISH_API_KEY}"},
         }
     }
-    assert catalog.forwarded_env("anyone", env={"TINYFISH_API_KEY": "tf_test"}) == {
-        "TINYFISH_API_KEY": "tf_test"
-    }
+    assert catalog.forwarded_env("anyone", env={"TINYFISH_API_KEY": "tf_test"}) == {"TINYFISH_API_KEY": "tf_test"}
 
 
 def test_http_tool_requires_url_and_rejects_command(tmp_path: Path) -> None:
