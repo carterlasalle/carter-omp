@@ -5,7 +5,21 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from carter_omp.db import Database, iso_seconds_ago, issue_key
+from carter_omp.db import Database, EventRow, IssueRow, iso_seconds_ago, issue_key
+
+
+def _event(db: Database, delivery_id: str) -> EventRow:
+    """The stored event, asserting it exists — every caller reads fields."""
+    row = db.get_event(delivery_id)
+    assert row is not None, f"no event {delivery_id}"
+    return row
+
+
+def _issue(database: Database, key: str) -> IssueRow:
+    """The stored issue, asserting it exists."""
+    row = database.get_issue(key)
+    assert row is not None, f"no issue {key}"
+    return row
 
 
 def test_record_event_dedupes_by_delivery(db: Database) -> None:
@@ -53,7 +67,7 @@ def test_claim_next_event_singleton_under_contention(db: Database) -> None:
 
     # Each delivery id should appear exactly once.
     assert sorted(winners) == [f"d-{i}" for i in range(5)]
-    assert all(db.get_event(f"d-{i}").state == "running" for i in range(5))
+    assert all(_event(db, f"d-{i}").state == "running" for i in range(5))
 
 
 def test_claim_next_event_leaves_same_issue_queued_while_running(db: Database) -> None:
@@ -75,13 +89,13 @@ def test_claim_next_event_leaves_same_issue_queued_while_running(db: Database) -
     )
 
     assert db.claim_next_event() is None
-    assert db.get_event("queued").state == "queued"
+    assert _event(db, "queued").state == "queued"
 
     db.mark_event("running", "done")
     claimed = db.claim_next_event()
     assert claimed is not None
     assert claimed.delivery_id == "queued"
-    assert db.get_event("queued").state == "running"
+    assert _event(db, "queued").state == "running"
 
 
 def test_claim_next_event_skips_blocked_issue_without_stalling_others(db: Database) -> None:
@@ -113,7 +127,7 @@ def test_claim_next_event_skips_blocked_issue_without_stalling_others(db: Databa
     claimed = db.claim_next_event()
     assert claimed is not None
     assert claimed.delivery_id == "ready"
-    assert db.get_event("blocked").state == "queued"
+    assert _event(db, "blocked").state == "queued"
 
 
 def test_requeue_event_can_be_restricted_by_source_state(db: Database) -> None:
@@ -135,10 +149,10 @@ def test_requeue_event_can_be_restricted_by_source_state(db: Database) -> None:
     )
 
     assert db.requeue_event("done-event", from_states=("done", "failed", "skipped"))
-    assert db.get_event("done-event").state == "queued"
+    assert _event(db, "done-event").state == "queued"
 
     assert not db.requeue_event("running-event", from_states=("done", "failed", "skipped"))
-    assert db.get_event("running-event").state == "running"
+    assert _event(db, "running-event").state == "running"
 
 
 def test_latest_issue_events_ignore_skipped_noise(db: Database) -> None:
@@ -215,7 +229,7 @@ def test_reset_stuck_running_recovers(db: Database) -> None:
     # Simulate crash: row still running.
     recovered = db.reset_stuck_running()
     assert recovered == 1
-    assert db.get_event("d1").state == "queued"
+    assert _event(db, "d1").state == "queued"
     with db._lock:  # noqa: SLF001
         after = db._conn.execute(  # noqa: SLF001
             "SELECT started_at FROM events WHERE delivery_id=?", ("d1",)
@@ -368,7 +382,7 @@ def test_migration_adds_classification_to_existing_db(tmp_path: Path) -> None:
     assert row is not None
     assert row.classification is None  # column exists, default NULL
     database.set_issue_classification("octo/widget#1", "bug")
-    assert database.get_issue("octo/widget#1").classification == "bug"
+    assert _issue(database, "octo/widget#1").classification == "bug"
     database.close()
 
 
@@ -803,10 +817,19 @@ def test_event_telemetry_round_trips_and_aggregates(db: Database) -> None:
 
 def test_worker_records_run_telemetry_on_the_event_row(db: Database) -> None:
     """`_record_run_telemetry` is what the spend aggregates and footer read."""
-    from types import SimpleNamespace
+    from dataclasses import dataclass
 
     from carter_omp import worker
     from carter_omp.host_tools import RunStats
+
+    @dataclass(slots=True)
+    class Inputs:
+        db: Database
+        delivery_id: str
+
+    @dataclass(slots=True)
+    class Bindings:
+        stats: RunStats | None
 
     db.record_event(
         delivery_id="run-w",
@@ -826,8 +849,8 @@ def test_worker_records_run_telemetry_on_the_event_row(db: Database) -> None:
             "cost": {"total": 0.4, "cacheRead": 0.1},
         }
     )
-    inputs = SimpleNamespace(db=db, delivery_id="run-w")
-    bindings = SimpleNamespace(stats=stats)
+    inputs = Inputs(db=db, delivery_id="run-w")
+    bindings = Bindings(stats=stats)
 
     worker._record_run_telemetry(inputs, bindings)
 
@@ -843,7 +866,7 @@ def test_worker_records_run_telemetry_on_the_event_row(db: Database) -> None:
     assert row["duration_ms"] is not None and row["duration_ms"] >= 0
 
     # Best-effort: no stats at all must never raise into a run.
-    worker._record_run_telemetry(inputs, SimpleNamespace(stats=None))
+    worker._record_run_telemetry(inputs, Bindings(stats=None))
 
 
 def test_pending_events_orders_by_backoff_and_only_queues(db: Database) -> None:
@@ -930,6 +953,20 @@ def test_issue_index_status_reports_rows_prs_and_watermark(db: Database) -> None
     assert (row["repo"], row["rows"], row["pull_requests"]) == ("octo/widget", 3, 1)
     assert row["newest_issue_at"] == "2026-01-03T00:00:00Z"
     assert row["last_synced"] == "2026-02-01T00:00:00Z"
+
+
+def test_recent_tool_errors_returns_failures_newest_first(db: Database) -> None:
+    """A vent carries the run's real errors, not its successes."""
+    db.log_tool_call(issue_key="octo/widget#4", tool="gh_push_branch", args={}, error="403 workflow files")
+    db.log_tool_call(issue_key="octo/widget#4", tool="gh_search_issues", args={}, result={"value": "ok"})
+    db.log_tool_call(issue_key="octo/widget#4", tool="gh_open_pr", args={}, error="422 no commits")
+    db.log_tool_call(issue_key="octo/widget#9", tool="gh_push_branch", args={}, error="other issue")
+
+    assert db.recent_tool_errors("octo/widget#4", limit=5) == [
+        ("gh_open_pr", "422 no commits"),
+        ("gh_push_branch", "403 workflow files"),
+    ]
+    assert db.recent_tool_errors("octo/widget#4", limit=1) == [("gh_open_pr", "422 no commits")]
 
 
 def test_self_report_fingerprint_round_trip(db: Database) -> None:

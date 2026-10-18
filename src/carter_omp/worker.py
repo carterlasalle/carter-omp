@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from omp_rpc import (
     HostToolCompletedEvent,
@@ -1491,7 +1491,24 @@ async def run_task(
 
 
 # trace:v1 id=impl.worker-record-run-telemetry work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-def _record_run_telemetry(inputs: TaskInputs, bindings: ToolBindings) -> None:
+class _TelemetryInputs(Protocol):
+    """What telemetry needs from a run: where to write, and which row."""
+
+    @property
+    def db(self) -> Database: ...
+
+    @property
+    def delivery_id(self) -> str: ...
+
+
+class _TelemetryBindings(Protocol):
+    """What telemetry needs from the tool bindings."""
+
+    @property
+    def stats(self) -> host_tools.RunStats | None: ...
+
+
+def _record_run_telemetry(inputs: _TelemetryInputs, bindings: _TelemetryBindings) -> None:
     """Persist the run's telemetry (spend, tokens, fallback) on its event row.
 
     Best-effort observability: a missing or failing write must never change the

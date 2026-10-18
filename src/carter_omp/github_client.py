@@ -45,6 +45,7 @@ class IssueInfo:
     author: str
     labels: tuple[str, ...]
     is_pull_request: bool
+    html_url: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -217,7 +218,7 @@ async def file_self_report(
         await client.post_comment(repo, issue_number, body + _provenance_block(provenance, again=True))
         return {
             "number": issue_number,
-            "url": target_issue.html_url if hasattr(target_issue, "html_url") else "",
+            "url": target_issue.html_url,
             "created": False,
             "detail": f"appended to known report #{issue_number}",
         }
@@ -371,6 +372,7 @@ class GitHubClient:
         token: str,
         *,
         transport: httpx.BaseTransport | None = None,
+        async_transport: httpx.AsyncBaseTransport | None = None,
         platform: str = "github",
     ) -> None:
         self._token = token
@@ -381,6 +383,12 @@ class GitHubClient:
             "User-Agent": "carter_omp/0.1",
         }
         self._transport = transport
+        # `httpx.MockTransport` implements both halves; production passes none.
+        self._async_transport = (
+            async_transport
+            if async_transport is not None
+            else (transport if isinstance(transport, httpx.AsyncBaseTransport) else None)
+        )
         self._platform = platform
 
     def _client(self) -> httpx.Client:
@@ -396,7 +404,7 @@ class GitHubClient:
         return httpx.AsyncClient(
             base_url=GITHUB_API,
             headers=self._headers,
-            transport=self._transport,  # type: ignore[arg-type]
+            transport=self._async_transport,
             timeout=httpx.Timeout(30.0, connect=10.0),
             follow_redirects=True,
         )
@@ -468,7 +476,8 @@ class GitHubClient:
                     },
                 )
                 time.sleep(delay)
-        raise last_exc  # type: ignore[misc]
+        assert last_exc is not None  # every path reaching here recorded a failure
+        raise last_exc
 
     async def request(
         self, method: str, path: str, *, json: Mapping[str, Any] | None = None, params: Mapping[str, Any] | None = None
@@ -503,7 +512,8 @@ class GitHubClient:
                     },
                 )
                 await asyncio.sleep(delay)
-        raise last_exc  # type: ignore[misc]
+        assert last_exc is not None  # every path reaching here recorded a failure
+        raise last_exc
 
     async def _request_text_tail(self, path: str, *, max_bytes: int) -> str:
         """Stream a text response while retaining at most its final bytes."""
@@ -540,7 +550,8 @@ class GitHubClient:
                     extra={"path": path, "attempt": attempt + 1, "delay": delay, "status": exc.status},
                 )
                 await asyncio.sleep(delay)
-        raise last_exc  # type: ignore[misc]
+        assert last_exc is not None  # every path reaching here recorded a failure
+        raise last_exc
 
     # ---- repos / issues / comments / PRs ----
     async def get_repo(self, repo: str) -> RepoInfo:
@@ -1084,6 +1095,7 @@ def _issue_from_payload(repo: str, data: Mapping[str, Any]) -> IssueInfo:
         author=str(user.get("login") or ""),
         labels=labels,
         is_pull_request="pull_request" in data,
+        html_url=str(data.get("html_url") or ""),
     )
 
 

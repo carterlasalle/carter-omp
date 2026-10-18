@@ -2,56 +2,68 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
 from carter_omp import persona
+from carter_omp.github_client import CommentInfo, IssueInfo, PullRequestInfo, RepoInfo
+from carter_omp.sandbox import Workspace
 from carter_omp.worker import DirectiveInfo, ReleaseTaskContext, ThreadMessage
 
-
-@dataclass(slots=True, frozen=True)
-class _Repo:
-    full_name: str = "octo/widget"
-    default_branch: str = "main"
-    clone_url: str = ""
-    private: bool = False
-
-
-@dataclass(slots=True, frozen=True)
-class _Issue:
-    repo: str = "octo/widget"
-    number: int = 1080
-    title: str = "broken thing"
-    body: str = "the body text"
-    state: str = "open"
-    author: str = "alice"
-    labels: tuple[str, ...] = ()
-    is_pull_request: bool = False
-
-
-@dataclass(slots=True, frozen=True)
-class _Workspace:
-    branch: str = "carter-omp/abc/test"
-    session_dir: str = "/tmp/session"
-    context_dir: str = "/tmp/ctx"
-    repo_dir: str = "/tmp/repo"
-
-
-@dataclass(slots=True, frozen=True)
-class _Pr:
-    number: int = 99
-    author: str = "alice"
-    head_ref: str = "fix-crash"
-    base_ref: str = "main"
-    head_repo: str = "alice/widget"
-    html_url: str = "https://github.com/octo/widget/pull/99"
+_REPO = RepoInfo(full_name="octo/widget", default_branch="main", clone_url="", private=False)
+_ISSUE = IssueInfo(
+    repo="octo/widget",
+    number=1080,
+    title="broken thing",
+    body="the body text",
+    state="open",
+    author="alice",
+    labels=(),
+    is_pull_request=False,
+)
+_WORKSPACE = Workspace(
+    root=Path("/tmp/ws"),
+    repo_dir=Path("/tmp/repo"),
+    session_dir=Path("/tmp/session"),
+    context_dir=Path("/tmp/ctx"),
+    artifacts_dir=Path("/tmp/artifacts"),
+    branch="carter-omp/abc/test",
+    repo_full_name="octo/widget",
+    issue_number=1080,
+)
+_PR = PullRequestInfo(
+    repo="octo/widget",
+    number=99,
+    html_url="https://github.com/octo/widget/pull/99",
+    head_ref="fix-crash",
+    base_ref="main",
+    state="open",
+    author="alice",
+    head_repo="alice/widget",
+)
+_COMMENT = CommentInfo(id=1, author="can1357", body="@carter-omp please fix", created_at="2026-05-14T20:00:00Z")
 
 
-@dataclass(slots=True, frozen=True)
-class _Comment:
-    id: int = 1
-    author: str = "can1357"
-    body: str = "@carter-omp please fix"
-    created_at: str = "2026-05-14T20:00:00Z"
+def _Repo(**kw: Any) -> RepoInfo:
+    """A real `RepoInfo` with fixture defaults, overridable per test."""
+    return replace(_REPO, **kw)
+
+
+def _Issue(**kw: Any) -> IssueInfo:
+    return replace(_ISSUE, **kw)
+
+
+def _Workspace(**kw: Any) -> Workspace:
+    return replace(_WORKSPACE, **kw)
+
+
+def _Pr(**kw: Any) -> PullRequestInfo:
+    return replace(_PR, **kw)
+
+
+def _Comment(**kw: Any) -> CommentInfo:
+    return replace(_COMMENT, **kw)
 
 
 def test_render_thread_empty_yields_placeholder() -> None:

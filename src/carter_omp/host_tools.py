@@ -19,7 +19,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, Protocol
 
 from omp_rpc import HostTool, HostToolContext, RpcCommandError, host_tool
 
@@ -390,6 +390,24 @@ def _audit(
 # trace:v1 id=impl.host-tools-raise-command work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _raise_command(message: str) -> NoReturn:
     raise RpcCommandError(message, error=message)
+
+
+# trace:v1 id=impl.host-tools-execute-adapter work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _tool_execute(fn: Callable[[dict[str, Any]], str]) -> Callable[[dict[str, Any], HostToolContext[Any]], str]:
+    """Adapt a tool body to the two-argument `HostTool.execute` contract.
+
+    The RPC client keeps invoking `execute` after a cancel and discards the
+    result, so a tool that ignores the context still mutates state. Checking
+    `cancelled` here — once, instead of in 21 signatures — makes cancellation
+    stop the work at the tool boundary.
+    """
+
+    def execute(args: dict[str, Any], ctx: HostToolContext[Any]) -> str:
+        if ctx.cancelled:
+            _raise_command("host tool call cancelled")
+        return fn(args)
+
+    return execute
 
 
 def _require_issue(bindings: ToolBindings) -> IssueInfo:
@@ -877,8 +895,17 @@ def _schedule_autoclose(bindings: ToolBindings, *, comment_id: int, hours: float
 
 
 # ---------- telemetry footer ----------
+# trace:exempt reason=internal-detail
+class _StatsSource(Protocol):
+    """What the footer needs: the run's stats, or none outside a run."""
+
+    # trace:exempt reason=internal-detail
+    @property
+    def stats(self) -> RunStats | None: ...
+
+
 # trace:v1 id=impl.host-tools-footer-suffix work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-def _footer_suffix(bindings: ToolBindings) -> str:
+def _footer_suffix(bindings: _StatsSource) -> str:
     """Telemetry footer for any bot-authored GitHub text.
 
     Empty outside a real run (no stats on the bindings). Applied at every
@@ -891,6 +918,112 @@ def _footer_suffix(bindings: ToolBindings) -> str:
 
 
 # ---------- report_pain_point ----------
+_REPORT_STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "that",
+        "this",
+        "from",
+        "into",
+        "when",
+        "then",
+        "than",
+        "does",
+        "doesn",
+        "cannot",
+        "not",
+        "but",
+        "are",
+        "was",
+        "were",
+        "has",
+        "have",
+        "had",
+        "its",
+        "you",
+        "your",
+        "our",
+        "all",
+        "any",
+        "may",
+        "can",
+        "will",
+        "would",
+        "should",
+        "could",
+        "one",
+        "same",
+        "after",
+        "before",
+        "over",
+        "under",
+        "again",
+        "still",
+        "only",
+        "also",
+        "more",
+        "most",
+        "some",
+        "such",
+        "very",
+        "just",
+        "like",
+        "make",
+        "made",
+        "gets",
+        "got",
+        "without",
+        "because",
+        "which",
+        "where",
+        "what",
+    }
+)
+
+
+# trace:v1 id=impl.report-title-tokens work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _report_title_tokens(title: str) -> set[str]:
+    """Distinctive words of a report headline, for near-duplicate matching."""
+    text = title.removeprefix("[bot-report]")
+    return {
+        token
+        for token in re.findall(r"[a-z0-9_]+", text.casefold())
+        if len(token) >= 4 and token not in _REPORT_STOPWORDS
+    }
+
+
+# trace:v1 id=impl.report-similar-open work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _similar_open_report(db: Database, target: str, headline: str) -> int | None:
+    """Open bot-report issue describing the same fault under a different title.
+
+    Exact-title dedupe missed the real case: one gate produced #59 and #60
+    with different wording, so the same fault got two triage runs. Compare
+    token overlap over the local index — the reports are already indexed
+    because the self-report repo is in scope.
+    """
+    wanted = _report_title_tokens(headline)
+    if len(wanted) < 3:
+        return None
+    best: tuple[float, int] | None = None
+    for entry in db.search_issue_index(target, state="open", limit=50):
+        if not entry.title.startswith("[bot-report]"):
+            continue
+        have = _report_title_tokens(entry.title)
+        shared = wanted & have
+        # The real pair (#59/#60) shares 5 of 12 tokens — Jaccard 0.42, under a
+        # naive 0.5 cutoff. Overlap against the shorter title catches a
+        # rewording; the shared-token floor keeps unrelated reports apart.
+        if len(shared) < 4:
+            continue
+        score = len(shared) / min(len(wanted), len(have))
+        if score >= 0.5 and (best is None or score > best[0]):
+            best = (score, entry.number)
+    return best[1] if best else None
+
+
 # trace:v1 id=impl.host-tools-report-pain-point work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
     """File a friction report against the harness repo (see the proxy endpoint).
@@ -903,7 +1036,7 @@ def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
     """
 
     # trace:v1 id=impl.host-tools-report-pain-point-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         bindings.require(Capability.REPORT_UPSTREAM, "report_pain_point", args)
         # Anti-flood: max 3 successful vents per issue. One run spiraling
         # into dozens of meta-vents helps nobody; the dedupe already merges
@@ -943,12 +1076,21 @@ def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
         if bindings.issue is not None:
             where.insert(0, f"**Working on:** `{bindings.issue_key}`")
         body = f"{details.strip()}\n\n### Where\n" + "\n".join(f"- {line}" for line in where)
+        # The run that hit the wall holds the exact error text; without it the
+        # fix run has to rediscover the failure from the code.
+        trail = bindings.db.recent_tool_errors(bindings.issue_key, limit=5)
+        if trail:
+            body += "\n\n### Recent tool errors\n" + "\n".join(
+                f"- `{tool}` — {error.strip().splitlines()[0][:200]}" for tool, error in reversed(trail)
+            )
         # Fingerprint the headline so the next run that hits the same fault
         # appends to the existing report instead of filing a duplicate: the
         # orchestrator's DB is consistent immediately, while GitHub's issue
         # list needs several seconds to show a just-created issue.
         fingerprint = hashlib.sha256(headline.casefold().encode("utf-8")).hexdigest()[:32]
         known = bindings.db.self_report_fingerprint(fingerprint)
+        if known is None:
+            known = _similar_open_report(bindings.db, target, headline)
         try:
             result = _run_coro(
                 bindings.loop,
@@ -966,7 +1108,9 @@ def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
             _raise_command(f"could not file the report: {exc.status} {exc.message}")
         result = dict(result)
         number = result.get("number")
-        if known is None and isinstance(number, int):
+        if isinstance(number, int):
+            # Includes the near-duplicate path: this wording now maps straight
+            # to the report it merged into.
             bindings.db.record_self_report(
                 fingerprint,
                 issue_number=number,
@@ -1040,7 +1184,7 @@ def _build_report_pain_point(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["title", "details"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -1056,7 +1200,7 @@ def _build_record_solution(bindings: ToolBindings) -> HostTool[Any, Any]:
     """
 
     # trace:v1 id=impl.host-tools-record-solution-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         bindings.require(Capability.REPORT_UPSTREAM, "record_solution", args)
         trigger = args.get("trigger")
         body = args.get("body")
@@ -1091,7 +1235,7 @@ def _build_record_solution(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["trigger", "body"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -1099,7 +1243,7 @@ def _build_record_solution(bindings: ToolBindings) -> HostTool[Any, Any]:
 # trace:v1 id=impl.host-tools-post-comment work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
     # trace:v1 id=impl.host-tools-post-comment-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         bindings.require(Capability.COMMENT, "gh_post_comment", args)
         body = args.get("body")
         if not isinstance(body, str) or not body.strip():
@@ -1153,7 +1297,7 @@ def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["body"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -1458,7 +1602,7 @@ _NON_FAILURE_JOB_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 
 # ---------- release_ci_status ----------
 def _build_release_ci_status(bindings: ToolBindings) -> HostTool[Any, Any]:
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         release = _require_release(bindings)
         try:
             runs = _run_coro(
@@ -1504,13 +1648,13 @@ def _build_release_ci_status(bindings: ToolBindings) -> HostTool[Any, Any]:
         name="release_ci_status",
         description=persona.host_tool_description("release_ci_status"),
         parameters={"type": "object", "properties": {}, "additionalProperties": False},
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
 # ---------- release_job_log ----------
 def _build_release_job_log(bindings: ToolBindings) -> HostTool[Any, Any]:
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         release = _require_release(bindings)
         job_id = args.get("job_id")
         if not isinstance(job_id, int) or isinstance(job_id, bool):
@@ -1554,7 +1698,7 @@ def _build_release_job_log(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["job_id"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -1566,7 +1710,7 @@ def _build_release_retag(bindings: ToolBindings) -> HostTool[Any, Any]:
         _raise_command(message)
 
     # trace:v1 id=impl.host-tools-release-retag-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         bindings.require(Capability.UPDATE_DEFAULT_BRANCH, "release_retag", args)
         bindings.require(Capability.MOVE_RELEASE_TAG, "release_retag", args)
         release = _require_release(bindings)
@@ -1718,14 +1862,14 @@ def _build_release_retag(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["summary"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
 # ---------- gh_push_branch ----------
 # trace:v1 id=impl.host-tools-push-branch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         _enforce_impl_authorization(bindings, "gh_push_branch", args, action="push branch")
         if bindings.review_mode:
             msg = "refusing to push: PR review worktrees are read-only."
@@ -1761,7 +1905,7 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
             },
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -1769,7 +1913,7 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
 # trace:v1 id=impl.host-tools-open-pr work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
     # trace:v1 id=impl.host-tools-open-pr-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         _enforce_impl_authorization(bindings, "gh_open_pr", args, action="open PR")
         if bindings.review_mode:
             msg = "refusing to open PR: PR review tasks are read-only."
@@ -1877,13 +2021,13 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["title", "body"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
 # ---------- gh_request_review ----------
 def _build_request_review(bindings: ToolBindings) -> HostTool[Any, Any]:
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         bindings.require(Capability.REQUEST_REVIEW, "gh_request_review", args)
         reviewers = args.get("reviewers") or []
         assignees = args.get("assignees") or []
@@ -1929,13 +2073,13 @@ def _build_request_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             },
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
 # ---------- repro_record ----------
 def _build_repro_record(bindings: ToolBindings) -> HostTool[Any, Any]:
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         title = args.get("title")
         command = args.get("command")
         output = args.get("output")
@@ -1989,7 +2133,7 @@ def _build_repro_record(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["title", "command", "output", "exit_code"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -1997,7 +2141,7 @@ def _build_repro_record(bindings: ToolBindings) -> HostTool[Any, Any]:
 # trace:v1 id=impl.host-tools-mark-unable work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_mark_unable(bindings: ToolBindings) -> HostTool[Any, Any]:
     # trace:v1 id=impl.host-tools-mark-unable-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         diagnosis = args.get("diagnosis")
         needed = args.get("info_needed")
         if not isinstance(diagnosis, str) or not diagnosis.strip():
@@ -2052,13 +2196,13 @@ def _build_mark_unable(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["diagnosis", "info_needed"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
 # ---------- abort_task ----------
 def _build_abort_task(bindings: ToolBindings) -> HostTool[Any, Any]:
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         reason = args.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             _raise_command("abort_task requires a non-empty 'reason' string.")
@@ -2089,13 +2233,13 @@ def _build_abort_task(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["reason"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
 # ---------- fetch_issue_thread ----------
 def _build_fetch_thread(bindings: ToolBindings) -> HostTool[Any, Any]:
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         try:
             issue = _run_coro(
                 bindings.loop,
@@ -2133,7 +2277,7 @@ def _build_fetch_thread(bindings: ToolBindings) -> HostTool[Any, Any]:
             "properties": {},
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -2162,7 +2306,7 @@ def _build_search_issues(bindings: ToolBindings) -> HostTool[Any, Any]:
     reconcile completes. The inbound issue is filtered out of results.
     """
 
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         query = args.get("query")
         if not isinstance(query, str) or not query.strip():
             msg = "gh_search_issues requires a non-empty 'query'."
@@ -2249,7 +2393,7 @@ def _build_search_issues(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["query"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -2267,7 +2411,7 @@ def _build_search_commits(bindings: ToolBindings) -> HostTool[Any, Any]:
     about its backend so a semantic index can replace git plumbing later.
     """
 
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         query = args.get("query")
         if not isinstance(query, str) or not query.strip():
             msg = "search_commits requires a non-empty 'query'."
@@ -2341,7 +2485,7 @@ def _build_search_commits(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["query"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -2411,7 +2555,7 @@ def _format_pr_file(file: PullRequestFileInfo) -> str:
 
 
 def _build_fetch_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         _require_review_mode(bindings, "fetch_pr", args)
         pr_number = bindings.default_comment_number
         try:
@@ -2446,12 +2590,12 @@ def _build_fetch_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
         name="fetch_pr",
         description=persona.host_tool_description("fetch_pr"),
         parameters={"type": "object", "properties": {}, "additionalProperties": False},
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
 def _build_classify_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         _require_review_mode(bindings, "classify_pr", args)
         rank = args.get("rank")
         if rank not in _PR_RANKS:
@@ -2527,7 +2671,7 @@ def _build_classify_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["rank", "type", "rationale"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -2546,7 +2690,7 @@ def _review_comment_to_payload(comment: Any) -> dict[str, Any]:
 
 
 def _build_pr_review_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         _require_review_mode(bindings, "pr_review_comment", args)
         path = args.get("path")
         line = args.get("line")
@@ -2629,7 +2773,7 @@ def _build_pr_review_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["path", "line", "body"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -2715,7 +2859,7 @@ def _filter_anchorable_comments(staged: list[Any], files: list[PullRequestFileIn
 # trace:v1 id=impl.host-tools-submit-pr-review work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
     # trace:v1 id=impl.host-tools-submit-pr-review-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         _require_review_mode(bindings, "submit_pr_review", args)
         body = args.get("body")
         if not isinstance(body, str) or not body.strip():
@@ -2872,14 +3016,14 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["body"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
 def _build_set_issue_labels(bindings: ToolBindings) -> HostTool[Any, Any]:
     """Append labels to the originating issue (or PR)."""
 
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         bindings.require(Capability.LABEL, "set_issue_labels", args)
         if bindings.inbound_is_pr:
             _audit(bindings, "set_issue_labels", args, result={"skipped": "pr_thread"})
@@ -2916,7 +3060,7 @@ def _build_set_issue_labels(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["labels"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 
@@ -2927,7 +3071,7 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
     branch the agent should follow."""
 
     # trace:v1 id=impl.host-tools-classify-issue-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+    def execute(args: dict[str, Any]) -> str:
         existing = bindings.db.get_issue(bindings.issue_key)
         if bindings.inbound_is_pr:
             note = (
@@ -3101,7 +3245,7 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["primary", "rationale"],
             "additionalProperties": False,
         },
-        execute=execute,
+        execute=_tool_execute(execute),
     )
 
 

@@ -7,13 +7,14 @@ import json
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
-from omp_rpc import HostToolContext, RpcCommandError
+from omp_rpc import HostToolContext, HostToolResultValue, RpcCommandError
 
 from carter_omp import host_tools
 from carter_omp.capabilities import ISSUE_RUN_CAPABILITIES as ALL_CAPS
@@ -124,6 +125,18 @@ def _bindings(
         session_dir=str(bindings.workspace.session_dir),
     )
     return bindings, loop, thread
+
+
+def _issue_repo(bindings: ToolBindings) -> str:
+    """The bindings' issue repo; every caller is inside an issue run."""
+    assert bindings.issue is not None
+    return bindings.issue.repo
+
+
+def _text(result: HostToolResultValue) -> str:
+    """Tool output as text — every host tool in this suite returns a string."""
+    assert isinstance(result, str)
+    return result
 
 
 def _ctx() -> HostToolContext[Any]:
@@ -345,7 +358,7 @@ def test_guarded_push_branch_rev_parse_runs_via_repo_command_and_passes_slot_uid
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(host_tools, "_run_repo_command", fake_run_repo_command)
-    monkeypatch.setattr(host_tools, "_share_git_metadata_with_slots", lambda _repo_dir, _slot_uid: None)
+    monkeypatch.setattr(host_tools, "_share_git_metadata_with_slots", lambda *_: None)
     try:
         head = host_tools._guarded_push_branch(bindings, {}, "gh_push_branch", bindings.workspace.branch)
     finally:
@@ -384,14 +397,14 @@ def test_gh_post_comment_happy_path(db: Database, tmp_path: Path) -> None:
     finally:
         _stop_loop(loop, t)
 
-    assert result.startswith("comment posted")
+    assert _text(result).startswith("comment posted")
     assert captured["url"].endswith("/repos/octo/widget/issues/42/comments")
     assert captured["body"] == {"body": "hi"}
     assert captured["auth"] == "Bearer token"
 
 
 def test_gh_post_comment_validates_body(db: Database, tmp_path: Path) -> None:
-    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
     try:
         tool = next(x for x in build(bindings) if x.name == "gh_post_comment")
         with pytest.raises(RpcCommandError):
@@ -468,7 +481,7 @@ def test_gh_post_comment_explicit_number_overrides_inbound(db: Database, tmp_pat
 
 
 def test_gh_post_comment_propagates_github_error(db: Database, tmp_path: Path) -> None:
-    transport = httpx.MockTransport(lambda r: httpx.Response(422, json={"message": "Validation failed"}))
+    transport = httpx.MockTransport(lambda *_: httpx.Response(422, json={"message": "Validation failed"}))
     bindings, loop, t = _bindings(db, tmp_path, transport)
     try:
         tool = next(x for x in build(bindings) if x.name == "gh_post_comment")
@@ -480,7 +493,7 @@ def test_gh_post_comment_propagates_github_error(db: Database, tmp_path: Path) -
 
 
 def test_gh_open_pr_requires_template_sections(db: Database, tmp_path: Path) -> None:
-    transport = httpx.MockTransport(lambda r: httpx.Response(500))
+    transport = httpx.MockTransport(lambda *_: httpx.Response(500))
     bindings, loop, t = _bindings(db, tmp_path, transport)
     db.set_issue_classification(bindings.issue_key, "bug")
     try:
@@ -493,7 +506,7 @@ def test_gh_open_pr_requires_template_sections(db: Database, tmp_path: Path) -> 
 
 
 def test_repro_record_writes_transcript(db: Database, tmp_path: Path) -> None:
-    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
     try:
         tool = next(x for x in build(bindings) if x.name == "repro_record")
         result = tool.execute(
@@ -603,7 +616,7 @@ def test_repro_record_chowns_to_slot_when_root(db: Database, tmp_path: Path, mon
         raising=False,
     )
 
-    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)), slot_uid=2001)
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)), slot_uid=2001)
     try:
         tool = next(x for x in build(bindings) if x.name == "repro_record")
         result = tool.execute(
@@ -624,7 +637,7 @@ def test_repro_record_chowns_to_slot_when_root(db: Database, tmp_path: Path, mon
 
 
 def test_repro_record_rejects_bad_args(db: Database, tmp_path: Path) -> None:
-    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
     try:
         tool = next(x for x in build(bindings) if x.name == "repro_record")
         with pytest.raises(RpcCommandError):
@@ -760,7 +773,7 @@ def test_abort_task_signals_controller_and_abandons_without_comment(db: Database
 
 
 def test_abort_task_rejects_empty_reason(db: Database, tmp_path: Path) -> None:
-    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
     try:
         tool = next(x for x in build(bindings) if x.name == "abort_task")
         with pytest.raises(RpcCommandError):
@@ -772,7 +785,7 @@ def test_abort_task_rejects_empty_reason(db: Database, tmp_path: Path) -> None:
     assert issue and issue.state == "reproducing"
 
 
-def test_abort_task_signal_is_idempotent(db: Database, tmp_path: Path) -> None:
+def test_abort_task_signal_is_idempotent() -> None:
     controller = AbortController()
     fires: list[None] = []
     controller.stop = lambda: fires.append(None)
@@ -844,7 +857,7 @@ def test_classify_issue_applies_labels_and_persists_primary(db: Database, tmp_pa
         _stop_loop(loop, t)
 
     assert "classified as bug" in result
-    assert "reproduce" in result.lower()
+    assert "reproduce" in _text(result).lower()
     assert captured["path"].endswith("/issues/42/labels")
     assert captured["body"]["labels"] == [
         "bug",
@@ -861,7 +874,7 @@ def test_classify_issue_applies_labels_and_persists_primary(db: Database, tmp_pa
 
 
 def test_classify_issue_question_skips_repro_path(db: Database, tmp_path: Path) -> None:
-    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=[{"name": "question"}, {"name": "triaged"}]))
+    transport = httpx.MockTransport(lambda *_: httpx.Response(200, json=[{"name": "question"}, {"name": "triaged"}]))
     bindings, loop, t = _bindings(db, tmp_path, transport)
     try:
         tool = next(x for x in build(bindings) if x.name == "classify_issue")
@@ -880,7 +893,7 @@ def test_classify_issue_question_skips_repro_path(db: Database, tmp_path: Path) 
 def test_classify_issue_wontfix_takes_comment_only_path(db: Database, tmp_path: Path) -> None:
     """`wontfix` is a non-PR primary: labels land, classification persists, and the
     echoed next step routes to a single explanatory comment — no repro, no PR."""
-    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=[{"name": "wontfix"}, {"name": "triaged"}]))
+    transport = httpx.MockTransport(lambda *_: httpx.Response(200, json=[{"name": "wontfix"}, {"name": "triaged"}]))
     bindings, loop, t = _bindings(db, tmp_path, transport)
     try:
         tool = next(x for x in build(bindings) if x.name == "classify_issue")
@@ -961,7 +974,7 @@ def test_gh_search_issues_scopes_repo_and_renders_matches(db: Database, tmp_path
 
 
 def test_gh_search_issues_rejects_repo_qualifier_and_empty_query(db: Database, tmp_path: Path) -> None:
-    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
     try:
         tool = next(x for x in build(bindings) if x.name == "gh_search_issues")
         with pytest.raises(RpcCommandError):
@@ -1047,7 +1060,7 @@ def _git_repo_with_commits(bindings) -> None:
 def test_search_commits_message_and_patch_modes(db: Database, tmp_path: Path) -> None:
     """message mode greps commit messages; patch mode pickaxes diff content.
     Without an origin ref the search falls back to HEAD instead of failing."""
-    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
     _git_repo_with_commits(bindings)
     try:
         tool = next(x for x in build(bindings) if x.name == "search_commits")
@@ -1061,11 +1074,11 @@ def test_search_commits_message_and_patch_modes(db: Database, tmp_path: Path) ->
     assert "fix(tools): colon selector literal paths" in by_message
     assert "feat: initial import" not in by_message
     assert "fix(tools): colon selector literal paths" in by_patch
-    assert none.startswith("No commits")
+    assert _text(none).startswith("No commits")
 
 
 def test_classify_issue_rejects_bug_without_priority(db: Database, tmp_path: Path) -> None:
-    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
     try:
         tool = next(x for x in build(bindings) if x.name == "classify_issue")
         with pytest.raises(RpcCommandError):
@@ -1104,7 +1117,7 @@ def test_classify_issue_drops_priority_on_non_bug(db: Database, tmp_path: Path) 
 
 
 def test_classify_issue_rejects_unknown_primary(db: Database, tmp_path: Path) -> None:
-    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
     try:
         tool = next(x for x in build(bindings) if x.name == "classify_issue")
         with pytest.raises(RpcCommandError):
@@ -1924,18 +1937,25 @@ def test_review_tools_reject_outside_review_mode(db: Database, tmp_path: Path) -
         _stop_loop(loop, t)
 
 
-def test_review_mode_rejects_push_and_open_pr_before_repo_commands(db: Database, tmp_path: Path) -> None:
+def test_review_mode_rejects_push_and_open_pr_before_repo_commands(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     calls: list[list[str] | tuple[str, ...]] = []
 
-    def record_repo_command(_bindings: ToolBindings, cmd: list[str] | tuple[str, ...], *, timeout: float | None = None):
-        del timeout
+    def record_repo_command(
+        bindings: ToolBindings,
+        cmd: list[str] | tuple[str, ...],
+        *,
+        timeout: float | None = None,
+        extra_env: Mapping[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, extra_env
         calls.append(cmd)
-        raise AssertionError("repo command must not run in review mode")
+        raise AssertionError(f"repo command must not run in review mode ({bindings.issue_key})")
 
     bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(lambda _r: httpx.Response(500)))
     try:
-        original = host_tools._run_repo_command
-        host_tools._run_repo_command = record_repo_command  # type: ignore[assignment]
+        monkeypatch.setattr(host_tools, "_run_repo_command", record_repo_command)
         push = host_tools._build_push_branch(bindings)
         open_pr = host_tools._build_open_pr(bindings)
         with pytest.raises(RpcCommandError):
@@ -1943,7 +1963,6 @@ def test_review_mode_rejects_push_and_open_pr_before_repo_commands(db: Database,
         with pytest.raises(RpcCommandError):
             open_pr.execute({"title": "t", "body": "invalid"}, _ctx())
     finally:
-        host_tools._run_repo_command = original  # type: ignore[assignment]
         _stop_loop(loop, t)
 
     assert calls == []
@@ -2082,7 +2101,7 @@ def test_impl_gate_allows_later_authorized_event_to_reach_repo_commands(
     db.record_event(
         delivery_id="auth-event",
         event_type="issue_comment",
-        repo=bindings.issue.repo,
+        repo=_issue_repo(bindings),
         issue_key=bindings.issue_key,
         payload={
             "_carter_omp_directive": {
@@ -2122,7 +2141,7 @@ def test_impl_gate_ignores_skipped_authorized_event(
     db.record_event(
         delivery_id="skipped-auth-event",
         event_type="issue_comment",
-        repo=bindings.issue.repo,
+        repo=_issue_repo(bindings),
         issue_key=bindings.issue_key,
         payload={
             "_carter_omp_directive": {
@@ -2194,7 +2213,7 @@ def test_classify_issue_on_pr_thread_is_noop(db: Database, tmp_path: Path) -> No
         )
     finally:
         _stop_loop(loop, t)
-    assert "no-op" in result.lower()
+    assert "no-op" in _text(result).lower()
     assert calls == []  # no GitHub label mutation
     # Classification must remain whatever it was before — not overwritten.
     row = db.get_issue(bindings.issue_key)
@@ -2219,8 +2238,8 @@ def test_classify_issue_already_classified_is_noop(db: Database, tmp_path: Path)
         )
     finally:
         _stop_loop(loop, t)
-    assert "no-op" in result.lower()
-    assert "already classified" in result.lower()
+    assert "no-op" in _text(result).lower()
+    assert "already classified" in _text(result).lower()
     assert calls == []
     row = db.get_issue(bindings.issue_key)
     assert row is not None and row.classification == "bug"  # unchanged
@@ -2239,7 +2258,7 @@ def test_set_issue_labels_on_pr_thread_is_noop(db: Database, tmp_path: Path) -> 
         result = tool.execute({"labels": ["wontfix"]}, _ctx())
     finally:
         _stop_loop(loop, t)
-    assert "no-op" in result.lower()
+    assert "no-op" in _text(result).lower()
     assert calls == []
 
 
@@ -2278,7 +2297,7 @@ def test_classify_issue_renames_branch_when_slug_provided(db: Database, tmp_path
         db,
         tmp_path,
         httpx.MockTransport(
-            lambda r: httpx.Response(200, json=[{"name": "bug"}, {"name": "prio:p1"}, {"name": "triaged"}])
+            lambda *_: httpx.Response(200, json=[{"name": "bug"}, {"name": "prio:p1"}, {"name": "triaged"}])
         ),
     )
     # The stub workspace's initial branch matches `_stub_workspace`.
@@ -2301,7 +2320,7 @@ def test_classify_issue_renames_branch_when_slug_provided(db: Database, tmp_path
     finally:
         _stop_loop(loop, t)
 
-    assert "branch renamed to" in result.lower()
+    assert "branch renamed to" in _text(result).lower()
     assert refreshes == [("carter-omp/abc12345/fix-windows-env-colon-vars", None)]
     assert bindings.workspace.branch == "carter-omp/abc12345/fix-windows-env-colon-vars"
     row = db.get_issue(bindings.issue_key)
@@ -2389,7 +2408,7 @@ def test_classify_issue_omitting_branch_slug_is_a_noop(db: Database, tmp_path: P
     bindings, loop, t = _bindings(
         db,
         tmp_path,
-        httpx.MockTransport(lambda r: httpx.Response(200, json=[{"name": "question"}, {"name": "triaged"}])),
+        httpx.MockTransport(lambda *_: httpx.Response(200, json=[{"name": "question"}, {"name": "triaged"}])),
     )
     try:
         tool = next(x for x in build(bindings) if x.name == "classify_issue")
@@ -2400,7 +2419,7 @@ def test_classify_issue_omitting_branch_slug_is_a_noop(db: Database, tmp_path: P
     finally:
         _stop_loop(loop, t)
 
-    assert "branch renamed" not in result.lower()
+    assert "branch renamed" not in _text(result).lower()
     assert bindings.workspace.branch == "carter-omp/abc12345/some-issue"
 
 
@@ -2422,7 +2441,7 @@ def test_set_issue_labels_appends(db: Database, tmp_path: Path) -> None:
 
 
 def test_set_issue_labels_rejects_empty(db: Database, tmp_path: Path) -> None:
-    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
     try:
         tool = next(x for x in build(bindings) if x.name == "set_issue_labels")
         with pytest.raises(RpcCommandError):
@@ -2488,7 +2507,7 @@ def test_gh_push_branch_rejects_wrong_identity(db: Database, tmp_path: Path) -> 
         env=bad_env,
     )
 
-    github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    github = GitHubClient("tok", transport=httpx.MockTransport(lambda *_: httpx.Response(500)))
     loop, thread = _make_loop_in_background()
     try:
         bindings = ToolBindings(
@@ -2730,7 +2749,7 @@ def test_gh_push_branch_rejects_invalid_identity_scan_range(db: Database, tmp_pa
         env=env,
     )
 
-    github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    github = GitHubClient("tok", transport=httpx.MockTransport(lambda *_: httpx.Response(500)))
     loop, thread = _make_loop_in_background()
     try:
         bindings = ToolBindings(
@@ -2792,7 +2811,7 @@ def test_gh_push_branch_rejects_invalid_identity_scan_range(db: Database, tmp_pa
 
 def test_gh_open_pr_requires_closes_keyword(db: Database, tmp_path: Path) -> None:
     """gh_open_pr refuses if the body has the four sections but no Fixes/Closes/Resolves keyword."""
-    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
     db.set_issue_classification(bindings.issue_key, "bug")
     try:
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
@@ -2998,7 +3017,7 @@ def test_gh_push_branch_rejects_dirty_worktree(db: Database, tmp_path: Path) -> 
     # Now dirty the worktree — uncommitted edit.
     (ws.repo_dir / "a.txt").write_text("a-modified\n")
 
-    github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    github = GitHubClient("tok", transport=httpx.MockTransport(lambda *_: httpx.Response(500)))
     loop, thread = _make_loop_in_background()
     try:
         bindings = ToolBindings(
@@ -3147,7 +3166,7 @@ def test_gh_push_branch_runs_fix_and_check_before_pushing(
         env=env,
     )
 
-    github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    github = GitHubClient("tok", transport=httpx.MockTransport(lambda *_: httpx.Response(500)))
     loop, thread = _make_loop_in_background()
     try:
         bindings = ToolBindings(
@@ -3209,7 +3228,7 @@ def test_gh_push_branch_runs_fix_and_check_before_pushing(
     )
     assert show.stdout == "formatted\n"
     # And the branch ended up on the remote at the new head.
-    assert result.startswith(f"pushed {ws.branch} ")
+    assert _text(result).startswith(f"pushed {ws.branch} ")
     refs = subprocess.run(
         ["git", "-C", str(bare), "for-each-ref", "--format=%(refname)"],
         capture_output=True,
@@ -3293,7 +3312,7 @@ def test_gh_push_branch_force_with_lease_recovers_after_amend(db: Database, tmp_
         env=env,
     )
 
-    github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    github = GitHubClient("tok", transport=httpx.MockTransport(lambda *_: httpx.Response(500)))
     loop, thread = _make_loop_in_background()
     try:
         bindings = ToolBindings(
@@ -3371,7 +3390,7 @@ def test_gh_push_branch_force_with_lease_recovers_after_amend(db: Database, tmp_
     finally:
         _stop_loop(loop, thread)
 
-    assert result.startswith(f"pushed {ws.branch} ")
+    assert _text(result).startswith(f"pushed {ws.branch} ")
     final_remote = subprocess.run(
         ["git", "-C", str(bare), "rev-parse", f"refs/heads/{ws.branch}"],
         capture_output=True,
@@ -3473,7 +3492,7 @@ def test_gh_push_branch_aborts_on_failed_bun_check(
         env=env,
     )
 
-    github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    github = GitHubClient("tok", transport=httpx.MockTransport(lambda *_: httpx.Response(500)))
     loop, thread = _make_loop_in_background()
     try:
         bindings = ToolBindings(
@@ -3630,7 +3649,7 @@ def test_gh_push_branch_skip_capability_bypasses_failing_bun_check(
         env=env,
     )
 
-    github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    github = GitHubClient("tok", transport=httpx.MockTransport(lambda *_: httpx.Response(500)))
     loop, thread = _make_loop_in_background()
     try:
         bindings = ToolBindings(
@@ -3663,7 +3682,6 @@ def test_gh_push_branch_skip_capability_bypasses_failing_bun_check(
             session_dir=str(ws.session_dir),
         )
         db.set_issue_classification(bindings.issue_key, "bug")
-        tool = next(x for x in build(bindings) if x.name == "gh_push_branch")
         from dataclasses import replace
 
         bindings = replace(bindings, capabilities=bindings.capabilities | {Capability.SKIP_CHECKS})
@@ -3693,9 +3711,7 @@ def test_gh_push_branch_skip_capability_bypasses_failing_bun_check(
     assert any(s.get("skipped") == "bun_check" for s in skipped)
 
 
-def test_gh_push_branch_skip_capability_still_refuses_dirty_worktree(
-    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gh_push_branch_skip_capability_still_refuses_dirty_worktree(db: Database, tmp_path: Path) -> None:
     """SKIP_CHECKS capability MUST still refuse when there are uncommitted changes —
     we never let uncommitted diff leak into a remote ref."""
     import os
@@ -3773,7 +3789,7 @@ def test_gh_push_branch_skip_capability_still_refuses_dirty_worktree(
     # Now leave an uncommitted edit on disk.
     (ws.repo_dir / "dirty.txt").write_text("uncommitted\n")
 
-    github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    github = GitHubClient("tok", transport=httpx.MockTransport(lambda *_: httpx.Response(500)))
     loop, thread = _make_loop_in_background()
     try:
         bindings = ToolBindings(
@@ -4281,7 +4297,7 @@ def test_gh_open_pr_refuses_dirty_worktree_before_fix(
     # Now plant the stowaway edit that the agent forgot.
     (ws.repo_dir / "src.txt").write_text("STOWAWAY uncommitted edit\n")
 
-    github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    github = GitHubClient("tok", transport=httpx.MockTransport(lambda *_: httpx.Response(500)))
     loop, thread = _make_loop_in_background()
     try:
         bindings = ToolBindings(
@@ -5047,7 +5063,7 @@ def test_release_status_and_job_log_are_scoped_to_expected_sha(
     try:
         status_tool = next(item for item in build(bindings) if item.name == "release_ci_status")
         log_tool = next(item for item in build(bindings) if item.name == "release_job_log")
-        status = json.loads(status_tool.execute({}, _ctx()))
+        status = json.loads(_text(status_tool.execute({}, _ctx())))
         log_tail = log_tool.execute({"job_id": 20, "tail_lines": 5000}, _ctx())
     finally:
         _stop_loop(loop, thread)
@@ -5058,7 +5074,7 @@ def test_release_status_and_job_log_are_scoped_to_expected_sha(
         "/repos/octo/widget/actions/runs",
         f"head_sha={expected_sha}&per_page=100",
     )
-    assert log_tail.splitlines() == log_lines[-1000:]
+    assert _text(log_tail).splitlines() == log_lines[-1000:]
 
 
 @pytest.mark.parametrize(
@@ -5475,3 +5491,33 @@ def test_unpushed_range_ignores_stale_adopted_base(db: Database, tmp_path: Path,
         _stop_loop(loop, thread)
 
     assert rev_range == [f"origin/{bindings.repo.default_branch}..HEAD", "--not", "--remotes=origin"]
+
+
+def test_similar_open_report_merges_a_rewording(db: Database) -> None:
+    """#59 and #60 were one gate fault under two titles; the second must merge.
+
+    Exact-title dedupe filed both and dispatched two triage runs.
+    """
+    db.upsert_issue_index(
+        IssueIndexEntry(
+            repo="octo/self",
+            number=59,
+            is_pull_request=False,
+            title="[bot-report] gate: gh_push_branch refuses workflow files, splitting bug fix from its enforcement gate",
+            body="",
+            state="open",
+            state_reason="",
+            merged_at="",
+            author="carter-omp[bot]",
+            labels=(),
+            comments=0,
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+            html_url="https://example/59",
+        )
+    )
+
+    reworded = "gate: gh_push_branch cannot push workflow files (App lacks Workflows permission)"
+    assert host_tools._similar_open_report(db, "octo/self", reworded) == 59
+    # A different fault under the same prefix must not merge.
+    assert host_tools._similar_open_report(db, "octo/self", "web search providers are all blocked") is None
