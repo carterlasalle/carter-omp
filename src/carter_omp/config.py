@@ -347,6 +347,10 @@ class Settings(BaseSettings):
     # `gh_search_issues` then falls back to the remote search API until the
     # repo has a sync watermark.
     issue_index_sync_seconds: float = Field(900.0, alias="CARTER_OMP_ISSUE_INDEX_SYNC_SECONDS")
+    # Backstop sweep for index rows whose issue was deleted while a webhook was
+    # missed. Deletions normally arrive as `issues`/`deleted` deliveries and are
+    # applied immediately; this full enumeration only repairs gaps.
+    issue_index_prune_seconds: float = Field(900.0, alias="CARTER_OMP_ISSUE_INDEX_PRUNE_SECONDS")
 
     # Org-scoped agent tools. Path to a TOML file of `[[tool]]` entries, each
     # binding a named third-party tool (MCP server, skills, prompt hint) to

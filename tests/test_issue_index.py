@@ -170,6 +170,7 @@ class _FakeBackend:
 
 class _SyncSettings:
     issue_index_sync_seconds = 900.0
+    issue_index_prune_seconds = 900.0
     repo_allowlist = frozenset({"octo/widget"})
 
 
@@ -242,3 +243,17 @@ async def test_prune_skips_incomplete_enumeration(db: Database, monkeypatch: pyt
 
     assert await sync.prune_repo("octo/widget") == 0
     assert [e.number for e in db.search_issue_index("octo/widget", keywords=("survive",))] == [999]
+
+
+def test_ingest_webhook_deleted_issue_removes_index_row(db: Database) -> None:
+    """`issues`/`deleted` must drop the row, not re-upsert it.
+
+    The payload still carries the issue object, so an unconditional upsert
+    resurrected the row and only the periodic enumeration could clear it.
+    """
+    issue = {"number": 5, "title": "boom", "state": "open", "user": {"login": "alice"}}
+    assert ingest_webhook_payload(db, "octo/widget", "issues", {"action": "opened", "issue": issue})
+    assert [e.number for e in db.search_issue_index("octo/widget", keywords=("boom",))] == [5]
+
+    assert ingest_webhook_payload(db, "octo/widget", "issues", {"action": "deleted", "issue": issue})
+    assert db.search_issue_index("octo/widget", keywords=("boom",)) == []

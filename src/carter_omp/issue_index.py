@@ -41,7 +41,6 @@ _PAGE_SIZE = 100
 _MAX_PAGES_PER_TICK = 30
 # Deletions are invisible to `?since=` syncs, so a full enumeration sweeps for
 # them on this cadence. Hourly is far more often than issues are deleted.
-_PRUNE_INTERVAL = timedelta(hours=1)
 
 
 @dataclass(slots=True, frozen=True)
@@ -102,6 +101,7 @@ def parse_search_query(query: str) -> ParsedSearchQuery:
     )
 
 
+# trace:v1 id=impl.issue-index-webhook-ingest work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def ingest_webhook_payload(db: Database, repo: str, event_type: str, payload: Mapping[str, object]) -> bool:
     """Upsert the issue/PR carried by a webhook delivery into the index.
 
@@ -112,6 +112,13 @@ def ingest_webhook_payload(db: Database, repo: str, event_type: str, payload: Ma
     if event_type in ("issues", "issue_comment"):
         obj = payload.get("issue")
         if isinstance(obj, Mapping) and obj.get("number") is not None:
+            number = obj.get("number")
+            # A deleted (or transferred-away) issue is gone from this repo:
+            # upserting it would resurrect the row and only the hourly
+            # enumeration sweep could clear it again.
+            if event_type == "issues" and str(payload.get("action") or "") in ("deleted", "transferred"):
+                db.remove_issue_index(repo, int(number))
+                return True
             db.upsert_issue_index(index_entry_from_issue_object(repo, obj))
             return True
         return False
@@ -144,6 +151,10 @@ class _SyncSettings(Protocol):
     @property
     def issue_index_sync_seconds(self) -> float: ...
 
+    # trace:v1 id=impl.issue-index-prune-setting work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    @property
+    def issue_index_prune_seconds(self) -> float: ...
+
     @property
     def repo_allowlist(self) -> frozenset[str]: ...
 
@@ -156,6 +167,7 @@ class _IndexSource(Protocol):
     ) -> list[IssueIndexEntry]: ...
 
 
+# trace:v1 id=impl.issue-index-sync-reconciler work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 class IssueIndexSync:
     """Background reconciler for the local issue index.
 
@@ -282,9 +294,9 @@ class IssueIndexSync:
     async def prune_repo(self, repo: str) -> int:
         """Drop index rows for issues/PRs deleted on GitHub. Returns rows removed.
 
-        `?since=` never reports deletions, so they are only detectable by
-        enumerating the repo. Runs hourly and only deletes when the enumeration
-        completed — a page-budget cut leaves live rows untouched.
+        Webhooks drop deleted rows immediately; this is the backstop for missed
+        deliveries. Gated to `issue_index_prune_seconds` and only deletes when
+        the enumeration completed — a page-budget cut leaves live rows untouched.
         """
         last = self._db.issue_index_last_pruned(repo)
         if last is not None:
@@ -292,7 +304,8 @@ class IssueIndexSync:
                 last_at = datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
             except ValueError:
                 last_at = None
-            if last_at is not None and datetime.now(UTC) - last_at < _PRUNE_INTERVAL:
+            interval = timedelta(seconds=self._settings.issue_index_prune_seconds)
+            if last_at is not None and datetime.now(UTC) - last_at < interval:
                 return 0
         keep: set[int] = set()
         complete = False

@@ -2493,6 +2493,13 @@ class Database:
                 (repo, last_synced),
             )
 
+    # trace:v1 id=impl.db-remove-issue-index work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def remove_issue_index(self, repo: str, number: int) -> bool:
+        """Drop one indexed issue/PR row. Returns whether a row existed."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM issue_index WHERE repo = ? AND number = ?", (repo, number))
+            return cur.rowcount > 0
+
     # trace:v1 id=impl.db-issue-index-last-pruned work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     def issue_index_last_pruned(self, repo: str) -> str | None:
         """When `repo` last got a full-enumeration deletion sweep; None = never."""

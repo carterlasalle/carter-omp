@@ -489,6 +489,15 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 except Exception:
                     log.exception("issue index webhook ingest failed", extra={"repo": repo_full})
 
+        # A deleted/transferred issue is settled work: without this the console
+        # keeps listing it as an active work item long after GitHub dropped it.
+        if x_github_event == "issues" and str(payload.get("action") or "") in ("deleted", "transferred"):
+            issue_obj = payload.get("issue")
+            repo_full = str((payload.get("repository") or {}).get("full_name") or "")
+            number = issue_obj.get("number") if isinstance(issue_obj, Mapping) else None
+            if repo_full and isinstance(number, int):
+                db.set_issue_state(make_issue_key(repo_full, number), "abandoned")
+
         def _resolve(repo_full: str, pr_number: int) -> str | None:
             row = db.find_issue_by_pr(repo_full, pr_number)
             return row.key if row else None
