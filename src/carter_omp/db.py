@@ -1467,6 +1467,23 @@ class Database:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    # trace:v1 id=impl.db-recent-tool-errors work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def recent_tool_errors(self, issue_key: str, *, limit: int = 5) -> list[tuple[str, str]]:
+        """Most recent failed tool calls for this issue, newest first.
+
+        Feeds the vent body: the run that hit the wall has the exact error
+        text, and the fix run that triages the report otherwise has to
+        rediscover it.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT tool, error FROM tool_calls "
+                "WHERE issue_key = ? AND error IS NOT NULL AND error != '' "
+                "ORDER BY ts DESC, id DESC LIMIT ?",
+                (issue_key, max(1, min(int(limit), 20))),
+            ).fetchall()
+        return [(str(row["tool"]), str(row["error"])) for row in rows]
+
     def has_successful_tool_call(self, issue_key: str, tool: str) -> bool:
         with self._lock:
             row = self._conn.execute(

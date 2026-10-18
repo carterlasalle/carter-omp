@@ -339,7 +339,7 @@ def _enable_replay(monkeypatch: pytest.MonkeyPatch) -> str:
 
 def test_cancel_happy_path(env, monkeypatch: pytest.MonkeyPatch) -> None:
     token = _enable_replay(monkeypatch)
-    cfg = Settings()
+    cfg = Settings.model_validate({})
     cfg.ensure_paths()
     app = _create_app(cfg)
     with TestClient(app) as client:
@@ -372,7 +372,7 @@ def test_cancel_happy_path(env, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_cancel_errors_and_gating(env, monkeypatch: pytest.MonkeyPatch) -> None:
     token = _enable_replay(monkeypatch)
-    cfg = Settings()
+    cfg = Settings.model_validate({})
     cfg.ensure_paths()
     app = _create_app(cfg)
     with TestClient(app) as client:
@@ -423,7 +423,7 @@ def test_cancel_errors_and_gating(env, monkeypatch: pytest.MonkeyPatch) -> None:
     # with replay disabled (token not set) -> 404
     monkeypatch.setenv("CARTER_OMP_REPLAY_TOKEN", "")
     reset_settings_cache()
-    cfg_disabled = Settings()
+    cfg_disabled = Settings.model_validate({})
     cfg_disabled.ensure_paths()
     app_disabled = create_app(cfg_disabled)
     with TestClient(app_disabled) as client:
@@ -437,7 +437,7 @@ def test_cancel_errors_and_gating(env, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_retry_state_transition(env, monkeypatch: pytest.MonkeyPatch) -> None:
     token = _enable_replay(monkeypatch)
-    cfg = Settings()
+    cfg = Settings.model_validate({})
     cfg.ensure_paths()
     app = _create_app(cfg)
     with TestClient(app) as client:

@@ -14,19 +14,28 @@ from fastapi.testclient import TestClient
 
 from carter_omp.config import Settings, reset_settings_cache
 from carter_omp.dashboard import tail_jsonl
-from carter_omp.db import Database, close_database, get_database, issue_key
+from carter_omp.db import Database, EventState, close_database, get_database, issue_key
 from carter_omp.github_backend import GitHubBackend
-from carter_omp.github_client import GitHubClient, IssueIndexEntry
+from carter_omp.github_client import CommentInfo, GitHubClient, IssueIndexEntry
 from carter_omp.manual_triage import InvalidIssueRef, ManualTriageTimeout, await_terminal_state, parse_issue_ref
 from carter_omp.proxy_client import ProxyGitTransport
 from carter_omp.sandbox import LocalGitTransport, SandboxManager
 from carter_omp.server import create_app
+from tests.fakes import FakeGitHub
+
+
+def _event_state(path: Path, delivery: str) -> str:
+    """The stored event's state, asserting the row exists."""
+    row = get_database(path).get_event(delivery)
+    assert row is not None, f"no event {delivery}"
+    return row.state
 
 
 class _PausedPool:
     def __init__(self) -> None:
         self.started = False
         self.stopped = False
+        self.cancelled: list[str] = []
 
     async def start(self) -> None:
         self.started = True
@@ -550,7 +559,7 @@ def test_trigger_triage_fetches_and_enqueues(env, monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.parametrize("state", ["queued", "running"])
 def test_trigger_triage_conflicts_when_manual_delivery_is_active(
-    env, monkeypatch: pytest.MonkeyPatch, state: str
+    env, monkeypatch: pytest.MonkeyPatch, state: EventState
 ) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()  # type: ignore[call-arg]
@@ -592,7 +601,9 @@ def test_trigger_triage_conflicts_when_manual_delivery_is_active(
 
 
 @pytest.mark.parametrize("state", ["done", "failed", "skipped"])
-def test_trigger_triage_replaces_inactive_manual_delivery(env, monkeypatch: pytest.MonkeyPatch, state: str) -> None:
+def test_trigger_triage_replaces_inactive_manual_delivery(
+    env, monkeypatch: pytest.MonkeyPatch, state: EventState
+) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()  # type: ignore[call-arg]
     cfg.ensure_paths()
@@ -733,7 +744,7 @@ def test_trigger_triage_rejects_repo_not_in_allowlist(env, monkeypatch: pytest.M
 def test_trigger_retry_by_delivery_rejects_active_events(
     env,
     monkeypatch: pytest.MonkeyPatch,
-    state: str,
+    state: EventState,
 ) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()  # type: ignore[call-arg]
@@ -756,7 +767,7 @@ def test_trigger_retry_by_delivery_rejects_active_events(
         )
         assert resp.status_code == 409
         assert state in resp.json()["detail"]
-        assert get_database(cfg.sqlite_path).get_event(f"d-{state}").state == state
+        assert _event_state(cfg.sqlite_path, f"d-{state}") == state
     close_database()
 
 
@@ -810,7 +821,7 @@ def test_trigger_retry_by_delivery_id_requeues(env, monkeypatch: pytest.MonkeyPa
             headers={"X-CarterOmp-Replay-Token": token},
         )
         assert resp.status_code == 202
-        assert get_database(cfg.sqlite_path).get_event("d-old").state == "queued"
+        assert _event_state(cfg.sqlite_path, "d-old") == "queued"
     close_database()
 
 
@@ -903,8 +914,8 @@ def test_trigger_retry_by_issue_rejects_active_latest_event(env, monkeypatch: py
         )
         assert resp.status_code == 409
         assert "running" in resp.json()["detail"]
-        assert get_database(cfg.sqlite_path).get_event("d-active").state == "running"
-        assert get_database(cfg.sqlite_path).get_event("d-inactive").state == "failed"
+        assert _event_state(cfg.sqlite_path, "d-active") == "running"
+        assert _event_state(cfg.sqlite_path, "d-inactive") == "failed"
     close_database()
 
 
@@ -930,7 +941,7 @@ def test_trigger_retry_by_issue_rejects_repo_not_in_allowlist(env, monkeypatch: 
         )
         assert resp.status_code == 403
         assert "CARTER_OMP_REPO_ALLOWLIST" in resp.json()["detail"]
-        assert get_database(cfg.sqlite_path).get_event("d-evil").state == "failed"
+        assert _event_state(cfg.sqlite_path, "d-evil") == "failed"
     close_database()
 
 
@@ -1842,7 +1853,7 @@ def test_webhook_maintainer_bypasses_rate_limit(
 # -------- handler-level: bootstrap + reopen ----------------------------
 
 
-class _RecordingSandbox:
+class _RecordingSandbox(SandboxManager):
     """Stand-in for SandboxManager: records calls, hands back a fake Workspace."""
 
     natives_cache = None
@@ -1850,7 +1861,7 @@ class _RecordingSandbox:
     def __init__(self, tmp_root: Path) -> None:
         self.tmp_root = tmp_root
         self.ensure_calls: list[dict] = []
-        self.remove_calls: list[tuple[str, int]] = []
+        self.remove_calls: list[tuple[str, int | str]] = []
 
     def ensure_workspace(
         self,
@@ -1896,7 +1907,7 @@ class _RecordingSandbox:
             repo_dir=self.tmp_root / wid / "repo",
         )
 
-    def remove_workspace(self, *, repo: str, number: int) -> None:
+    def remove_workspace(self, *, repo: str, number: int | str) -> None:
         self.remove_calls.append((repo, number))
 
 
@@ -2697,7 +2708,7 @@ async def test_directive_handler_attaches_thread_from_github(
 # ---------- triage_issue: closing-PR skip ----------
 
 
-class _StubGithubForTriage:
+class _StubGithubForTriage(FakeGitHub):
     """Minimal `GitHubBackend` shim for triage_issue tests."""
 
     def __init__(self, closing_prs: tuple[int, ...] | Exception = ()) -> None:
@@ -2710,7 +2721,7 @@ class _StubGithubForTriage:
             raise self._closing_prs
         return self._closing_prs
 
-    async def list_comments(self, repo: str, number: int) -> list[object]:
+    async def list_comments(self, repo: str, number: int) -> list[CommentInfo]:
         """Empty thread: these tests cover the closing-PR guard and workspace
         lifecycle, not prompt content."""
         del repo, number

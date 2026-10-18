@@ -712,6 +712,7 @@ def _issue_from(data: Any) -> IssueInfo:
         author=str(data.get("author") or ""),
         labels=tuple(str(x) for x in labels),
         is_pull_request=bool(data.get("is_pull_request", False)),
+        html_url=str(data.get("html_url") or ""),
     )
 
 

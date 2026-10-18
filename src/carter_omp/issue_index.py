@@ -22,12 +22,12 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
-from carter_omp.config import Settings
 from carter_omp.db import Database
-from carter_omp.github_backend import GitHubBackend
 from carter_omp.github_client import (
     GitHubError,
+    IssueIndexEntry,
     index_entry_from_issue_object,
     index_entry_from_pr_object,
 )
@@ -138,6 +138,24 @@ def _overlapped(watermark: str) -> str:
 
 
 # trace:v1 id=impl.issue-index-sync work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+class _SyncSettings(Protocol):
+    """The settings slice the reconciler reads."""
+
+    @property
+    def issue_index_sync_seconds(self) -> float: ...
+
+    @property
+    def repo_allowlist(self) -> frozenset[str]: ...
+
+
+class _IndexSource(Protocol):
+    """The one GitHub call the reconciler makes."""
+
+    async def list_issue_index_entries(
+        self, repo: str, *, since: str | None = None, page: int = 1, per_page: int = 100
+    ) -> list[IssueIndexEntry]: ...
+
+
 class IssueIndexSync:
     """Background reconciler for the local issue index.
 
@@ -147,7 +165,7 @@ class IssueIndexSync:
     rather than hogging one.
     """
 
-    def __init__(self, *, settings: Settings, db: Database, github: GitHubBackend) -> None:
+    def __init__(self, *, settings: _SyncSettings, db: Database, github: _IndexSource) -> None:
         self._settings = settings
         self._db = db
         self._github = github

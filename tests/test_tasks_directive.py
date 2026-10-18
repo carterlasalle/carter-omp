@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from carter_omp import tasks
 from carter_omp.github_client import IssueInfo, RepoInfo
+from carter_omp.sandbox import LocalGitTransport, Workspace
 from carter_omp.tasks import _attach_thread, _directive_from_payload
 from carter_omp.worker import DirectiveInfo
+from tests.fakes import FakeGitHub as _TypedFakeGitHub
+from tests.fakes import FakeSandbox
 
 
 def test_directive_from_payload_parses_pragmas() -> None:
@@ -85,7 +88,7 @@ async def test_attach_thread_preserves_authorizes_impl(monkeypatch: pytest.Monke
         author="test_author",
         authorizes_impl=True,
     )
-    hydrated = await _attach_thread(None, directive, "owner/repo", 42, is_pr=False)
+    hydrated = await _attach_thread(_TypedFakeGitHub(), directive, "owner/repo", 42, is_pr=False)
     assert hydrated is not None
     assert hydrated.body == "test body"
     assert hydrated.author == "test_author"
@@ -129,14 +132,23 @@ def _workspace(tmp_path):
     session_dir = tmp_path / "session"
     repo_dir.mkdir(exist_ok=True)
     session_dir.mkdir(exist_ok=True)
-    return SimpleNamespace(root=tmp_path, repo_dir=repo_dir, session_dir=session_dir, branch="carter_omp/issue-42")
+    return Workspace(
+        root=tmp_path,
+        repo_dir=repo_dir,
+        session_dir=session_dir,
+        context_dir=tmp_path / "ctx",
+        artifacts_dir=tmp_path / "artifacts",
+        branch="carter_omp/issue-42",
+        repo_full_name="octo/widget",
+        issue_number=42,
+    )
 
 
 async def test_handle_comment_preserves_authorizes_impl_to_run_task(
     db, tmp_path, settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace = _workspace(tmp_path)
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     async def fake_attach_thread(
         _github: object,
@@ -168,9 +180,9 @@ async def test_handle_comment_preserves_authorizes_impl_to_run_task(
     await tasks.handle_comment(
         settings=settings,
         db=db,
-        github=SimpleNamespace(),
-        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=lambda **_kwargs: workspace),
-        git_transport=SimpleNamespace(),
+        github=_TypedFakeGitHub(),
+        sandbox=FakeSandbox(natives_cache=None, ensure_workspace=lambda **_kwargs: workspace),
+        git_transport=LocalGitTransport(token=None),
         payload=_payload_with_directive(issue_number=42),
         delivery_id="d-comment",
     )
@@ -195,9 +207,9 @@ async def test_handle_pr_conversation_preserves_authorizes_impl_to_run_task(
         session_dir=str(workspace.session_dir),
         pr_number=7,
     )
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
-    class FakeGitHub:
+    class FakeGitHub(_TypedFakeGitHub):
         async def get_repo(self, repo: str) -> RepoInfo:
             assert repo == "octo/widget"
             return RepoInfo(full_name=repo, default_branch="main", clone_url="https://x/octo/widget.git", private=False)
@@ -255,8 +267,8 @@ async def test_handle_pr_conversation_preserves_authorizes_impl_to_run_task(
         settings=settings,
         db=db,
         github=FakeGitHub(),
-        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=lambda **_kwargs: workspace),
-        git_transport=SimpleNamespace(),
+        sandbox=FakeSandbox(natives_cache=None, ensure_workspace=lambda **_kwargs: workspace),
+        git_transport=LocalGitTransport(token=None),
         payload=payload,
         delivery_id="d-pr-comment",
     )
@@ -269,7 +281,7 @@ async def test_handle_pr_conversation_preserves_authorizes_impl_to_run_task(
     }
 
 
-async def _run_label_then_mention_resume(db, settings, monkeypatch, tmp_path) -> dict[str, object]:
+async def _run_label_then_mention_resume(db, settings, monkeypatch, tmp_path) -> dict[str, Any]:
     """Drive label trigger then mention follow-up through the real router + tasks.
 
     Returns captured run_task calls, workspaces, and RPC extra_args.
@@ -278,7 +290,7 @@ async def _run_label_then_mention_resume(db, settings, monkeypatch, tmp_path) ->
 
     policy = TriggerPolicy(authorized_user_ids=frozenset({12345678}), trigger_label="carter-omp")
     allowlist = frozenset({"octo/widget"})
-    captured: dict[str, object] = {"runs": [], "workspaces": [], "extra_args": []}
+    captured: dict[str, Any] = {"runs": [], "workspaces": [], "extra_args": []}
 
     workspaces: dict[str, object] = {}
 
@@ -290,8 +302,15 @@ async def _run_label_then_mention_resume(db, settings, monkeypatch, tmp_path) ->
             session_dir = root / "session"
             repo_dir.mkdir(parents=True, exist_ok=True)
             session_dir.mkdir(parents=True, exist_ok=True)
-            workspaces[key] = SimpleNamespace(
-                root=root, repo_dir=repo_dir, session_dir=session_dir, branch="carter-omp/abc123/fix-it"
+            workspaces[key] = Workspace(
+                root=root,
+                repo_dir=repo_dir,
+                session_dir=session_dir,
+                context_dir=root / "ctx",
+                artifacts_dir=root / "artifacts",
+                branch="carter-omp/abc123/fix-it",
+                repo_full_name="octo/widget",
+                issue_number=42,
             )
         captured.setdefault("workspaces", []).append(kwargs.get("number"))
         return workspaces[key]
@@ -308,19 +327,17 @@ async def _run_label_then_mention_resume(db, settings, monkeypatch, tmp_path) ->
         # Simulate the agent leaving a transcript behind for the next run.
         (session_dir / "session.jsonl").write_text("{}\n")
 
-    class FakeGitHub:
-        async def get_repo(self, repo_full: str):
+    class FakeGitHub(_TypedFakeGitHub):
+        async def get_repo(self, repo: str):
             from carter_omp.github_client import RepoInfo
 
-            return RepoInfo(
-                full_name=repo_full, default_branch="main", clone_url="https://x/octo/widget.git", private=False
-            )
+            return RepoInfo(full_name=repo, default_branch="main", clone_url="https://x/octo/widget.git", private=False)
 
-        async def get_issue(self, repo_full: str, number: int):
+        async def get_issue(self, repo: str, number: int):
             from carter_omp.github_client import IssueInfo
 
             return IssueInfo(
-                repo=repo_full,
+                repo=repo,
                 number=number,
                 title="broken thing",
                 body="it broke",
@@ -330,19 +347,22 @@ async def _run_label_then_mention_resume(db, settings, monkeypatch, tmp_path) ->
                 is_pull_request=False,
             )
 
-        async def list_comments(self, repo_full: str, number: int):
+        async def list_comments(self, repo: str, number: int):
+            captured.setdefault("list_comments", []).append((repo, number))
             return []
 
-        async def list_review_comments(self, repo_full: str, number: int):
+        async def list_review_comments(self, repo: str, pr_number: int):
+            captured.setdefault("list_review_comments", []).append((repo, pr_number))
             return []
 
-        async def list_pr_reviews(self, repo_full: str, number: int):
+        async def list_pr_reviews(self, repo: str, pr_number: int):
+            captured.setdefault("list_pr_reviews", []).append((repo, pr_number))
             return []
 
     monkeypatch.setattr(tasks, "_attach_thread", fake_attach_thread)
     monkeypatch.setattr(tasks, "run_task", fake_run_task)
 
-    sandbox = SimpleNamespace(
+    sandbox = FakeSandbox(
         natives_cache=None,
         ensure_workspace=fake_ensure_workspace,
         remove_workspace=lambda **_kwargs: None,
@@ -365,7 +385,7 @@ async def _run_label_then_mention_resume(db, settings, monkeypatch, tmp_path) ->
     decision = route("issues", label_payload, allowlist=allowlist, bot_login="carter-omp", policy=policy)
     assert decision.should_queue
     assert decision.trigger is not None
-    stored_label = dict(label_payload)
+    stored_label: dict[str, Any] = dict(label_payload)
     stored_label["_carter_omp_trigger"] = decision.trigger.to_record()
     stored_label["_carter_omp_directive"] = {
         "body": "Investigate and handle this issue according to the configured issue workflow.",
@@ -378,7 +398,7 @@ async def _run_label_then_mention_resume(db, settings, monkeypatch, tmp_path) ->
         db=db,
         github=FakeGitHub(),
         sandbox=sandbox,
-        git_transport=SimpleNamespace(),
+        git_transport=LocalGitTransport(token=None),
         payload=stored_label,
         delivery_id="d-label-1",
     )
@@ -427,7 +447,7 @@ async def _run_label_then_mention_resume(db, settings, monkeypatch, tmp_path) ->
     )
     assert mention_decision.should_queue
     assert mention_decision.trigger is not None
-    stored_mention = dict(mention_payload)
+    stored_mention: dict[str, Any] = dict(mention_payload)
     stored_mention["_carter_omp_trigger"] = mention_decision.trigger.to_record()
     stored_mention["_carter_omp_directive"] = {
         "body": mention_decision.directive_body,
@@ -440,7 +460,7 @@ async def _run_label_then_mention_resume(db, settings, monkeypatch, tmp_path) ->
         db=db,
         github=FakeGitHub(),
         sandbox=sandbox,
-        git_transport=SimpleNamespace(),
+        git_transport=LocalGitTransport(token=None),
         payload=stored_mention,
         delivery_id="d-mention-2",
     )
@@ -477,11 +497,15 @@ async def test_pr_conversation_on_a_reviewed_pr_is_handled_not_dropped(
     branch, so the conversation run is review-mode (read-only) — it can reply but
     never push. Dropping these left replies unanswered (#64).
     """
-    workspace = SimpleNamespace(
+    workspace = Workspace(
         root=tmp_path,
         repo_dir=tmp_path / "repo",
         session_dir=tmp_path / "session",
+        context_dir=tmp_path / "ctx",
+        artifacts_dir=tmp_path / "artifacts",
         branch="review/pr-7",
+        repo_full_name="octo/widget",
+        issue_number=42,
     )
     workspace.repo_dir.mkdir(exist_ok=True)
     workspace.session_dir.mkdir(exist_ok=True)
@@ -494,9 +518,9 @@ async def test_pr_conversation_on_a_reviewed_pr_is_handled_not_dropped(
         session_dir=str(workspace.session_dir),
         pr_number=7,
     )
-    called: dict[str, object] = {}
+    called: dict[str, Any] = {}
 
-    class FakeGitHub:
+    class FakeGitHub(_TypedFakeGitHub):
         async def get_repo(self, repo: str) -> RepoInfo:
             return RepoInfo(full_name=repo, default_branch="main", clone_url="https://x/octo/widget.git", private=False)
 
@@ -541,8 +565,8 @@ async def test_pr_conversation_on_a_reviewed_pr_is_handled_not_dropped(
         settings=settings,
         db=db,
         github=FakeGitHub(),
-        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=fake_ensure, remove_workspace=fake_remove),
-        git_transport=SimpleNamespace(),
+        sandbox=FakeSandbox(natives_cache=None, ensure_workspace=fake_ensure, remove_workspace=fake_remove),
+        git_transport=LocalGitTransport(token=None),
         payload=payload,
         delivery_id="d-pr-reviewed",
     )
@@ -568,19 +592,27 @@ async def test_implementation_directive_on_a_reviewed_pr_gets_a_writable_branch(
     the run owns: the reviewed code is what the fixes apply to, so it is kept
     rather than re-cloned.
     """
-    review = SimpleNamespace(
+    review = Workspace(
         root=tmp_path,
         repo_dir=tmp_path / "review-repo",
         session_dir=tmp_path / "review-session",
+        context_dir=tmp_path / "review-ctx",
+        artifacts_dir=tmp_path / "review-artifacts",
         branch="review/pr-7",
+        repo_full_name="octo/widget",
+        issue_number=42,
     )
     review.repo_dir.mkdir(exist_ok=True)
     review.session_dir.mkdir(exist_ok=True)
-    owned = SimpleNamespace(
+    owned = Workspace(
         root=tmp_path,
         repo_dir=tmp_path / "owned-repo",
         session_dir=tmp_path / "owned-session",
+        context_dir=tmp_path / "owned-ctx",
+        artifacts_dir=tmp_path / "owned-artifacts",
         branch="carter-omp/deadbeef/apply-review-findings",
+        repo_full_name="octo/widget",
+        issue_number=42,
     )
     owned.repo_dir.mkdir(exist_ok=True)
     owned.session_dir.mkdir(exist_ok=True)
@@ -595,9 +627,9 @@ async def test_implementation_directive_on_a_reviewed_pr_gets_a_writable_branch(
     )
     ensured: dict[str, object] = {}
     adopted: list[object] = []
-    called: dict[str, object] = {}
+    called: dict[str, Any] = {}
 
-    class FakeGitHub:
+    class FakeGitHub(_TypedFakeGitHub):
         async def get_repo(self, repo: str) -> RepoInfo:
             return RepoInfo(full_name=repo, default_branch="main", clone_url="https://x/octo/widget.git", private=False)
 
@@ -640,8 +672,8 @@ async def test_implementation_directive_on_a_reviewed_pr_gets_a_writable_branch(
         settings=settings,
         db=db,
         github=FakeGitHub(),
-        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=fake_ensure, adopt_review_workspace=fake_adopt),
-        git_transport=SimpleNamespace(),
+        sandbox=FakeSandbox(natives_cache=None, ensure_workspace=fake_ensure, adopt_review_workspace=fake_adopt),
+        git_transport=LocalGitTransport(token=None),
         payload=payload,
         delivery_id="d-pr-impl",
     )
@@ -656,7 +688,7 @@ async def test_implementation_directive_on_a_reviewed_pr_gets_a_writable_branch(
 
 
 async def test_pr_conversation_records_a_visible_skip_for_an_unowned_pr(
-    db, tmp_path, settings, monkeypatch: pytest.MonkeyPatch
+    db, settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A drop is recorded as `skipped: <reason>`, never as a silent `done`."""
     db.record_event(
@@ -678,9 +710,9 @@ async def test_pr_conversation_records_a_visible_skip_for_an_unowned_pr(
     await tasks.handle_pr_conversation(
         settings=settings,
         db=db,
-        github=SimpleNamespace(),
-        sandbox=SimpleNamespace(natives_cache=None),
-        git_transport=SimpleNamespace(),
+        github=_TypedFakeGitHub(),
+        sandbox=FakeSandbox(natives_cache=None),
+        git_transport=LocalGitTransport(token=None),
         payload=payload,
         delivery_id="d-pr-unowned",
     )
@@ -691,14 +723,23 @@ async def test_pr_conversation_records_a_visible_skip_for_an_unowned_pr(
     assert row.last_error == "pr_conversation_unowned_pr"
 
 
-async def test_review_pr_leaves_the_reviewing_state(db, settings, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_review_pr_leaves_the_reviewing_state(db, settings, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """`reviewing` means "a review run is in flight"; it must not outlive the run."""
     from carter_omp.github_client import PullRequestInfo
 
-    workspace = SimpleNamespace(root=None, repo_dir=None, session_dir=None, branch="review/pr-7")
-    captured: dict[str, object] = {}
+    workspace = Workspace(
+        root=tmp_path,
+        repo_dir=tmp_path / "repo",
+        session_dir=tmp_path / "session",
+        context_dir=tmp_path / "ctx",
+        artifacts_dir=tmp_path / "artifacts",
+        branch="review/pr-7",
+        repo_full_name="octo/widget",
+        issue_number=42,
+    )
+    captured: dict[str, Any] = {}
 
-    class FakeGitHub:
+    class FakeGitHub(_TypedFakeGitHub):
         async def get_repo(self, repo: str) -> RepoInfo:
             return RepoInfo(full_name=repo, default_branch="main", clone_url="https://x/octo/widget.git", private=False)
 
@@ -735,8 +776,8 @@ async def test_review_pr_leaves_the_reviewing_state(db, settings, monkeypatch: p
         settings=settings,
         db=db,
         github=FakeGitHub(),
-        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=lambda **_kwargs: workspace),
-        git_transport=SimpleNamespace(),
+        sandbox=FakeSandbox(natives_cache=None, ensure_workspace=lambda **_kwargs: workspace),
+        git_transport=LocalGitTransport(token=None),
         payload={"pull_request": {"number": 7}, "repository": {"full_name": "octo/widget"}},
         delivery_id="d-review",
     )
@@ -760,16 +801,20 @@ async def test_maintainer_directive_on_an_unowned_same_repo_pr_is_handled(
     """
     from carter_omp.github_client import PullRequestInfo
 
-    workspace = SimpleNamespace(
+    workspace = Workspace(
         root=tmp_path,
         repo_dir=tmp_path / "repo",
         session_dir=tmp_path / "session",
+        context_dir=tmp_path / "ctx",
+        artifacts_dir=tmp_path / "artifacts",
         branch="feat/cinematic-redesign",
+        repo_full_name="octo/widget",
+        issue_number=42,
     )
     workspace.repo_dir.mkdir(exist_ok=True)
     workspace.session_dir.mkdir(exist_ok=True)
     ensured: dict[str, object] = {}
-    called: dict[str, object] = {}
+    called: dict[str, Any] = {}
 
     pr_info = PullRequestInfo(
         repo="octo/widget",
@@ -785,7 +830,7 @@ async def test_maintainer_directive_on_an_unowned_same_repo_pr_is_handled(
     async def unmapped(**_kwargs: object):
         return None, pr_info
 
-    class FakeGitHub:
+    class FakeGitHub(_TypedFakeGitHub):
         async def get_repo(self, repo: str) -> RepoInfo:
             return RepoInfo(full_name=repo, default_branch="main", clone_url="https://x/octo/widget.git", private=False)
 
@@ -825,8 +870,8 @@ async def test_maintainer_directive_on_an_unowned_same_repo_pr_is_handled(
         settings=settings,
         db=db,
         github=FakeGitHub(),
-        sandbox=SimpleNamespace(natives_cache=None, ensure_workspace=fake_ensure),
-        git_transport=SimpleNamespace(),
+        sandbox=FakeSandbox(natives_cache=None, ensure_workspace=fake_ensure),
+        git_transport=LocalGitTransport(token=None),
         payload=payload,
         delivery_id="d-pr-maintainer",
     )
@@ -884,9 +929,9 @@ async def test_unmapped_same_repo_pr_without_a_maintainer_directive_is_still_ski
     await tasks.handle_pr_conversation(
         settings=settings,
         db=db,
-        github=SimpleNamespace(),
-        sandbox=SimpleNamespace(natives_cache=None),
-        git_transport=SimpleNamespace(),
+        github=_TypedFakeGitHub(),
+        sandbox=FakeSandbox(natives_cache=None),
+        git_transport=LocalGitTransport(token=None),
         payload=payload,
         delivery_id="d-pr-stranger",
     )

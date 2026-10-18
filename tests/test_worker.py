@@ -20,8 +20,12 @@ import pytest
 
 from carter_omp import worker
 from carter_omp.config import Settings
+from carter_omp.db import Database
 from carter_omp.git_ops import DirtyState
-from carter_omp.github_client import IssueInfo
+from carter_omp.github_client import IssueInfo, RepoInfo
+from carter_omp.natives_cache import NativesCache
+from carter_omp.sandbox import LocalGitTransport, Workspace
+from tests.fakes import FakeBindings, FakeGitHub
 
 
 class _FakeRpcClient:
@@ -142,7 +146,7 @@ _SEEDED_PHASES = [
 
 def _make_inputs(
     tmp_path: Path, settings: Settings, *, session_has_jsonl: bool, slot_uid: int | None = None
-) -> tuple[worker.TaskInputs, SimpleNamespace]:
+) -> tuple[worker.TaskInputs, FakeBindings]:
     root = tmp_path / "workspace"
     root.mkdir()
     session_dir = root / "session"
@@ -152,36 +156,52 @@ def _make_inputs(
     repo_dir = root / "repo"
     repo_dir.mkdir()
 
-    workspace = SimpleNamespace(
+    workspace = Workspace(
         root=root,
-        session_dir=session_dir,
         repo_dir=repo_dir,
+        session_dir=session_dir,
+        context_dir=root / "ctx",
+        artifacts_dir=root / "artifacts",
         branch="carter_omp/issue-1",
+        repo_full_name="acme/widgets",
+        issue_number=1,
     )
-    repo = SimpleNamespace(full_name="acme/widgets", owner="acme", name="widgets")
-    issue = SimpleNamespace(repo="acme/widgets", number=1, title="bug", body="")
+    repo = RepoInfo(full_name="acme/widgets", default_branch="main", clone_url="", private=False)
+    issue = IssueInfo(
+        repo="acme/widgets",
+        number=1,
+        title="bug",
+        body="",
+        state="open",
+        author="alice",
+        labels=(),
+        is_pull_request=False,
+    )
 
-    db = SimpleNamespace(set_event_model=lambda _did, _model: None, get_issue=lambda _key: None)
-    github = SimpleNamespace()
+    db = Database(tmp_path / "worker.sqlite")
+    github = FakeGitHub()
+    git_transport = LocalGitTransport(token=None)
 
     inputs = worker.TaskInputs(
         settings=settings,
-        db=db,  # type: ignore[arg-type]
-        github=github,  # type: ignore[arg-type]
-        git_transport=SimpleNamespace(),  # type: ignore[arg-type]
-        repo=repo,  # type: ignore[arg-type]
-        issue=issue,  # type: ignore[arg-type]
-        workspace=workspace,  # type: ignore[arg-type]
+        db=db,
+        github=github,
+        git_transport=git_transport,
+        repo=repo,
+        issue=issue,
+        workspace=workspace,
         delivery_id="d-test",
         attempts=0,
         slot_uid=slot_uid,
     )
-    bindings = SimpleNamespace(
+    bindings = FakeBindings(
         workspace=workspace,
         repo=repo,
         issue=issue,
         issue_key=f"{repo.full_name}#{issue.number}",
-        abort=None,
+        db=db,
+        github=github,
+        git_transport=inputs.git_transport,
     )
     return inputs, bindings
 
@@ -786,11 +806,20 @@ def _make_inputs_with_classification(
     settings: Settings,
     *,
     classification: str | None,
-) -> tuple[worker.TaskInputs, SimpleNamespace]:
+) -> tuple[worker.TaskInputs, FakeBindings]:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=True)
-    row = _ClassifiedRow(classification) if classification else None
-    inputs.db.get_issue = lambda _key: row  # type: ignore[attr-defined]
-    bindings.db = inputs.db  # tools_called check uses inputs.db.get_issue
+    if classification is not None:
+        key = "acme/widgets#1"
+        inputs.db.upsert_issue(
+            key=key,
+            repo="acme/widgets",
+            number=1,
+            state="reproducing",
+            branch=inputs.workspace.branch,
+            session_dir=str(inputs.workspace.session_dir),
+        )
+        inputs.db.set_issue_classification(key, classification)
+    object.__setattr__(bindings, "db", inputs.db)  # tools_called check uses inputs.db.get_issue
     return inputs, bindings
 
 
@@ -1049,7 +1078,7 @@ async def test_run_rpc_skips_dirty_state_reminder_in_review_mode(
     """Follow-up turn on a review worktree: dirty probe must not demand a refused push (#44)."""
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
     bindings.workspace.branch = "review/pr-1"
-    bindings.review_mode = True
+    object.__setattr__(bindings, "review_mode", True)
     monkeypatch.setattr(
         worker,
         "_probe_workspace_dirty",
@@ -1121,7 +1150,7 @@ async def test_run_rpc_caps_dirty_state_reminders_at_budget(
 # ---------------------------------------------------------------------------
 
 
-class _RecordingNativesCache:
+class _RecordingNativesCache(NativesCache):
     """Test double for `NativesCache`: records `capture` calls, optionally
     raises so we can verify exception swallowing."""
 
@@ -1145,16 +1174,9 @@ def _make_capture_inputs(
 ) -> worker.TaskInputs:
     """Build a `TaskInputs` whose workspace optionally has built natives."""
     inputs, _ = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    # Replace the SimpleNamespace workspace with one carrying the fields
-    # `_capture_natives_cache` needs (workspace_key + repo_full_name).
-    ws = SimpleNamespace(
-        root=inputs.workspace.root,
-        session_dir=inputs.workspace.session_dir,
-        repo_dir=inputs.workspace.repo_dir,
-        branch=inputs.workspace.branch,
-        workspace_key="acme__widgets__1",
-        repo_full_name="acme/widgets",
-    )
+    # The real workspace already carries the key `_capture_natives_cache`
+    # needs: `workspace_key` is derived from repo + issue.
+    ws = inputs.workspace
     if with_native_artifacts:
         native_dir = ws.repo_dir / "packages" / "natives" / "native"
         native_dir.mkdir(parents=True)
@@ -1169,7 +1191,7 @@ def _make_capture_inputs(
         git_transport=inputs.git_transport,
         repo=inputs.repo,
         issue=inputs.issue,
-        workspace=ws,  # type: ignore[arg-type]
+        workspace=ws,
         delivery_id=inputs.delivery_id,
         attempts=inputs.attempts,
         slot_uid=inputs.slot_uid,
@@ -1233,7 +1255,7 @@ def _release_inputs(
     settings: Settings,
     *,
     session_has_jsonl: bool,
-) -> tuple[worker.TaskInputs, SimpleNamespace]:
+) -> tuple[worker.TaskInputs, FakeBindings]:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=session_has_jsonl)
     inputs.issue = None
     inputs.release = worker.ReleaseTaskContext(
@@ -1246,8 +1268,19 @@ def _release_inputs(
         failures_text="tests failed",
         run_urls=("https://example/run",),
     )
-    bindings.issue = None
-    bindings.issue_key = "acme/widgets#v17.2.8"
+    object.__setattr__(bindings, "issue", None)
+    object.__setattr__(
+        bindings,
+        "release",
+        worker.host_tools.ReleaseToolContext(
+            repo="acme/widgets",
+            tag="v17.2.8",
+            version="17.2.8",
+            key="acme/widgets#v17.2.8",
+            expected_sha="abc",
+            default_branch="main",
+        ),
+    )
     return inputs, bindings
 
 
@@ -1259,7 +1292,7 @@ def test_release_prompt_routes_fresh_and_resumed_sessions(
     inputs, _bindings = _release_inputs(tmp_path, settings, session_has_jsonl=False)
     monkeypatch.setattr(worker.persona, "kickoff_release", lambda **_kwargs: "fresh", raising=False)
     monkeypatch.setattr(worker.persona, "followup_release", lambda **_kwargs: "resumed", raising=False)
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "comment": None,
         "pr_number": None,
         "review_payload": None,
@@ -1360,6 +1393,7 @@ def test_write_fallback_chains_renders_default_overlay(
 
     path = worker._write_fallback_chains(cfg)
 
+    assert path is not None
     assert path == overlay
     body = path.read_text(encoding="utf-8")
     assert "fallbackChains:" in body
@@ -1635,33 +1669,42 @@ def test_record_agent_abort_marks_the_delivery_failed(
 ) -> None:
     """An agent abort must not look green: a run that published nothing used to
     end as `done` with the reason only in a log line."""
-    recorded: dict[str, object] = {}
-
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    inputs.db = SimpleNamespace(  # type: ignore[assignment]
-        mark_event=lambda delivery, state, error=None: recorded.update(
-            {"delivery": delivery, "state": state, "error": error}
-        )
+    inputs.db.record_event(
+        delivery_id=inputs.delivery_id,
+        event_type="issues",
+        repo="acme/widgets",
+        issue_key="acme/widgets#1",
+        payload={},
     )
-    bindings.abort = worker.host_tools.AbortController()
-    bindings.abort.signal("Harness credential fault: gh_push_branch rejected 401")
+    controller = worker.host_tools.AbortController()
+    controller.signal("Harness credential fault: gh_push_branch rejected 401")
+    object.__setattr__(bindings, "abort", controller)
 
     worker._record_agent_abort(inputs, bindings)
 
-    assert recorded["delivery"] == inputs.delivery_id
-    assert recorded["state"] == "failed"
-    assert "401" in str(recorded["error"])
+    row = inputs.db.get_event(inputs.delivery_id)
+    assert row is not None
+    assert row.state == "failed"
+    assert "401" in (row.last_error or "")
 
 
 def test_record_agent_abort_is_a_noop_without_an_abort(tmp_path: Path, settings: Settings) -> None:
-    calls: list[object] = []
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    inputs.db = SimpleNamespace(mark_event=lambda *a, **k: calls.append((a, k)))  # type: ignore[assignment]
-    bindings.abort = worker.host_tools.AbortController()
+    inputs.db.record_event(
+        delivery_id=inputs.delivery_id,
+        event_type="issues",
+        repo="acme/widgets",
+        issue_key="acme/widgets#1",
+        payload={},
+    )
+    object.__setattr__(bindings, "abort", worker.host_tools.AbortController())
 
     worker._record_agent_abort(inputs, bindings)
 
-    assert calls == []
+    row = inputs.db.get_event(inputs.delivery_id)
+    assert row is not None
+    assert row.state == "queued"
 
 
 def test_agent_env_disables_husky(tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:

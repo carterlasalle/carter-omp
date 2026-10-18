@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import Mapping
+from typing import Any
 
 import pytest
 
@@ -23,8 +25,8 @@ BOT = "carter_omp-bot"
 LEGACY = TriggerPolicy(mode="legacy")
 
 
-def route_legacy(event_type: str, payload: object, **kwargs: object) -> RouteDecision:
-    return route(event_type, payload, policy=LEGACY, **kwargs)  # type: ignore[arg-type]
+def route_legacy(event_type: str, payload: Mapping[str, Any], **kwargs: Any) -> RouteDecision:
+    return route(event_type, payload, policy=LEGACY, **kwargs)
 
 
 def test_verify_signature_positive() -> None:
@@ -169,7 +171,7 @@ def test_route_pr_conversation_uses_handle_pr_conversation() -> None:
         },
         allowlist=ALLOWLIST,
         bot_login=BOT,
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert decision.should_queue
     assert decision.task == "handle_pr_conversation"
@@ -186,7 +188,7 @@ def test_route_pr_conversation_normalizes_bot_author_suffix() -> None:
         },
         allowlist=ALLOWLIST,
         bot_login=f"@{BOT}[bot]",
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert decision.should_queue
     assert decision.task == "handle_pr_conversation"
@@ -230,7 +232,7 @@ def test_route_pr_conversation_falls_back_to_pr_key_when_resolver_misses() -> No
         },
         allowlist=ALLOWLIST,
         bot_login=BOT,
-        resolve_issue_from_pr=lambda _r, _n: None,
+        resolve_issue_from_pr=lambda *_: None,
     )
     assert decision.should_queue
     assert decision.task == "handle_pr_conversation"
@@ -341,7 +343,7 @@ def test_route_review_only_for_bot_authored_pr() -> None:
         },
         allowlist=ALLOWLIST,
         bot_login=BOT,
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert decision.should_queue
     assert decision.task == "handle_review"
@@ -372,7 +374,7 @@ def test_route_review_comment_falls_back_to_pr_key_when_resolver_misses() -> Non
         },
         allowlist=ALLOWLIST,
         bot_login=BOT,
-        resolve_issue_from_pr=lambda _r, _n: None,
+        resolve_issue_from_pr=lambda *_: None,
     )
     assert decision.should_queue
     assert decision.task == "handle_review"
@@ -391,7 +393,7 @@ def test_route_pr_closed_cleans_up_any_tracked_pr() -> None:
         payload,
         allowlist=ALLOWLIST,
         bot_login=BOT,
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert decision.should_queue
     assert decision.task == "cleanup_workspace"
@@ -404,7 +406,7 @@ def test_route_pr_closed_cleans_up_any_tracked_pr() -> None:
         payload,
         allowlist=ALLOWLIST,
         bot_login=BOT,
-        resolve_issue_from_pr=lambda _r, _n: None,
+        resolve_issue_from_pr=lambda *_: None,
     )
     assert merged.should_queue
     assert merged.task == "cleanup_workspace"
@@ -478,7 +480,7 @@ def test_route_pr_merged_carries_no_submitter() -> None:
         payload,
         allowlist=ALLOWLIST,
         bot_login=BOT,
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert decision.should_queue
     assert decision.submitter is None
@@ -783,7 +785,7 @@ def test_route_directive_on_incoming_pr_conversation_is_ignored() -> None:
         },
         allowlist=ALLOWLIST,
         bot_login=BOT,
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert not decision.should_queue
     assert decision.reason == "incoming PR comments ignored"
@@ -804,7 +806,7 @@ def test_route_directive_set_on_review_comment() -> None:
         },
         allowlist=ALLOWLIST,
         bot_login=BOT,
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert decision.should_queue
     assert decision.task == "handle_review"
@@ -827,7 +829,7 @@ def test_route_review_comment_normalizes_bot_author_suffix() -> None:
         },
         allowlist=ALLOWLIST,
         bot_login=f"@{BOT}[bot]",
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert decision.should_queue
     assert decision.task == "handle_review"
@@ -853,7 +855,7 @@ def test_route_reviewer_bot_comment_on_incoming_pr_is_ignored() -> None:
         allowlist=ALLOWLIST,
         bot_login=BOT,
         reviewer_bots=frozenset({"chatgpt-codex-connector"}),
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert not decision.should_queue
     assert decision.reason == "incoming PR comments ignored"
@@ -874,7 +876,7 @@ def test_route_reviewer_bot_review_comment_is_directive() -> None:
         allowlist=ALLOWLIST,
         bot_login=BOT,
         reviewer_bots=frozenset({"chatgpt-codex-connector"}),
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert decision.should_queue
     assert decision.task == "handle_review"
@@ -916,7 +918,7 @@ def test_route_reviewer_bot_login_case_insensitive_for_review_comments() -> None
         allowlist=ALLOWLIST,
         bot_login=BOT,
         reviewer_bots=frozenset({"chatgpt-codex-connector"}),
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert decision.directive is True
     assert decision.directive_author == "chatgpt-codex-connector"
@@ -958,7 +960,7 @@ def test_route_directive_strips_pragmas_from_reviewer_bot_review_comment() -> No
         allowlist=ALLOWLIST,
         bot_login=BOT,
         reviewer_bots=frozenset({"chatgpt-codex-connector"}),
-        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+        resolve_issue_from_pr=lambda *_: "octo/widget#42",
     )
     assert decision.directive is True
     assert decision.directive_body == "Leak in foo()"

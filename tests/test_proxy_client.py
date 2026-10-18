@@ -9,6 +9,7 @@ import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -506,7 +507,7 @@ async def test_list_comment_reactions_round_trip(proxy_settings: Settings) -> No
 
 
 async def test_close_issue_round_trip(proxy_settings: Settings) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
     app = create_proxy_app(proxy_settings)
     app.state.settings = proxy_settings
 
@@ -555,7 +556,7 @@ async def test_submit_pr_review_commit_id_reaches_wire(proxy_settings: Settings)
     proxy client POSTs, and the server must forward it to the direct client."""
     app = create_proxy_app(proxy_settings)
     app.state.settings = proxy_settings
-    upstream: dict[str, object] = {}
+    upstream: dict[str, Any] = {}
 
     def gh(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/repos/octo/widget/pulls/2/reviews" and req.method == "POST":
@@ -621,7 +622,7 @@ async def test_submit_pr_review_rejects_non_string_commit_id(proxy_settings: Set
     still succeeds."""
     app = create_proxy_app(proxy_settings)
     app.state.settings = proxy_settings
-    upstream: dict[str, object] = {}
+    upstream: dict[str, Any] = {}
 
     def gh(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/repos/octo/widget/pulls/3/reviews" and req.method == "POST":

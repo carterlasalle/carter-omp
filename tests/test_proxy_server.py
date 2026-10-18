@@ -7,7 +7,7 @@ import os
 import platform
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -133,7 +133,7 @@ def _signed(
     path: str,
     body: bytes = b"",
     *,
-    params: dict[str, object] | None = None,
+    params: Mapping[str, str | int | float | bool | None] | None = None,
     ts: str | None = None,
     key: bytes | None = None,
     run_token: str | None = None,
@@ -1252,7 +1252,9 @@ async def test_release_read_endpoints_proxy_typed_github_shapes(proxy_settings: 
 
     app = _build_app(proxy_settings, gh)
 
-    async def signed_get(client: httpx.AsyncClient, path: str, params: dict[str, object]) -> httpx.Response:
+    async def signed_get(
+        client: httpx.AsyncClient, path: str, params: Mapping[str, str | int | float | bool | None]
+    ) -> httpx.Response:
         return await client.get(path, params=params, headers=_signed("GET", path, params=params))
 
     async with await _async_client(app) as client:
@@ -1615,10 +1617,10 @@ async def test_git_fetch_ref_allows_slashy_branch_name(proxy_settings: Settings,
 # ============================================================================
 
 
-def _attack_token(**kwargs: object) -> str:
-    defaults: dict[str, object] = {"repo": "octo/widget", "issue": 1}
+def _attack_token(**kwargs: Any) -> str:
+    defaults: dict[str, Any] = {"repo": "octo/widget", "issue": 1}
     defaults.update(kwargs)
-    return _run_token(**defaults)  # type: ignore[arg-type]
+    return _run_token(**defaults)
 
 
 async def test_run_token_wrong_repo_rejected(proxy_settings: Settings) -> None:

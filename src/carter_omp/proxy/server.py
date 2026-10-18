@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import subprocess
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -215,6 +215,7 @@ def _pool_dir(cfg: Settings, repo: str) -> Path:
     return Path(cfg.workspace_root) / "_pool" / repo.replace("/", "__")
 
 
+# trace:v1 id=impl.proxy-workspace-key-shape work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _workspace_repo_dir(cfg: Settings, workspace_key: str) -> Path:
     # Gate the join on the canonical shape `sandbox.workspace_key` produces —
     # anything else 400s before a user-controlled value reaches the path
@@ -327,7 +328,6 @@ _ORIGIN_READ_TIMEOUT_SECONDS = 5.0
 _REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 _FORBIDDEN_URL_BYTES_RE = re.compile(r"[\x00-\x1f\x7f]|%(?:00|0a|0d)", re.IGNORECASE)
 _GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$")
-# trace:v1 id=impl.proxy-workspace-key-shape work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 _WORKSPACE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*__(?:[0-9]{1,10}|release)$")
 _WORKSPACE_SUFFIX_RE = re.compile(r"(?:[0-9]{1,10}|release)")
 _GIT_PROBE_SCRUBBED_ENV_KEYS = (
@@ -631,10 +631,9 @@ def create_proxy_app(settings: Settings) -> FastAPI:
 
     # trace:v1 id=impl.proxy-lifespan work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         from carter_omp.app_auth import AppTokenProvider
 
-        provider: AppTokenProvider | None = None
         key_file = settings.github_app_private_key_file
         if settings.github_app_id is not None and key_file is not None:
             try:
@@ -665,8 +664,8 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         # Shared client: App mode mints an installation token up front (the
         # per-request scoped client refreshes it later); PAT mode uses the
         # static token. No GITHUB_TOKEN is required in App mode.
-        provider = getattr(settings, "_app_token_provider", None)
-        app.state.github = GitHubClient(_shared_token(settings, provider))
+        shared_provider = getattr(settings, "_app_token_provider", None)
+        app.state.github = GitHubClient(_shared_token(settings, shared_provider))
         app.state.settings = settings
         yield
 

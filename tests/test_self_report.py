@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 import pytest
+from omp_rpc import HostToolResultValue
 
 from carter_omp.config import Settings
 from carter_omp.host_tools import build
@@ -22,6 +23,13 @@ from carter_omp.proxy_client import GitHubProxyClient
 from carter_omp.proxy_hmac import HEADER_RUN_TOKEN
 from tests.test_host_tools import _bindings, _ctx, _stop_loop
 from tests.test_proxy_server import _HMAC, _async_client, _build_app, _build_settings, _run_token, _signed
+
+
+def _text(result: HostToolResultValue) -> str:
+    """Host-tool output as text; every tool in this suite returns a string."""
+    assert isinstance(result, str)
+    return result
+
 
 SELF_REPO = "octo/self"
 ENDPOINT = "/gh/v1/self-report"
@@ -219,7 +227,7 @@ def test_report_pain_point_tool_files_through_the_backend(db, tmp_path: Path, se
     assert seen["path"] == "/repos/octo/self/issues"
     assert seen["payload"]["title"] == "[bot-report] gate: gate blocks an untraced file"
     assert seen["payload"]["labels"] == ["bot-report", "prio:p1"]
-    payload = json.loads(result)
+    payload = json.loads(_text(result))
     assert payload["number"] == 12
     assert payload["created"] is True
     assert payload["url"].endswith("/issues/12")
@@ -284,14 +292,16 @@ def _run_tool(db, tmp_path, settings: Settings, handler, *, repo: str = "octo/wi
     try:
         tool = next(x for x in build(bindings) if x.name == "report_pain_point")
         return json.loads(
-            tool.execute(
-                {
-                    "title": "gate blocks an untraced file",
-                    "details": "expected/actual",
-                    "area": "gate",
-                    "severity": "high",
-                },
-                _ctx(),
+            _text(
+                tool.execute(
+                    {
+                        "title": "gate blocks an untraced file",
+                        "details": "expected/actual",
+                        "area": "gate",
+                        "severity": "high",
+                    },
+                    _ctx(),
+                )
             )
         )
     finally:
@@ -443,8 +453,8 @@ def test_report_pain_point_appends_on_the_second_call(db, tmp_path: Path, settin
     args = {"title": "gate blocks an untraced file", "details": "expected/actual", "area": "gate", "severity": "high"}
     try:
         tool = next(x for x in build(bindings) if x.name == "report_pain_point")
-        first = json.loads(tool.execute(dict(args), _ctx()))
-        second = json.loads(tool.execute(dict(args), _ctx()))
+        first = json.loads(_text(tool.execute(dict(args), _ctx())))
+        second = json.loads(_text(tool.execute(dict(args), _ctx())))
     finally:
         _stop_loop(loop, thread)
 

@@ -1,12 +1,30 @@
 import asyncio
 import logging
 import threading
-from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
 from carter_omp import tasks
 from carter_omp.github_client import IssueInfo, RepoInfo
+from carter_omp.sandbox import LocalGitTransport, Workspace
+from tests.fakes import FakeGitHub, FakeSandbox
+
+
+def _workspace(tmp_path: Path) -> Workspace:
+    """A real `Workspace` for tests that only assert branch/session handling."""
+    session = tmp_path / "sess"
+    session.mkdir(exist_ok=True)
+    return Workspace(
+        root=tmp_path,
+        repo_dir=tmp_path / "repo",
+        session_dir=session,
+        context_dir=tmp_path / "ctx",
+        artifacts_dir=tmp_path / "artifacts",
+        branch="carter-omp/x/y",
+        repo_full_name="octo/widget",
+        issue_number=1,
+    )
 
 
 async def _no_comments(*_a, **_k):
@@ -36,10 +54,14 @@ async def test_triage_issue_keeps_event_loop_live_while_workspace_setup_blocks(d
 
     monkeypatch.setattr(tasks, "_resolve_repo_and_issue", _resolve_repo_and_issue)
 
-    async def _no_closing(*a, **k):
-        return ()
+    class _Gh(FakeGitHub):
+        async def list_closing_pull_requests(self, repo: str, number: int) -> tuple[int, ...]:
+            return ()
 
-    github = SimpleNamespace(list_closing_pull_requests=_no_closing, list_comments=_no_comments)
+        async def list_comments(self, repo: str, number: int):
+            return []
+
+    github = _Gh()
 
     entered = threading.Event()
     release = threading.Event()
@@ -51,9 +73,9 @@ async def test_triage_issue_keeps_event_loop_live_while_workspace_setup_blocks(d
         # Blocks a WORKER THREAD (via to_thread) in the fixed code; blocks the
         # LOOP itself in the broken code.
         captured["release_seen_in_time"] = release.wait(1.0)
-        return SimpleNamespace(branch="carter-omp/x/y", session_dir=str(tmp_path / "sess"))
+        return _workspace(tmp_path)
 
-    sandbox = SimpleNamespace(natives_cache=None, ensure_workspace=_blocking_ensure)
+    sandbox = FakeSandbox(natives_cache=None, ensure_workspace=_blocking_ensure)
 
     async def _noop_run_task(**_kwargs):
         return None
@@ -74,7 +96,7 @@ async def test_triage_issue_keeps_event_loop_live_while_workspace_setup_blocks(d
             db=db,
             github=github,
             sandbox=sandbox,
-            git_transport=SimpleNamespace(),
+            git_transport=LocalGitTransport(token=None),
             payload={},
             delivery_id="d1",
         )
@@ -212,13 +234,17 @@ async def test_triage_issue_reopen_tears_down_finalized_workspace(db, settings, 
 
     def _ensure(**_kwargs):
         calls.append("ensure")
-        return SimpleNamespace(branch="carter-omp/x/y", session_dir=str(tmp_path / "sess"))
+        return _workspace(tmp_path)
 
-    async def _fail_closing(*_a, **_k):
-        raise AssertionError("closing-PR guard must not run when a DB row already exists")
+    class _Gh(FakeGitHub):
+        async def list_closing_pull_requests(self, repo: str, number: int) -> tuple[int, ...]:
+            raise AssertionError("closing-PR guard must not run when a DB row already exists")
 
-    github = SimpleNamespace(list_closing_pull_requests=_fail_closing, list_comments=_no_comments)
-    sandbox = SimpleNamespace(natives_cache=None, ensure_workspace=_ensure, remove_workspace=_remove)
+        async def list_comments(self, repo: str, number: int):
+            return []
+
+    github = _Gh()
+    sandbox = FakeSandbox(natives_cache=None, ensure_workspace=_ensure, remove_workspace=_remove)
 
     async def _noop_run_task(**_kwargs):
         return None
@@ -230,7 +256,7 @@ async def test_triage_issue_reopen_tears_down_finalized_workspace(db, settings, 
         db=db,
         github=github,
         sandbox=sandbox,
-        git_transport=SimpleNamespace(),
+        git_transport=LocalGitTransport(token=None),
         payload={},
         delivery_id="d1",
     )
@@ -247,7 +273,7 @@ async def test_fetch_thread_drops_triggering_comment_and_optional_body() -> None
     triage kickoff must not duplicate the body it already prints."""
     from carter_omp.github_client import CommentInfo
 
-    class _FakeGitHub:
+    class _FakeGitHub(FakeGitHub):
         async def get_issue(self, repo: str, number: int) -> IssueInfo:
             return IssueInfo(
                 repo=repo,
@@ -268,12 +294,10 @@ async def test_fetch_thread_drops_triggering_comment_and_optional_body() -> None
             ]
 
     gh = _FakeGitHub()
-    mention = await tasks._fetch_thread(gh, "octo/widget", 1, is_pr=False, exclude_comment_id=2)  # type: ignore[arg-type]
+    mention = await tasks._fetch_thread(gh, "octo/widget", 1, is_pr=False, exclude_comment_id=2)
     assert [m.body for m in mention] == ["body text", "first"]
 
-    triage = await tasks._fetch_thread(  # type: ignore[arg-type]
-        gh, "octo/widget", 1, is_pr=False, include_body=False
-    )
+    triage = await tasks._fetch_thread(gh, "octo/widget", 1, is_pr=False, include_body=False)
     assert [m.body for m in triage] == ["first", "trigger comment"]
     assert all(m.kind == "comment" for m in triage)
 
@@ -306,14 +330,14 @@ async def test_triage_issue_inlines_existing_comments(db, settings, monkeypatch,
     async def _comments(*_a, **_k):
         return [CommentInfo(id=7, author="alice", body="here are the repro steps", created_at="2026-10-01T00:00:00Z")]
 
-    class _GitHub:
-        list_closing_pull_requests = staticmethod(_no_comments)
-        list_comments = staticmethod(_comments)
+    class _GitHub(FakeGitHub):
+        async def list_closing_pull_requests(self, repo: str, number: int) -> tuple[int, ...]:
+            return ()
 
-    sandbox = SimpleNamespace(
-        natives_cache=None,
-        ensure_workspace=lambda **_k: SimpleNamespace(branch="carter-omp/x/y", session_dir=str(tmp_path / "s")),
-    )
+        async def list_comments(self, repo: str, number: int):
+            return await _comments()
+
+    sandbox = FakeSandbox(natives_cache=None, ensure_workspace=lambda **_k: _workspace(tmp_path))
     captured: dict[str, object] = {}
 
     async def _capture_run_task(**kwargs):
@@ -324,9 +348,9 @@ async def test_triage_issue_inlines_existing_comments(db, settings, monkeypatch,
     await tasks.triage_issue(
         settings=settings,
         db=db,
-        github=_GitHub(),  # type: ignore[arg-type]
-        sandbox=sandbox,  # type: ignore[arg-type]
-        git_transport=SimpleNamespace(),  # type: ignore[arg-type]
+        github=_GitHub(),
+        sandbox=sandbox,
+        git_transport=LocalGitTransport(token=None),
         payload={},
         delivery_id="d1",
     )

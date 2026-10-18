@@ -11,6 +11,7 @@ from carter_omp.autoclose import AutocloseScheduler
 from carter_omp.config import Settings
 from carter_omp.db import Database, issue_key
 from carter_omp.github_client import GitHubError, ReactionInfo
+from tests.fakes import FakeGitHub
 
 
 def _settings(*, enabled: bool = True, hours: float = 4.0, scan: float = 60.0) -> Settings:
@@ -28,7 +29,7 @@ def _settings(*, enabled: bool = True, hours: float = 4.0, scan: float = 60.0) -
     )
 
 
-class _FakeGitHub:
+class _FakeGitHub(FakeGitHub):
     """Minimal GitHubBackend stand-in for the scheduler.
 
     Only `list_comment_reactions` and `close_issue` are exercised; everything
@@ -138,6 +139,7 @@ async def test_tick_retries_when_list_reactions_fails(db: Database) -> None:
 
     class _ReactBoom(_FakeGitHub):
         async def list_comment_reactions(self, repo, comment_id):
+            self.reaction_calls.append((repo, comment_id))
             raise GitHubError(503, "Service Unavailable")
 
     gh = _ReactBoom()
@@ -160,21 +162,13 @@ async def test_tick_skips_future_rows(db: Database) -> None:
     assert row is not None and row.state == "pending"
 
 
-def test_scheduler_disabled_when_feature_off() -> None:
-    sched = AutocloseScheduler(
-        settings=_settings(enabled=False),
-        db=None,  # type: ignore[arg-type]
-        github=None,  # type: ignore[arg-type]
-    )
+def test_scheduler_disabled_when_feature_off(db: Database) -> None:
+    sched = AutocloseScheduler(settings=_settings(enabled=False), db=db, github=_FakeGitHub())
     assert not sched.enabled
 
 
-def test_scheduler_disabled_when_hours_zero() -> None:
-    sched = AutocloseScheduler(
-        settings=_settings(hours=0.0),
-        db=None,  # type: ignore[arg-type]
-        github=None,  # type: ignore[arg-type]
-    )
+def test_scheduler_disabled_when_hours_zero(db: Database) -> None:
+    sched = AutocloseScheduler(settings=_settings(hours=0.0), db=db, github=_FakeGitHub())
     assert not sched.enabled
 
 

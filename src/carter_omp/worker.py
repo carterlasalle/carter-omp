@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from omp_rpc import (
     HostToolCompletedEvent,
@@ -735,7 +735,17 @@ def _run_token_ttl(settings: Settings) -> int:
 
 
 # trace:v1 id=impl.worker-attach-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-def _attach_run_token(inputs: TaskInputs, bindings: ToolBindings) -> None:
+class _TokenBindings(Protocol):
+    """What the run-token mint reads; it re-scopes clients via `object.__setattr__`."""
+
+    @property
+    def github(self) -> object: ...
+
+    @property
+    def git_transport(self) -> object: ...
+
+
+def _attach_run_token(inputs: TaskInputs, bindings: _TokenBindings) -> None:
     """Mint a per-run proxy token and scope the GitHub client to it.
 
     ToolBindings is frozen, so the scoped clients are attached via
@@ -1491,7 +1501,24 @@ async def run_task(
 
 
 # trace:v1 id=impl.worker-record-run-telemetry work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-def _record_run_telemetry(inputs: TaskInputs, bindings: ToolBindings) -> None:
+class _RunInputs(Protocol):
+    """What bookkeeping helpers need from a run: where to write, and which row."""
+
+    @property
+    def db(self) -> Database: ...
+
+    @property
+    def delivery_id(self) -> str: ...
+
+
+class _TelemetryBindings(Protocol):
+    """What telemetry needs from the tool bindings."""
+
+    @property
+    def stats(self) -> host_tools.RunStats | None: ...
+
+
+def _record_run_telemetry(inputs: _RunInputs, bindings: _TelemetryBindings) -> None:
     """Persist the run's telemetry (spend, tokens, fallback) on its event row.
 
     Best-effort observability: a missing or failing write must never change the
@@ -1520,7 +1547,17 @@ def _record_run_telemetry(inputs: TaskInputs, bindings: ToolBindings) -> None:
 
 
 # trace:v1 id=impl.worker-record-agent-abort work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-def _record_agent_abort(inputs: TaskInputs, bindings: ToolBindings) -> None:
+class _AbortBindings(Protocol):
+    """What the abort recorder reads: the controller and the run's key."""
+
+    @property
+    def abort(self) -> host_tools.AbortController | None: ...
+
+    @property
+    def issue_key(self) -> str: ...
+
+
+def _record_agent_abort(inputs: _RunInputs, bindings: _AbortBindings) -> None:
     """Mark the delivery failed when the agent pulled its own plug.
 
     `abort_task` is a legitimate stop ("needs info", "harness fault"), but it

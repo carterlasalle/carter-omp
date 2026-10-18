@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -110,7 +111,7 @@ def _baseline_env(tmp_path: Path) -> dict[str, str]:
 
 
 @pytest.fixture
-def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]:
+def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[dict[str, str]]:
     env = _baseline_env(tmp_path)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -148,7 +149,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]:
 
 
 @pytest.fixture
-def proxy_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]:
+def proxy_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[dict[str, str]]:
     """Baseline env for the github-proxy container: holds the PAT, no proxy vars."""
     baseline = _baseline_env(tmp_path)
     baseline.pop("CARTER_OMP_GH_PROXY_URL", None)
@@ -178,17 +179,24 @@ def proxy_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]
     ):
         monkeypatch.setenv(_key, "")
     monkeypatch.setenv("CARTER_OMP_MODEL", baseline["CARTER_OMP_MODEL"])
+    reset_settings_cache()
+    yield baseline
+    reset_settings_cache()
+    close_database()
 
 
 @pytest.fixture
 def settings(env: dict[str, str]) -> Settings:
+    # The dependency is load-bearing: `env` installs the baseline environment
+    # before `Settings()` reads it. The value itself is not needed here.
+    assert env, "baseline env fixture must install variables"
     cfg = Settings()  # type: ignore[call-arg]
     cfg.ensure_paths()
     return cfg
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> Database:
+def db(tmp_path: Path) -> Iterator[Database]:
     path = tmp_path / "test.sqlite"
     database = Database(path)
     yield database

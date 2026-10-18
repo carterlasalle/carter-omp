@@ -7,17 +7,29 @@ import pytest
 from carter_omp import tasks
 from carter_omp.config import Settings
 from carter_omp.db import Database, EventRow
+from carter_omp.github_backend import GitHubBackend
+from carter_omp.github_client import CommentInfo
 from carter_omp.github_events import Actor, AuthorizationDecision, route_authorized_event
 from carter_omp.queue import WorkerPool
+from carter_omp.sandbox import LocalGitTransport, SandboxManager
 from carter_omp.slot_pool import SlotPool
+from tests.fakes import FakeGitHub
 
 
-class _StubGitHub:
+def _state(db: Database, delivery: str) -> str:
+    """The stored event's state, asserting the row exists."""
+    row = db.get_event(delivery)
+    assert row is not None, f"no event {delivery}"
+    return row.state
+
+
+class _StubGitHub(FakeGitHub):
     """Sentinel; dispatch tests stub out the task body."""
 
 
-class _StubSandbox:
-    natives_cache = None
+class _StubSandbox(SandboxManager):
+    def __init__(self) -> None:
+        self.natives_cache = None
 
     def reclaim_workspace_caches(self, *, repo: str, number: int | str) -> bool:
         del repo, number
@@ -27,17 +39,13 @@ class _StubSandbox:
         return 0
 
 
-class _StubGitTransport:
-    pass
-
-
-def _make_pool(settings: Settings, db: Database, *, github: object | None = None) -> WorkerPool:
+def _make_pool(settings: Settings, db: Database, *, github: GitHubBackend | None = None) -> WorkerPool:
     return WorkerPool(
         settings=settings,
         db=db,
-        github=github if github is not None else _StubGitHub(),  # type: ignore[arg-type]
-        sandbox=_StubSandbox(),  # type: ignore[arg-type]
-        git_transport=_StubGitTransport(),  # type: ignore[arg-type]
+        github=github if github is not None else _StubGitHub(),
+        sandbox=_StubSandbox(),
+        git_transport=LocalGitTransport(token=None),
         slot_pool=SlotPool(),
     )
 
@@ -203,12 +211,13 @@ async def test_dispatch_and_mark_keeps_a_worker_recorded_failure(
     assert latest.last_error == "agent aborted: harness fault"
 
 
-class _RecordingGitHub:
+class _RecordingGitHub(FakeGitHub):
     def __init__(self) -> None:
         self.comments: list[tuple[str, int, str]] = []
 
-    async def post_comment(self, repo: str, number: int, body: str) -> None:
+    async def post_comment(self, repo: str, number: int, body: str) -> CommentInfo:
         self.comments.append((repo, number, body))
+        return CommentInfo(id=len(self.comments), author="bot", body=body, created_at="")
 
 
 def _record_task_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -281,7 +290,7 @@ async def test_status_control_command_answers_from_db_without_model(
     await _make_pool(settings, db, github=github)._dispatch_and_mark(row)  # noqa: SLF001
 
     assert calls == []
-    assert db.get_event("cmd-status").state == "done"
+    assert _state(db, "cmd-status") == "done"
     assert len(github.comments) == 1
     repo, number, body = github.comments[0]
     assert (repo, number) == ("octo/widget", 4)
