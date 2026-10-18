@@ -219,6 +219,24 @@ class Settings(BaseSettings):
     provider: str | None = Field(None, alias="CARTER_OMP_PROVIDER")
     thinking_level: ThinkingLevel = Field("high", alias="CARTER_OMP_THINKING")
 
+    # Web search (OMP's `web_search` tool). The generated `--config` overlay
+    # sets `web_search.enabled` and, when `web_search_model` is set, pins the
+    # `web` model role (`web/brave`, `web/exa`, `web/searxng`, …); empty leaves
+    # OMP's default provider chain. Credentialed providers read their key from
+    # the run env, so `web_search_env` lists the orchestrator variables to
+    # forward — only variables that are actually set are passed through.
+    web_search_enabled: bool = Field(True, alias="CARTER_OMP_WEB_SEARCH_ENABLED")
+    web_search_model: str = Field("", alias="CARTER_OMP_WEB_SEARCH_MODEL")
+    web_search_env_raw: str = Field(
+        "EXA_API_KEY,BRAVE_API_KEY,TAVILY_API_KEY,JINA_API_KEY,TINYFISH_API_KEY,SEARXNG_ENDPOINT",
+        alias="CARTER_OMP_WEB_SEARCH_ENV",
+    )
+    # Per-repo feature switches, `repo:feature` comma-separated. Today the only
+    # feature is `ci_fix`: disabling it tells runs on that repo not to attempt
+    # fixes for failing CI/CD. Example:
+    # `CARTER_OMP_DISABLED_FEATURES=Phoenix-Fire-Labs/mockingbird:ci_fix`.
+    disabled_features_raw: str = Field("", alias="CARTER_OMP_DISABLED_FEATURES")
+
     # Runtime
     max_concurrency: int = Field(8, alias="CARTER_OMP_MAX_CONCURRENCY")
     task_timeout_seconds: float = Field(2400.0, alias="CARTER_OMP_TASK_TIMEOUT_SECONDS")
@@ -558,6 +576,28 @@ class Settings(BaseSettings):
     def pick_model(self) -> str:
         """Random selection from the pool (uniform). One-element pools return that one."""
         return random.choice(self.model_pool)
+
+    # trace:v1 id=impl.config-web-search-env work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @property
+    def web_search_env(self) -> tuple[str, ...]:
+        """Orchestrator variables forwarded to runs for keyed search providers."""
+        return tuple(piece.strip() for piece in self.web_search_env_raw.split(",") if piece.strip())
+
+    # trace:v1 id=impl.config-disabled-features work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @property
+    def disabled_features(self) -> dict[str, frozenset[str]]:
+        """Parsed `repo:feature` switches, repo keys lowercased."""
+        out: dict[str, set[str]] = {}
+        for entry in self.disabled_features_raw.split(","):
+            repo, sep, feature = entry.strip().partition(":")
+            if not sep or not repo.strip() or not feature.strip():
+                continue
+            out.setdefault(repo.strip().lower(), set()).add(feature.strip().lower())
+        return {repo: frozenset(features) for repo, features in out.items()}
+
+    def feature_enabled(self, repo: str, feature: str) -> bool:
+        """False when this repo's operator config disables `feature`."""
+        return feature.lower() not in self.disabled_features.get(repo.lower(), frozenset())
 
     # trace:v1 id=impl.config-fallback-models work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     @property

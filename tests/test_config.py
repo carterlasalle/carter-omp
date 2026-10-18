@@ -259,3 +259,24 @@ def test_installation_ids_csv_parsing(monkeypatch: pytest.MonkeyPatch, env: dict
     monkeypatch.setenv("CARTER_OMP_GITHUB_INSTALLATION_ID", "")
     reset_settings_cache()
     assert Settings().github_installation_ids == frozenset()  # type: ignore[call-arg]
+
+
+def test_disabled_features_are_per_repo(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """`repo:feature` switches apply only to the named repo, case-insensitively."""
+    monkeypatch.setenv(
+        "CARTER_OMP_DISABLED_FEATURES",
+        "Phoenix-Fire-Labs/mockingbird:ci_fix, octo/widget:ci_fix",
+    )
+    cfg = Settings()  # type: ignore[call-arg]
+
+    assert not cfg.feature_enabled("Phoenix-Fire-Labs/mockingbird", "ci_fix")
+    assert not cfg.feature_enabled("phoenix-fire-labs/Mockingbird", "ci_fix")
+    assert cfg.feature_enabled("octo/widget", "other")
+    assert cfg.feature_enabled("carterlasalle/autolight", "ci_fix")
+
+
+def test_web_search_env_parses_forwarded_keys(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CARTER_OMP_WEB_SEARCH_ENV", "BRAVE_API_KEY, EXA_API_KEY,")
+    cfg = Settings()  # type: ignore[call-arg]
+
+    assert cfg.web_search_env == ("BRAVE_API_KEY", "EXA_API_KEY")

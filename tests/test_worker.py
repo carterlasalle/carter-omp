@@ -222,7 +222,9 @@ def _patch_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("carter_omp.worker.host_tools.build", lambda _b: ())
     monkeypatch.setattr(
         "carter_omp.worker.persona.system_append",
-        lambda *, repo, issue, workspace, bot_login, coauthor="", org_tools_section="": "SYS",
+        lambda *, repo, issue, workspace, bot_login, coauthor="", org_tools_section="", repo_policy_section="": (
+            "SYS" + repo_policy_section
+        ),
     )
     monkeypatch.setattr(
         "carter_omp.worker.persona.seed_phases",
@@ -1384,14 +1386,14 @@ def test_rpc_env_scrubs_app_and_cloud_secrets(tmp_path: Path, settings: Settings
         del os.environ["CARTER_OMP_GITHUB_APP_PRIVATE_KEY"]
 
 
-def test_write_fallback_chains_renders_default_overlay(
+def test_write_omp_overlay_renders_default_overlay(
     tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     overlay = tmp_path / "fallback.yml"
     monkeypatch.setattr(worker, "_FALLBACK_OVERLAY_PATH", overlay)
     cfg = settings.model_copy(update={"fallback_model": "openrouter/deepseek/deepseek-v4.1-flash, opencode-zen/x"})
 
-    path = worker._write_fallback_chains(cfg)
+    path = worker._write_omp_overlay(cfg)
 
     assert path is not None
     assert path == overlay
@@ -1400,7 +1402,7 @@ def test_write_fallback_chains_renders_default_overlay(
     assert body.rstrip().endswith('default: ["openrouter/deepseek/deepseek-v4.1-flash", "opencode-zen/x"]')
     assert path.stat().st_mode & 0o777 == 0o644
     # Idempotent: a second call is a no-op rewrite, still one file.
-    assert worker._write_fallback_chains(cfg) == path
+    assert worker._write_omp_overlay(cfg) == path
 
 
 def test_staging_the_agent_home_never_deletes_the_fallback_overlay(
@@ -1416,7 +1418,7 @@ def test_staging_the_agent_home_never_deletes_the_fallback_overlay(
     overlay = tmp_path / "fallback.yml"
     monkeypatch.setattr(worker, "_FALLBACK_OVERLAY_PATH", overlay)
     cfg = settings.model_copy(update={"fallback_model": "openrouter/deepseek/deepseek-v4.1-flash"})
-    assert worker._write_fallback_chains(cfg) == overlay
+    assert worker._write_omp_overlay(cfg) == overlay
 
     agent_home = tmp_path / "agent-home"
     stage = tmp_path / "agent-home-stage"
@@ -1429,13 +1431,13 @@ def test_staging_the_agent_home_never_deletes_the_fallback_overlay(
     assert not (agent_home / ".omp" / "agent" / overlay.name).exists()
 
 
-def test_write_fallback_chains_unset_writes_nothing(
+def test_write_omp_overlay_unset_writes_nothing(
     tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     overlay = tmp_path / "fallback.yml"
     monkeypatch.setattr(worker, "_FALLBACK_OVERLAY_PATH", overlay)
 
-    assert worker._write_fallback_chains(settings) is None
+    assert worker._write_omp_overlay(settings) is None
     assert not overlay.exists()
 
 
@@ -1798,3 +1800,33 @@ async def test_consume_trigger_label_uses_the_run_scoped_client(
 
     assert "DELETE /repos/octo/widget/issues/1/labels/carter-omp" in gh_calls
     assert "POST /repos/octo/widget/issues/1/labels" in gh_calls
+
+
+def test_write_omp_overlay_includes_web_search_settings(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Search is an operator knob: off is explicit, and a pinned provider is a role."""
+    overlay = tmp_path / "overlay.yml"
+    monkeypatch.setattr(worker, "_FALLBACK_OVERLAY_PATH", overlay)
+    cfg = settings.model_copy(update={"web_search_enabled": False, "web_search_model": "web/brave"})
+
+    path = worker._write_omp_overlay(cfg)
+
+    assert path is not None
+    body = path.read_text(encoding="utf-8")
+    assert "web_search:\n  enabled: false" in body
+    assert 'modelRoles:\n  web: "web/brave"' in body
+
+
+def test_build_extra_env_forwards_only_configured_search_keys(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keyed provider gets its key; unset providers stay absent."""
+    monkeypatch.setenv("BRAVE_API_KEY", "brave-key")
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    cfg = settings.model_copy(update={"web_search_env_raw": "BRAVE_API_KEY,EXA_API_KEY"})
+
+    env = worker._build_extra_env(cfg)
+
+    assert env["BRAVE_API_KEY"] == "brave-key"
+    assert "EXA_API_KEY" not in env

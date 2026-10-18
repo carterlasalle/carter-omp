@@ -109,6 +109,35 @@ uv run carter-omp --help
 
 Full sequence with App wiring and secret mounts: [Setup](docs/setup.md).
 
+### Web search, models, and per-repo switches
+
+Web search uses OMP's `web_search` tool. It is on by default; three variables control it:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CARTER_OMP_WEB_SEARCH_ENABLED` | `true` | Turn the tool off for every run. |
+| `CARTER_OMP_WEB_SEARCH_MODEL` | *(empty)* | Pin the provider role, e.g. `web/brave`, `web/exa`, `web/searxng`. Empty uses OMP's default chain. |
+| `CARTER_OMP_WEB_SEARCH_ENV` | `EXA_API_KEY,BRAVE_API_KEY,TAVILY_API_KEY,JINA_API_KEY,TINYFISH_API_KEY,SEARXNG_ENDPOINT` | Variables forwarded from `.env` into each run. Only set values are passed. |
+
+**Adding a keyed provider:** put the key in `.env`, add its name to `CARTER_OMP_WEB_SEARCH_ENV` if it is not already listed, and point the role at it:
+
+```dotenv
+BRAVE_API_KEY=...
+CARTER_OMP_WEB_SEARCH_MODEL=web/brave
+```
+
+Credential-free engines (`web/duckduckgo`, `web/startpage`, …) need no key but are routinely blocked from datacenter IPs — a keyed provider is the reliable choice. `omp search` inside the container tests a provider interactively.
+
+**Models:** `carter-omp init-models` writes the OMP model registry and prints the matching `.env` values. `CARTER_OMP_MODEL` accepts a comma-separated pool (one is picked per run); `CARTER_OMP_FALLBACK_MODEL` is the cross-provider chain OMP walks on a retryable provider failure.
+
+**Per-repo switches:** `CARTER_OMP_DISABLED_FEATURES` is a comma-separated `repo:feature` list. `ci_fix` disables CI/CD repair attempts for that repository:
+
+```dotenv
+CARTER_OMP_DISABLED_FEATURES=Phoenix-Fire-Labs/mockingbird:ci_fix
+```
+
+Regardless of the switch, a run only repairs CI failures its own change introduced: it reproduces the failing check on the PR head and on the base branch, and reports an identical-on-base failure as pre-existing instead of fixing or bypassing it.
+
 ## Operator workflow
 <!-- trace:v1 id=doc.readme-operator-workflow work=WORK-CO-Q8Z1HJJJ -->
 
@@ -156,15 +185,15 @@ Before trusting the bot on a real repo:
 | [Security](docs/security.md) | Threat model, trusted vs untrusted, fail-closed rules |
 | [GitHub App](docs/github-app.md) | App permissions, install scope, token strategy |
 | [Upstream parity](docs/upstream-parity.md) | Every robomp trigger/tool/workflow and its carter-omp replacement |
-| [Agent notes](docs/agent-notes.md) | Docker/CI/trace/test learnings for operators and agents |
-| [Contributing](CONTRIBUTING.md) | Development workflow and pull-request standards |
-| [Security policy](SECURITY.md) | How to report a vulnerability |
-| [Changelog](CHANGELOG.md) | Notable changes |
+| [Agent notes](./docs/agent-notes.md) | Docker/CI/trace/test learnings for operators and agents |
+| [Contributing](./CONTRIBUTING.md) | Development workflow and pull-request standards |
+| [Security policy](./SECURITY.md) | How to report a vulnerability |
+| [Changelog](./CHANGELOG.md) | Notable changes |
 
 ## Contributing
 <!-- trace:v1 id=doc.readme-contributing work=WORK-CO-Q8Z1HJJJ -->
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Quick check before pushing:
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Quick check before pushing:
 
 ```bash
 uv run ruff check src tests

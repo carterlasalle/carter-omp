@@ -103,6 +103,23 @@ services:
       CARTER_OMP_FALLBACK_MODEL: ${CARTER_OMP_FALLBACK_MODEL:-}
       CARTER_OMP_PROVIDER: ${CARTER_OMP_PROVIDER:-}
       CARTER_OMP_THINKING: ${CARTER_OMP_THINKING:-high}
+      # --- web search ---
+      # OMP's `web_search` tool. `MODEL` pins a provider role (`web/brave`,
+      # `web/exa`, …); empty leaves OMP's default chain. `ENV` lists the
+      # credential variables forwarded into runs — only set values are passed.
+      CARTER_OMP_WEB_SEARCH_ENABLED: ${CARTER_OMP_WEB_SEARCH_ENABLED:-true}
+      CARTER_OMP_WEB_SEARCH_MODEL: ${CARTER_OMP_WEB_SEARCH_MODEL:-}
+      CARTER_OMP_WEB_SEARCH_ENV: ${CARTER_OMP_WEB_SEARCH_ENV:-EXA_API_KEY,BRAVE_API_KEY,TAVILY_API_KEY,JINA_API_KEY,TINYFISH_API_KEY,SEARXNG_ENDPOINT}
+      # Keyed provider credentials (uncomment/add the ones you use in `.env`).
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      JINA_API_KEY: ${JINA_API_KEY:-}
+      TINYFISH_API_KEY: ${TINYFISH_API_KEY:-}
+      # --- per-repo feature switches ---
+      # `repo:feature` comma-separated. `ci_fix` disables CI/CD repair for that
+      # repo, e.g. `Phoenix-Fire-Labs/mockingbird:ci_fix`.
+      CARTER_OMP_DISABLED_FEATURES: ${CARTER_OMP_DISABLED_FEATURES:-}
       # --- provider auth (interim direct passthrough) ---
       # There is no host-side auth gateway yet, so the agent's OMP
       # authenticates with the operator's own provider credential. Eyes

@@ -164,6 +164,7 @@ def system_append(
     bot_login: str,
     coauthor: str = "",
     org_tools_section: str = "",
+    repo_policy_section: str = "",
 ) -> str:
     return render(
         _load("system_append.md"),
@@ -174,6 +175,7 @@ def system_append(
             "bot_login": bot_login,
             "coauthor_rule": coauthor_rule(coauthor),
             "org_tools_section": org_tools_section,
+            "repo_policy_section": repo_policy_section,
         },
     )
 

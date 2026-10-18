@@ -342,3 +342,17 @@ def test_system_append_renders_configured_coauthor_and_not_a_hardcoded_one() -> 
     )
     assert "do not add a `Co-authored-by:` trailer" in disabled
     assert "carterlasalle@gmail.com" not in disabled
+
+
+def test_system_append_renders_the_repo_policy_section() -> None:
+    """Operator feature switches reach the prompt as an explicit policy block."""
+    out = persona.system_append(
+        repo=_Repo(),
+        issue=_Issue(),
+        workspace=_Workspace(),
+        bot_login="carter-omp",
+        repo_policy_section="<repo-policy>\nCI disabled here.\n</repo-policy>",
+    )
+
+    assert "<repo-policy>" in out
+    assert "CI disabled here." in out
