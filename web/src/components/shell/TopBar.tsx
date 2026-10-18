@@ -12,6 +12,7 @@ const TITLES: Record<View, string> = {
   operations: "Operations",
   activity: "Activity",
   triage: "Triage",
+  quality: "Quality",
   system: "System",
 };
 

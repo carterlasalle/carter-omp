@@ -1075,3 +1075,33 @@ def test_run_phases_and_receipt_round_trip(db: Database) -> None:
     assert receipt is not None
     assert receipt["phases"][0]["exit_code"] == 0
     assert db.latest_verification_receipt("o/w#1", "c" * 40) is None
+
+
+def test_list_events_newest_first_uses_received_index(db: Database) -> None:
+    """`ORDER BY received_at DESC` must be index-backed.
+
+    Without `events_received`, SQLite sorts every event row — payload_json
+    included — under the global DB lock. At 32k events that is ~2 s per call;
+    the dashboard polls /api/status every 3 s, so requests queue behind the
+    lock and the console stops rendering.
+    """
+    for n in range(3):
+        db.record_event(
+            delivery_id=f"d{n}",
+            event_type="issues",
+            repo="octo/widget",
+            issue_key=issue_key("octo/widget", n),
+            payload={"n": n},
+        )
+
+    assert [row.delivery_id for row in db.list_events(limit=2)] == ["d2", "d1"]
+
+    with db._lock:  # noqa: SLF001
+        plan = " ".join(
+            str(row["detail"])
+            for row in db._conn.execute(  # noqa: SLF001
+                "EXPLAIN QUERY PLAN SELECT delivery_id FROM events "
+                "ORDER BY received_at DESC LIMIT 25"
+            )
+        )
+    assert "events_received" in plan

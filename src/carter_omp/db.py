@@ -179,6 +179,14 @@ CREATE INDEX IF NOT EXISTS events_state_received
 CREATE INDEX IF NOT EXISTS events_issue_state
   ON events(issue_key, state);
 
+-- The dashboard's `recent_events` panel asks for the newest 25 rows with
+-- `ORDER BY received_at DESC LIMIT 25`. Without this index SQLite sorts every
+-- event row — payload_json included, ~25 KB each — under the global DB lock on
+-- every 3 s poll. At 32k events that is ~2 s per request; concurrent polls then
+-- queue behind the lock and the whole console stops rendering.
+CREATE INDEX IF NOT EXISTS events_received
+  ON events(received_at DESC);
+
 CREATE TABLE IF NOT EXISTS issues (
   key            TEXT PRIMARY KEY,
   repo           TEXT NOT NULL,

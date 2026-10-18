@@ -28,8 +28,16 @@ const [isFetching, setIsFetching] = createSignal<boolean>(false);
 export { isFetching, lastTickAt, lastTickError };
 
 let pollHandle: number | null = null;
+// A slow /api/status used to stack a new request every 3 s, and the server
+// serializes all of them on one DB lock — so one slow tick snowballed into a
+// permanently blank console. Never run two polls at once; the next interval
+// simply retries.
+let tickInFlight = false;
 
+// trace:v1 id=impl.web-src-state.tick work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 async function tick(): Promise<void> {
+  if (tickInFlight) return;
+  tickInFlight = true;
   setIsFetching(true);
   try {
     await Promise.all([refetchStatus(), refetchLogs()]);
@@ -39,6 +47,7 @@ async function tick(): Promise<void> {
     setLastTickError(err instanceof Error ? err.message : String(err));
   } finally {
     setIsFetching(false);
+    tickInFlight = false;
   }
 }
 
