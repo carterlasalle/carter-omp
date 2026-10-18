@@ -151,7 +151,7 @@ def _parse_tool(raw: dict, index: int) -> OrgTool:
     else:
         if not isinstance(url, str) or not url.strip():
             raise ValueError(f"{where} ({name}) needs a non-empty `url` for mcp-http")
-        if not (url.startswith("https://") or url.startswith("http://127.0.0.1")):
+        if not url.startswith(("https://", "http://127.0.0.1")):
             raise ValueError(f"{where} ({name}): mcp-http url must be https (or loopback http)")
         if command:
             raise ValueError(f"{where} ({name}): mcp-http does not take `command`")
