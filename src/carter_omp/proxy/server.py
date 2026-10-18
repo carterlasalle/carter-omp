@@ -216,15 +216,14 @@ def _pool_dir(cfg: Settings, repo: str) -> Path:
 
 
 def _workspace_repo_dir(cfg: Settings, workspace_key: str) -> Path:
-    # `sandbox.workspace_key` only ever produces `<repo_with_underscores>__<number>`
-    # (or `__release` for release workspaces). Anything outside that shape — even
-    # with the right repo prefix — must not reach the path join (py/path-injection).
-    # The trailing-alnum anchor also kills `..`-style escapes by construction.
+    # Gate the join on the canonical shape `sandbox.workspace_key` produces —
+    # anything else 400s before a user-controlled value reaches the path
+    # expression (py/path-injection). Both push endpoints share this helper.
     if not _WORKSPACE_KEY_RE.fullmatch(workspace_key):
         raise HTTPException(400, f"invalid workspace_key {workspace_key!r}")
     repo_dir = Path(cfg.workspace_root) / workspace_key / "repo"
-    # A symlink planted inside the workspace root could still redirect the join;
-    # resolve and confirm containment before handing the path to git ops.
+    # A symlink planted inside the workspace root could still redirect the
+    # join; resolve and confirm containment before handing it to git ops.
     if not repo_dir.resolve().is_relative_to(Path(cfg.workspace_root).resolve()):
         raise HTTPException(400, f"invalid workspace_key {workspace_key!r}")
     return repo_dir
@@ -330,6 +329,7 @@ _FORBIDDEN_URL_BYTES_RE = re.compile(r"[\x00-\x1f\x7f]|%(?:00|0a|0d)", re.IGNORE
 _GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$")
 # trace:v1 id=impl.proxy-workspace-key-shape work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 _WORKSPACE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*__(?:[0-9]+|release)$")
+_WORKSPACE_SUFFIX_RE = re.compile(r"(?:[0-9]+|release)")
 _GIT_PROBE_SCRUBBED_ENV_KEYS = (
     "CARTER_OMP_GIT_HTTP_AUTH",
     "GITHUB_TOKEN",
@@ -1353,11 +1353,21 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         _require_push_namespace(branch, token)
         expected_head = _require_str(data.get("expected_head"), "expected_head")
         slot_uid = _optional_slot_uid(data.get("slot_uid"))
-        # Sanity-check workspace_key matches the repo claim.
+        # Pin the workspace to the run token's bound thread: split the key on
+        # the repo prefix, then normalize the caller-supplied suffix (`<number>`
+        # or the literal `release`) against the token before rebuilding the
+        # canonical key server-side — the raw request value never reaches the
+        # path join (py/path-injection).
         expected_prefix = repo.replace("/", "__") + "__"
-        if not workspace_key.startswith(expected_prefix):
-            raise HTTPException(400, "workspace_key does not match repo")
-        repo_dir = _workspace_repo_dir(settings, workspace_key)
+        suffix = workspace_key.removeprefix(expected_prefix)
+        if suffix == workspace_key or not _WORKSPACE_SUFFIX_RE.fullmatch(suffix):
+            raise HTTPException(400, f"invalid workspace_key {workspace_key!r}")
+        if suffix == "release":
+            number: int | str = "release"
+        else:
+            number = _require_int(int(suffix), "workspace_key")
+            _require_run_thread(token, number)
+        repo_dir = _workspace_repo_dir(settings, compute_workspace_key(repo, number))
         if not repo_dir.is_dir():
             raise HTTPException(404, f"workspace not found: {workspace_key}")
         # Workflow files are the one path an App token cannot touch without the
@@ -1436,12 +1446,16 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         tag = _require_release_tag(data.get("tag"))
         expected_head = _require_str(data.get("expected_head"), "expected_head")
         slot_uid = _optional_slot_uid(data.get("slot_uid"))
+        # Same token-bound rebuild as the normal push endpoint: the raw key
+        # never reaches the path join (py/path-injection).
         expected_prefix = repo.replace("/", "__") + "__"
-        if not workspace_key.startswith(expected_prefix):
-            raise HTTPException(400, "workspace_key does not match repo")
-        repo_dir = _workspace_repo_dir(settings, workspace_key)
-        if not repo_dir.is_dir():
-            raise HTTPException(404, f"workspace not found: {workspace_key}")
+        suffix = workspace_key.removeprefix(expected_prefix)
+        if suffix == workspace_key or not _WORKSPACE_SUFFIX_RE.fullmatch(suffix):
+            raise HTTPException(400, f"invalid workspace_key {workspace_key!r}")
+        release_number: int | str = "release" if suffix == "release" else _require_int(int(suffix), "workspace_key")
+        if release_number != "release":
+            _require_run_thread(token, release_number)
+        repo_dir = _workspace_repo_dir(settings, compute_workspace_key(repo, release_number))
         # Workflow files are the one path an App token cannot touch without the
         # explicit permission; refusing here names the fix instead of letting the
         # remote reject a completed commit (carter-omp#30).
