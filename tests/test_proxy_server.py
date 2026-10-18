@@ -1051,6 +1051,39 @@ async def test_git_push_workspace_key_mismatch(proxy_settings: Settings) -> None
     assert "workspace_key" in resp.text
 
 
+@pytest.mark.parametrize(
+    "workspace_key",
+    [
+        "octo__widget__",  # empty suffix: prefix-only key with no issue number
+        "octo__widget__1;rm -rf",  # shell metacharacters in the suffix
+        "octo__widget__1__extra",  # trailing segment after the issue number
+        "octo__widget__1/evil",  # path separator smuggled into the key
+        "octo__widget__..",  # dot-dot suffix, no slash needed
+        ".hidden__1",  # hidden-directory probe with a valid-looking suffix
+    ],
+)
+async def test_git_push_rejects_malformed_workspace_key(proxy_settings: Settings, workspace_key: str) -> None:
+    app = _build_app(proxy_settings)
+    body = (
+        b'{"repo":"octo/widget","workspace_key":"'
+        + workspace_key.encode()
+        + b'","branch":"carter-omp/abc/x","expected_head":"'
+        + (b"0" * 40)
+        + b'"}'
+    )
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/git/push",
+            content=body,
+            headers={
+                **_signed("POST", "/gh/v1/git/push", body, run_token=_run_token(issue=None, branch="carter-omp/abc/x")),
+                "Content-Type": "application/json",
+            },
+        )
+    assert resp.status_code == 400
+    assert "workspace_key" in resp.text
+
+
 async def test_git_push_release_requires_hmac(proxy_settings: Settings) -> None:
     app = _build_app(proxy_settings)
     body = json.dumps(

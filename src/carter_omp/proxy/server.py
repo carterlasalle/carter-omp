@@ -215,12 +215,22 @@ def _pool_dir(cfg: Settings, repo: str) -> Path:
     return Path(cfg.workspace_root) / "_pool" / repo.replace("/", "__")
 
 
+_WORKSPACE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*__(?:[0-9]+|release)$")
+
+
+# trace:v1 id=impl.proxy-workspace-key-shape work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _workspace_repo_dir(cfg: Settings, workspace_key: str) -> Path:
-    # Defense-in-depth: workspace_key is constructed by `sandbox.workspace_key`
-    # as `<repo_with_underscores>__<number>`. Reject anything outside that shape.
-    if "/" in workspace_key or workspace_key.startswith(".") or ".." in workspace_key:
+    # `sandbox.workspace_key` only ever produces `<repo_with_underscores>__<number>`
+    # (or `__release` for release workspaces). Anything outside that shape — even
+    # with the right repo prefix — must not reach the path join (py/path-injection).
+    if not _WORKSPACE_KEY_RE.fullmatch(workspace_key):
         raise HTTPException(400, f"invalid workspace_key {workspace_key!r}")
-    return Path(cfg.workspace_root) / workspace_key / "repo"
+    repo_dir = Path(cfg.workspace_root) / workspace_key / "repo"
+    # A symlink planted inside the workspace root could still redirect the join;
+    # resolve and confirm containment before handing the path to git ops.
+    if not repo_dir.resolve().is_relative_to(Path(cfg.workspace_root).resolve()):
+        raise HTTPException(400, f"invalid workspace_key {workspace_key!r}")
+    return repo_dir
 
 
 def _resolve_token(cfg: Settings) -> str:
