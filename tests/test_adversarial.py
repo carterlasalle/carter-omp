@@ -188,7 +188,9 @@ def test_set_labels_bound_to_current_issue(db: Database, tmp_path: object) -> No
     b, loop, thread = _bindings(db, tmp_path, ISSUE_RUN_CAPABILITIES)
     try:
         tool = next(t for t in build(b) if t.name == "set_issue_labels")
-        assert "number" not in tool.parameters.get("properties", {})
+        properties = tool.parameters.get("properties", {})
+        assert isinstance(properties, dict)
+        assert "number" not in properties
     finally:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=2.0)

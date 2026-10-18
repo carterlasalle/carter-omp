@@ -662,8 +662,8 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         # Shared client: App mode mints an installation token up front (the
         # per-request scoped client refreshes it later); PAT mode uses the
         # static token. No GITHUB_TOKEN is required in App mode.
-        provider = getattr(settings, "_app_token_provider", None)
-        app.state.github = GitHubClient(_shared_token(settings, provider))
+        shared_provider = getattr(settings, "_app_token_provider", None)
+        app.state.github = GitHubClient(_shared_token(settings, shared_provider))
         app.state.settings = settings
         yield
 

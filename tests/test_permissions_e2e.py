@@ -184,7 +184,7 @@ def _bindings(
     repo = RepoInfo(full_name=_REPO, default_branch="main", clone_url=str(upstream), private=False)
     issue = IssueInfo(
         repo=_REPO,
-        number=workspace.issue_number,
+        number=int(workspace.issue_number),
         title="permission e2e",
         body="",
         state="open",

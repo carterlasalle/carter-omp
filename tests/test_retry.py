@@ -16,7 +16,16 @@ from carter_omp import config as config_mod
 from carter_omp.config import Settings, reset_settings_cache
 from carter_omp.db import Database, issue_key
 from carter_omp.queue import WorkerPool
+from carter_omp.sandbox import LocalGitTransport, SandboxManager
 from carter_omp.slot_pool import SlotPool
+from tests.fakes import FakeGitHub
+
+
+def _state(db: Database, delivery: str) -> str:
+    """The stored event's state, asserting the row exists."""
+    row = db.get_event(delivery)
+    assert row is not None, f"no event {delivery}"
+    return row.state
 
 
 def _record(db: Database, delivery: str = "d1") -> None:
@@ -99,13 +108,13 @@ def test_schedule_retry_only_transitions_running_or_failed(db: Database) -> None
     _record(db)
     # A still-queued row must not be touched by schedule_retry.
     assert not db.schedule_retry("d1", delay_seconds=0)
-    assert db.get_event("d1").state == "queued"
+    assert _state(db, "d1") == "queued"
 
     # A terminally-failed row can be revived.
     db.claim_next_event()
     db.mark_event("d1", "failed", error="x")
     assert db.schedule_retry("d1", delay_seconds=3600, error="retry me")
-    assert db.get_event("d1").state == "queued"
+    assert _state(db, "d1") == "queued"
 
 
 def test_manual_requeue_clears_retry_backoff(db: Database) -> None:
@@ -121,12 +130,15 @@ def test_manual_requeue_clears_retry_backoff(db: Database) -> None:
 # ---- WorkerPool: retry-then-exhaust through the real failure path -------------
 
 
-class _StubGitHub:
+class _StubGitHub(FakeGitHub):
     pass
 
 
-class _StubSandbox:
+class _StubSandbox(SandboxManager):
     natives_cache = None
+
+    def __init__(self) -> None:
+        self.natives_cache = None
 
     def reclaim_workspace_caches(self, *, repo: str, number: int | str) -> bool:
         del repo, number
@@ -134,10 +146,6 @@ class _StubSandbox:
 
     def reclaim_all_caches(self) -> int:
         return 0
-
-
-class _StubGitTransport:
-    pass
 
 
 def _retry_settings(monkeypatch: pytest.MonkeyPatch, *, max_retries: int) -> Settings:
@@ -160,7 +168,7 @@ async def test_run_event_retries_then_marks_failed(
         db=db,
         github=_StubGitHub(),  # type: ignore[arg-type]
         sandbox=_StubSandbox(),  # type: ignore[arg-type]
-        git_transport=_StubGitTransport(),  # type: ignore[arg-type]
+        git_transport=LocalGitTransport(token=None),  # type: ignore[arg-type]
         slot_pool=SlotPool([2001]),
     )
 
@@ -199,7 +207,7 @@ async def test_run_event_success_after_transient_failure(
         db=db,
         github=_StubGitHub(),  # type: ignore[arg-type]
         sandbox=_StubSandbox(),  # type: ignore[arg-type]
-        git_transport=_StubGitTransport(),  # type: ignore[arg-type]
+        git_transport=LocalGitTransport(token=None),  # type: ignore[arg-type]
         slot_pool=SlotPool([2001]),
     )
 
@@ -216,10 +224,10 @@ async def test_run_event_success_after_transient_failure(
     row1 = db.claim_next_event()
     assert row1 is not None
     await pool._run_event(row1)
-    assert db.get_event("d1").state == "queued"  # retry scheduled
+    assert _state(db, "d1") == "queued"  # retry scheduled
 
     row2 = db.claim_next_event()
     assert row2 is not None
     await pool._run_event(row2)
-    assert db.get_event("d1").state == "done"
+    assert _state(db, "d1") == "done"
     assert calls["n"] == 2

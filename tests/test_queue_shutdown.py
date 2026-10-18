@@ -16,17 +16,20 @@ import pytest
 from carter_omp.config import Settings
 from carter_omp.db import Database, EventRow
 from carter_omp.queue import WorkerPool
+from carter_omp.sandbox import LocalGitTransport, SandboxManager
 from carter_omp.slot_pool import SlotPool
+from tests.fakes import FakeGitHub
 
 
-class _StubGitHub:
+class _StubGitHub(FakeGitHub):
     """Sentinel; queue tests don't talk to GitHub."""
 
 
-class _StubSandbox:
+class _StubSandbox(SandboxManager):
     """Sentinel; queue tests don't touch the workspace pool."""
 
-    natives_cache = None
+    def __init__(self) -> None:
+        self.natives_cache = None
 
     def reclaim_workspace_caches(self, *, repo: str, number: int | str) -> bool:
         del repo, number
@@ -36,17 +39,13 @@ class _StubSandbox:
         return 0
 
 
-class _StubGitTransport:
-    """Sentinel; queue tests don't push."""
-
-
 def _make_pool(settings: Settings, db: Database) -> WorkerPool:
     return WorkerPool(
         settings=settings,
         db=db,
         github=_StubGitHub(),  # type: ignore[arg-type]
         sandbox=_StubSandbox(),  # type: ignore[arg-type]
-        git_transport=_StubGitTransport(),  # type: ignore[arg-type]
+        git_transport=LocalGitTransport(token=None),  # type: ignore[arg-type]
         slot_pool=SlotPool(),
     )
 
@@ -77,7 +76,7 @@ async def test_non_root_fallback_semaphore_caps_dispatch_concurrency(
         db=db,
         github=_StubGitHub(),  # type: ignore[arg-type]
         sandbox=_StubSandbox(),  # type: ignore[arg-type]
-        git_transport=_StubGitTransport(),  # type: ignore[arg-type]
+        git_transport=LocalGitTransport(token=None),  # type: ignore[arg-type]
     )
 
     db.record_event(

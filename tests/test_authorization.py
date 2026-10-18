@@ -9,6 +9,8 @@ and only an exact authorized trigger queues).
 
 from __future__ import annotations
 
+from typing import Any
+
 from carter_omp.capabilities import Capability
 from carter_omp.github_events import RouteDecision, TriggerPolicy, route
 
@@ -34,8 +36,8 @@ def _sender(login: str, id: int, type: str = "User") -> dict:
     return {"login": login, "id": id, "type": type}
 
 
-def _route(event_type: str, payload: dict, **kwargs: object) -> RouteDecision:
-    return route(event_type, _base(payload), allowlist=ALLOWLIST, bot_login=BOT, policy=POLICY, **kwargs)  # type: ignore[arg-type]
+def _route(event_type: str, payload: dict, **kwargs: Any) -> RouteDecision:
+    return route(event_type, _base(payload), allowlist=ALLOWLIST, bot_login=BOT, policy=POLICY, **kwargs)
 
 
 def test_authorized_label_queues() -> None:
