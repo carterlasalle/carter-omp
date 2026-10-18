@@ -119,7 +119,7 @@ Web search uses OMP's `web_search` tool. It is on by default; three variables co
 | `CARTER_OMP_WEB_SEARCH_MODEL` | *(empty)* | Pin the provider role, e.g. `web/brave`, `web/exa`, `web/searxng`. Empty uses OMP's default chain. |
 | `CARTER_OMP_WEB_SEARCH_ENV` | `EXA_API_KEY,BRAVE_API_KEY,TAVILY_API_KEY,JINA_API_KEY,TINYFISH_API_KEY,SEARXNG_ENDPOINT` | Variables forwarded from `.env` into each run. Only set values are passed. |
 
-**Adding a keyed provider:** put the key in `.env`, add its name to `CARTER_OMP_WEB_SEARCH_ENV` if it is not already listed, and point the role at it:
+**Adding a keyed provider:** put the key in `.env`, add its name to `CARTER_OMP_WEB_SEARCH_ENV` if it is not already listed, and point the role at it. TinyFish covers both halves: `CARTER_OMP_WEB_SEARCH_MODEL=web/tinyfish` for native search, and the `tinyfish` HTTP MCP entry in `org_tools.toml` for `fetch_content` (page → Markdown/JSON), both using `TINYFISH_API_KEY`.
 
 ```dotenv
 BRAVE_API_KEY=...

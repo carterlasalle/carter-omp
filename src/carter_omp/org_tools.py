@@ -48,8 +48,13 @@ class OrgTool:
     name: str
     owners: frozenset[str]
     kind: str
-    command: str
+    command: str = ""
     args: tuple[str, ...] = ()
+    # mcp-http: remote Streamable-HTTP endpoint and static headers. Header
+    # values may use `${VAR}` placeholders; OMP expands them from the run env,
+    # so the secret stays out of the generated mcp.json.
+    url: str = ""
+    headers: tuple[tuple[str, str], ...] = ()
     # Orchestrator env var names forwarded into the run's env (the secret
     # itself lives in the container env / .env, never in the TOML file).
     env: tuple[str, ...] = ()
@@ -69,7 +74,7 @@ class OrgToolCatalog:
     def for_owner(self, owner: str) -> tuple[OrgTool, ...]:
         """Tools bound to this repo owner (login, case-insensitive)."""
         want = owner.strip().lower()
-        return tuple(t for t in self.tools if want in t.owners)
+        return tuple(t for t in self.tools if want in t.owners or "*" in t.owners)
 
     # trace:v1 id=impl.org-tools-forwarded-env work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     def forwarded_env(self, owner: str, env: dict[str, str] | None = None) -> dict[str, str]:
@@ -95,9 +100,13 @@ class OrgToolCatalog:
         """`mcpServers` fragment for a run's generated `mcp.json`."""
         servers: dict[str, dict] = {}
         for tool in self.for_owner(owner):
-            if tool.kind != "mcp-stdio":
-                continue
-            servers[tool.name] = {"command": tool.command, "args": list(tool.args)}
+            if tool.kind == "mcp-stdio":
+                servers[tool.name] = {"command": tool.command, "args": list(tool.args)}
+            elif tool.kind == "mcp-http":
+                entry: dict = {"type": "http", "url": tool.url}
+                if tool.headers:
+                    entry["headers"] = dict(tool.headers)
+                servers[tool.name] = entry
         return servers
 
     # trace:v1 id=impl.org-tools-prompt-section work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
@@ -125,11 +134,27 @@ def _parse_tool(raw: dict, index: int) -> OrgTool:
     if not isinstance(owners, list) or not owners or not all(isinstance(o, str) and o.strip() for o in owners):
         raise ValueError(f"{where} ({name}) needs a non-empty `owners` list of login strings")
     kind = raw.get("kind", "mcp-stdio")
-    if kind != "mcp-stdio":
-        raise ValueError(f"{where} ({name}): unknown `kind` {kind!r} (only `mcp-stdio` today)")
-    command = raw.get("command")
-    if not isinstance(command, str) or not command.strip():
-        raise ValueError(f"{where} ({name}) needs a non-empty `command`")
+    if kind not in ("mcp-stdio", "mcp-http"):
+        raise ValueError(f"{where} ({name}): unknown `kind` {kind!r} (expected mcp-stdio or mcp-http)")
+    command = raw.get("command", "")
+    url = raw.get("url", "")
+    headers_raw = raw.get("headers", {})
+    if not isinstance(headers_raw, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in headers_raw.items()
+    ):
+        raise ValueError(f"{where} ({name}): `headers` must be a table of strings")
+    if kind == "mcp-stdio":
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError(f"{where} ({name}) needs a non-empty `command` for mcp-stdio")
+        if url:
+            raise ValueError(f"{where} ({name}): mcp-stdio does not take `url`")
+    else:
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError(f"{where} ({name}) needs a non-empty `url` for mcp-http")
+        if not (url.startswith("https://") or url.startswith("http://127.0.0.1")):
+            raise ValueError(f"{where} ({name}): mcp-http url must be https (or loopback http)")
+        if command:
+            raise ValueError(f"{where} ({name}): mcp-http does not take `command`")
     args = raw.get("args", [])
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         raise ValueError(f"{where} ({name}): `args` must be a list of strings")
@@ -146,8 +171,10 @@ def _parse_tool(raw: dict, index: int) -> OrgTool:
         name=name.strip(),
         owners=frozenset(o.strip().lower() for o in owners),
         kind=kind,
-        command=command.strip(),
+        command=command.strip() if isinstance(command, str) else "",
         args=tuple(args),
+        url=url.strip() if isinstance(url, str) else "",
+        headers=tuple(sorted((str(k), str(v)) for k, v in headers_raw.items())),
         env=tuple(e.strip() for e in env),
         skills=tuple(skills),
         prompt_hint=prompt_hint.strip(),

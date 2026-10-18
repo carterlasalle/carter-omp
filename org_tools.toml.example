@@ -34,3 +34,15 @@ env = ["SENTRY_ACCESS_TOKEN"]
 skills = ["ci-fix-dont-freeze"]
 # One-liner rendered into the run's system prompt when this tool is active.
 prompt_hint = "Before diagnosing a Sentry-sourced issue (label `sentry:*`, a `MOCKINGBIRD-*` signature, or a Sentry-synced report), call `mcp__sentry_search_events` or `mcp__sentry_search_issues` for the exact event. NEVER hand-roll Sentry REST with `SENTRY_ACCESS_TOKEN` in bash/python: the MCP returns the same data structured and is the only sanctioned path."
+
+# Deployment-wide tool: `owners = ["*"]` applies to every repo owner. HTTP MCP
+# servers take `url` instead of `command`; `${VAR}` in a header is expanded by
+# OMP from the run env, so the secret never lands in the generated mcp.json.
+[[tool]]
+name = "tinyfish"
+owners = ["*"]
+kind = "mcp-http"
+url = "https://agent.tinyfish.ai/mcp"
+headers = { "X-API-Key" = "${TINYFISH_API_KEY}" }
+env = ["TINYFISH_API_KEY"]
+prompt_hint = "TinyFish MCP: `mcp__tinyfish_search` for fresh web search and `mcp__tinyfish_fetch_content` to fetch a page as clean Markdown/JSON. Search and fetch are free (30 searches/min, 150 fetches/min)."

@@ -102,3 +102,42 @@ def test_rejects_missing_owners(tmp_path: Path) -> None:
     file.write_text('[[tool]]\nname = "x"\ncommand = "x"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="`owners`"):
         load_catalog(file)
+
+
+_GLOBAL_HTTP_TOML = """\
+[[tool]]
+name = "tinyfish"
+owners = ["*"]
+kind = "mcp-http"
+url = "https://agent.tinyfish.ai/mcp"
+headers = { "X-API-Key" = "${TINYFISH_API_KEY}" }
+env = ["TINYFISH_API_KEY"]
+prompt_hint = "TinyFish MCP: search + fetch_content."
+"""
+
+
+def test_global_http_tool_applies_to_every_owner(tmp_path: Path) -> None:
+    catalog = _catalog(tmp_path, _GLOBAL_HTTP_TOML)
+
+    assert [t.name for t in catalog.for_owner("phoenix-fire-labs")] == ["tinyfish"]
+    assert [t.name for t in catalog.for_owner("carterlasalle")] == ["tinyfish"]
+    assert catalog.mcp_servers("anyone") == {
+        "tinyfish": {
+            "type": "http",
+            "url": "https://agent.tinyfish.ai/mcp",
+            "headers": {"X-API-Key": "${TINYFISH_API_KEY}"},
+        }
+    }
+    assert catalog.forwarded_env("anyone", env={"TINYFISH_API_KEY": "tf_test"}) == {
+        "TINYFISH_API_KEY": "tf_test"
+    }
+
+
+def test_http_tool_requires_url_and_rejects_command(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        _catalog(tmp_path, '[[tool]]\nname = "x"\nowners = ["*"]\nkind = "mcp-http"\n')
+    with pytest.raises(ValueError):
+        _catalog(
+            tmp_path,
+            '[[tool]]\nname = "x"\nowners = ["*"]\nkind = "mcp-http"\nurl = "https://x/mcp"\ncommand = "npx"\n',
+        )
