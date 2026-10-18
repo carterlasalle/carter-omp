@@ -2536,6 +2536,31 @@ class Database:
             self._conn.execute("DELETE FROM _issue_index_keep")
             return int(cur.rowcount)
 
+    # trace:v1 id=impl.db-abandon-missing-issues work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def abandon_missing_issues(self, repo: str, keep: set[int]) -> list[str]:
+        """Settle tracked work items whose issue no longer exists upstream.
+
+        `keep` must come from a complete enumeration (`state=all`). A deleted or
+        transferred issue keeps its ledger row — the console renders that row as
+        active work — so it has to be settled instead of sitting in `reproducing`
+        forever.
+        """
+        with self._lock:
+            rows = self._conn.execute("SELECT key, state FROM issues WHERE key LIKE ?", (f"{repo}#%",)).fetchall()
+            missing = [
+                str(row["key"])
+                for row in rows
+                if (number := str(row["key"]).rpartition("#")[2]).isdigit()
+                and int(number) not in keep
+                and row["state"] != "abandoned"
+            ]
+            for key in missing:
+                self._conn.execute(
+                    "UPDATE issues SET state='abandoned', updated_at=? WHERE key=?",
+                    (_utcnow(), key),
+                )
+        return missing
+
     # trace:v1 id=impl.db-issue-index-status work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     def issue_index_status(self) -> list[dict[str, Any]]:
         """Per-repo index health: rows held, PRs, last write, sync watermark."""

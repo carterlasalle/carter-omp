@@ -1211,3 +1211,19 @@ def test_stranded_issues_ignores_orphans_older_than_the_window(db: Database) -> 
 
     assert db.stranded_issues(max_attempts=3, since=iso_seconds_ago(24 * 3600)) == []
     assert [candidate["key"] for candidate in db.stranded_issues(max_attempts=3)] == [key]
+
+
+def test_abandon_missing_issues_settles_rows_gone_upstream(db: Database) -> None:
+    """A deleted issue must leave the work ledger, not sit in an active state."""
+    for number in (1, 2):
+        db.upsert_issue(
+            key=issue_key("octo/widget", number),
+            repo="octo/widget",
+            number=number,
+            state="reproducing",
+        )
+
+    assert db.abandon_missing_issues("octo/widget", {1}) == ["octo/widget#2"]
+    assert _issue(db, "octo/widget#1").state == "reproducing"
+    assert _issue(db, "octo/widget#2").state == "abandoned"
+    assert db.abandon_missing_issues("octo/widget", {1}) == []

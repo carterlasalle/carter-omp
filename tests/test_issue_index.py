@@ -221,12 +221,16 @@ async def test_prune_repo_drops_deleted_issues_and_respects_cadence(db: Database
     """A deleted issue (invisible to `?since=`) leaves the index on the sweep."""
     db.upsert_issue_index(_entry(427, title="client_payload_invalid"))
     db.upsert_issue_index(_entry(1, title="alive"))
+    db.upsert_issue(key="octo/widget#427", repo="octo/widget", number=427, state="reproducing")
     backend = _FakeBackend({1: [_entry(1, title="alive")]})
     sync = IssueIndexSync(settings=_SyncSettings(), db=db, github=backend)  # type: ignore[arg-type]
 
     assert await sync.prune_repo("octo/widget") == 1
     assert db.search_issue_index("octo/widget", keywords=("client_payload_invalid",)) == []
     assert [e.number for e in db.search_issue_index("octo/widget", keywords=("alive",))] == [1]
+    # The tracked work item is settled too, so the console stops listing it.
+    settled = db.get_issue("octo/widget#427")
+    assert settled is not None and settled.state == "abandoned"
 
     # Within the hourly window the sweep is a no-op: no GitHub calls at all.
     backend.calls.clear()

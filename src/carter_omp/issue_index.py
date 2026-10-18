@@ -319,9 +319,12 @@ class IssueIndexSync:
             log.warning("issue index prune skipped; enumeration incomplete", extra={"repo": repo})
             return 0
         removed = self._db.prune_issue_index(repo, keep)
+        settled = self._db.abandon_missing_issues(repo, keep)
         self._db.set_issue_index_last_pruned(repo, _utcnow_iso())
         if removed:
             log.info("issue index pruned deleted rows", extra={"repo": repo, "removed": removed})
+        if settled:
+            log.info("work items settled for deleted issues", extra={"repo": repo, "count": len(settled)})
         return removed
 
 
