@@ -111,17 +111,19 @@ def ingest_webhook_payload(db: Database, repo: str, event_type: str, payload: Ma
     """
     if event_type in ("issues", "issue_comment"):
         obj = payload.get("issue")
-        if isinstance(obj, Mapping) and obj.get("number") is not None:
-            number = obj.get("number")
-            # A deleted (or transferred-away) issue is gone from this repo:
-            # upserting it would resurrect the row and only the hourly
-            # enumeration sweep could clear it again.
-            if event_type == "issues" and str(payload.get("action") or "") in ("deleted", "transferred"):
-                db.remove_issue_index(repo, int(number))
-                return True
-            db.upsert_issue_index(index_entry_from_issue_object(repo, obj))
+        if not isinstance(obj, Mapping):
+            return False
+        number = obj.get("number")
+        if not isinstance(number, int) or isinstance(number, bool):
+            return False
+        # A deleted (or transferred-away) issue is gone from this repo:
+        # upserting it would resurrect the row and only the enumeration sweep
+        # could clear it again.
+        if event_type == "issues" and str(payload.get("action") or "") in ("deleted", "transferred"):
+            db.remove_issue_index(repo, number)
             return True
-        return False
+        db.upsert_issue_index(index_entry_from_issue_object(repo, obj))
+        return True
     if event_type.startswith("pull_request"):
         obj = payload.get("pull_request")
         if isinstance(obj, Mapping) and obj.get("number") is not None:
