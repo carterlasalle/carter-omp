@@ -272,6 +272,11 @@ class Settings(BaseSettings):
     # disables the sweeper.
     redispatch_interval_seconds: float = Field(300.0, alias="CARTER_OMP_REDISPATCH_INTERVAL_SECONDS")
     redispatch_max_per_issue: int = Field(1, alias="CARTER_OMP_REDISPATCH_MAX_PER_ISSUE")
+    # How far back the sweeper may look for a failed trigger that never got an
+    # `issues` row. Without a bound an outage sweep resurrects week-old work: a
+    # failed comment on autolight#8 was re-run six days after its PR merged.
+    # An outage worth recovering from is hours, not days.
+    redispatch_window_hours: float = Field(24.0, alias="CARTER_OMP_REDISPATCH_WINDOW_HOURS")
     # Retention for webhooks that never triggered anything. Every delivery is
     # stored with its full payload, including the ones the trigger policy drops
     # (label noise, workflow_run storms) — 32k rows and ~800 MB on the VPS.

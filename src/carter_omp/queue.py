@@ -21,6 +21,7 @@ from carter_omp.db import (
     EventRow,
     IssueRow,
     IssueState,
+    iso_seconds_ago,
     issue_key,
 )
 from carter_omp.github_backend import GitHubBackend
@@ -443,7 +444,11 @@ class WorkerPool:
         idempotent (`record_event` ignores duplicates).
         """
         cap = self.settings.redispatch_max_per_issue
-        candidates = await asyncio.to_thread(self.db.stranded_issues, max_attempts=self.settings.event_max_retries)
+        candidates = await asyncio.to_thread(
+            self.db.stranded_issues,
+            max_attempts=self.settings.event_max_retries,
+            since=iso_seconds_ago(self.settings.redispatch_window_hours * 3600),
+        )
         redispatched = 0
         for candidate in candidates:
             key = str(candidate["key"])

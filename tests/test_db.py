@@ -1185,3 +1185,29 @@ def test_stranded_issues_skips_deterministic_orphan_failures(db: Database) -> No
         )
 
     assert db.stranded_issues(max_attempts=3) == []
+
+
+def test_stranded_issues_ignores_orphans_older_than_the_window(db: Database) -> None:
+    """An outage sweep must not resurrect week-old work.
+
+    autolight#8's failed comment was re-run six days later, long after its PR
+    merged. The window keeps the sweep to failures an outage could have caused.
+    """
+    key = issue_key("octo/widget", 11)
+    db.record_event(
+        delivery_id="stale",
+        event_type="issue_comment",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"action": "created"},
+    )
+    with db._lock:  # noqa: SLF001
+        db._conn.execute(  # noqa: SLF001
+            "UPDATE events SET state='failed', attempts=3, "
+            "last_error='Temporary failure in name resolution', received_at=? "
+            "WHERE delivery_id='stale'",
+            (iso_seconds_ago(6 * 86400),),
+        )
+
+    assert db.stranded_issues(max_attempts=3, since=iso_seconds_ago(24 * 3600)) == []
+    assert [candidate["key"] for candidate in db.stranded_issues(max_attempts=3)] == [key]

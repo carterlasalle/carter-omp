@@ -890,7 +890,7 @@ class Database:
         return [dict(row) for row in rows]
 
     # trace:v1 id=impl.db-stranded-issues work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
-    def stranded_issues(self, *, max_attempts: int, limit: int = 20) -> list[dict[str, Any]]:
+    def stranded_issues(self, *, max_attempts: int, since: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         """Issues whose run died terminally with nothing left to dispatch.
 
         A failed event is terminal, so an issue caught mid-flight — no queued or
@@ -903,6 +903,12 @@ class Database:
         trigger that dies before the issue is registered (the github-proxy was
         down, so the run failed on `name resolution`) has no row for the
         in-flight sweep to find, and the trigger was silently lost.
+
+        `since` bounds the orphan branch to recent failures. Without it an
+        outage sweep resurrects week-old work: a failed `issue_comment` on
+        autolight#8 (2026-10-12) was re-run six days later, long after the PR it
+        belonged to had merged. An outage worth recovering from is measured in
+        hours, not days.
         """
         states = ",".join("?" * len(STRANDED_ISSUE_STATES))
         with self._lock:
@@ -945,13 +951,14 @@ class Database:
                   AND NOT EXISTS (SELECT 1 FROM events q
                                    WHERE q.issue_key = e.issue_key
                                      AND q.state IN ('queued', 'running'))
+                  AND (? IS NULL OR e.received_at >= ?)
                   AND e.rowid = (SELECT MAX(e2.rowid) FROM events e2
                                   WHERE e2.issue_key = e.issue_key
                                     AND e2.state <> 'skipped')
                 ORDER BY e.received_at ASC
                 LIMIT ?
                 """,
-                (max_attempts, CANCEL_REASON, limit),
+                (max_attempts, CANCEL_REASON, since, since, limit),
             ).fetchall()
 
         out = [dict(row) for row in rows]
