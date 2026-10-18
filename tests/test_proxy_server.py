@@ -1051,29 +1051,90 @@ async def test_git_push_workspace_key_mismatch(proxy_settings: Settings) -> None
     assert "workspace_key" in resp.text
 
 
-async def test_git_push_rejects_malformed_workspace_key(proxy_settings: Settings) -> None:
+@pytest.mark.parametrize(
+    "workspace_key",
+    [
+        "octo__widget__",  # empty suffix: prefix-only key with no issue number
+        "octo__widget__1;rm -rf",  # shell metacharacters in the suffix
+        "octo__widget__1__extra",  # trailing segment after the issue number
+        "octo__widget__1/evil",  # path separator smuggled into the key
+        "octo__widget__..",  # dot-dot suffix, no slash needed
+        ".hidden__1",  # hidden-directory probe with a valid-looking suffix
+        "octo__widget__../x",  # traversal via the suffix
+        "octo__widget__~root",  # tilde outside the allowlisted charset
+        "octo__widget__a b",  # whitespace outside the allowlisted charset
+        "nodelim",  # missing the double-underscore delimiter entirely
+    ],
+)
+async def test_git_push_rejects_malformed_workspace_key(proxy_settings: Settings, workspace_key: str) -> None:
     app = _build_app(proxy_settings)
-    for bad_key in ("octo__widget__../x", "octo__widget__~root", "octo__widget__a b", "nodelim"):
-        body = (
-            b'{"repo":"octo/widget","workspace_key":"'
-            + bad_key.encode()
-            + b'","branch":"carter-omp/abc/x","expected_head":"'
-            + (b"0" * 40)
-            + b'"}'
+    body = (
+        b'{"repo":"octo/widget","workspace_key":"'
+        + workspace_key.encode()
+        + b'","branch":"carter-omp/abc/x","expected_head":"'
+        + (b"0" * 40)
+        + b'"}'
+    )
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/git/push",
+            content=body,
+            headers={
+                **_signed("POST", "/gh/v1/git/push", body, run_token=_run_token(branch="carter-omp/abc/x")),
+                "Content-Type": "application/json",
+            },
         )
-        async with await _async_client(app) as client:
-            resp = await client.post(
-                "/gh/v1/git/push",
-                content=body,
-                headers={
-                    **_signed(
-                        "POST", "/gh/v1/git/push", body, run_token=_run_token(issue=None, branch="carter-omp/abc/x")
-                    ),
-                    "Content-Type": "application/json",
-                },
-            )
-        assert resp.status_code == 400, (bad_key, resp.text)
-        assert "workspace_key" in resp.text
+    assert resp.status_code == 400, (workspace_key, resp.text)
+    assert "workspace_key" in resp.text
+
+
+async def test_git_push_unknown_workspace_is_404(proxy_settings: Settings) -> None:
+    """A well-formed key naming no directory is a missing workspace, not a path.
+
+    The helper resolves the key through the workspace listing, so a request
+    for a never-created workspace stops here instead of handing a constructed
+    path to git.
+    """
+    app = _build_app(proxy_settings)
+    body = (
+        b'{"repo":"octo/widget","workspace_key":"octo__widget__1","branch":"carter-omp/abc/x","expected_head":"'
+        + (b"0" * 40)
+        + b'"}'
+    )
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/git/push",
+            content=body,
+            headers={
+                **_signed("POST", "/gh/v1/git/push", body, run_token=_run_token(branch="carter-omp/abc/x")),
+                "Content-Type": "application/json",
+            },
+        )
+
+    assert resp.status_code == 404, resp.text
+    assert "workspace not found" in resp.text
+
+
+async def test_git_push_rejects_workspace_for_other_thread(proxy_settings: Settings) -> None:
+    # Well-formed key for another issue must 403 on the run-token thread
+    # check, not resolve another workspace's repo dir.
+    app = _build_app(proxy_settings)
+    body = (
+        b'{"repo":"octo/widget","workspace_key":"octo__widget__2","branch":"carter-omp/abc/x","expected_head":"'
+        + (b"0" * 40)
+        + b'"}'
+    )
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/git/push",
+            content=body,
+            headers={
+                **_signed("POST", "/gh/v1/git/push", body, run_token=_run_token(branch="carter-omp/abc/x")),
+                "Content-Type": "application/json",
+            },
+        )
+    assert resp.status_code == 403
+    assert "thread" in resp.text
 
 
 async def test_git_push_release_requires_hmac(proxy_settings: Settings) -> None:
