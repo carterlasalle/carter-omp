@@ -863,6 +863,11 @@ class Database:
         its state. These are the rows a redispatch sweeper can safely re-queue;
         `redispatches` counts the re-queues already spent so the caller can cap
         them.
+
+        Also covers failures on issues that never got an `issues` row: a first
+        trigger that dies before the issue is registered (the github-proxy was
+        down, so the run failed on `name resolution`) has no row for the
+        in-flight sweep to find, and the trigger was silently lost.
         """
         states = ",".join("?" * len(STRANDED_ISSUE_STATES))
         with self._lock:
@@ -890,7 +895,48 @@ class Database:
                 """,
                 (*STRANDED_ISSUE_STATES, max_attempts, CANCEL_REASON, limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+            orphans = self._conn.execute(
+                f"""
+                SELECT e.issue_key AS key,
+                       (SELECT COUNT(*) FROM events r
+                         WHERE r.issue_key = e.issue_key
+                           AND r.delivery_id LIKE '{REDISPATCH_PREFIX}%') AS redispatches
+                FROM events e
+                WHERE e.state = 'failed'
+                  AND e.issue_key IS NOT NULL
+                  AND e.attempts >= ?
+                  AND COALESCE(e.last_error, '') NOT LIKE '%' || ? || '%'
+                  AND NOT EXISTS (SELECT 1 FROM issues i WHERE i.key = e.issue_key)
+                  AND NOT EXISTS (SELECT 1 FROM events q
+                                   WHERE q.issue_key = e.issue_key
+                                     AND q.state IN ('queued', 'running'))
+                  AND e.rowid = (SELECT MAX(e2.rowid) FROM events e2
+                                  WHERE e2.issue_key = e.issue_key
+                                    AND e2.state <> 'skipped')
+                ORDER BY e.received_at ASC
+                LIMIT ?
+                """,
+                (max_attempts, CANCEL_REASON, limit),
+            ).fetchall()
+
+        out = [dict(row) for row in rows]
+        seen = {str(row["key"]) for row in out}
+        for row in orphans:
+            key = str(row["key"])
+            if key in seen:
+                continue
+            seen.add(key)
+            repo, _, number = key.rpartition("#")
+            out.append(
+                {
+                    "key": key,
+                    "repo": repo,
+                    "number": int(number) if number.isdigit() else 0,
+                    "state": None,
+                    "redispatches": int(row["redispatches"]),
+                }
+            )
+        return out[:limit]
 
     # trace:v1 id=impl.db-telemetry-summary work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def telemetry_summary(self, *, since: str | None = None) -> dict[str, Any]:

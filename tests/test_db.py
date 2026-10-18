@@ -1100,8 +1100,7 @@ def test_list_events_newest_first_uses_received_index(db: Database) -> None:
         plan = " ".join(
             str(row["detail"])
             for row in db._conn.execute(  # noqa: SLF001
-                "EXPLAIN QUERY PLAN SELECT delivery_id FROM events "
-                "ORDER BY received_at DESC LIMIT 25"
+                "EXPLAIN QUERY PLAN SELECT delivery_id FROM events ORDER BY received_at DESC LIMIT 25"
             )
         )
     assert "events_received" in plan
@@ -1135,3 +1134,31 @@ def test_prune_skipped_events_drops_only_old_non_triggers(db: Database) -> None:
     assert db.get_event("old-skip") is None
     assert db.get_event("new-skip") is not None
     assert db.get_event("old-done") is not None
+
+
+def test_stranded_issues_covers_failures_without_an_issue_row(db: Database) -> None:
+    """A first trigger that fails before the issue is registered is still swept.
+
+    The github-proxy outage failed runs on `name resolution` before any `issues`
+    row existed, so the in-flight sweep never saw them and the trigger was lost.
+    """
+    key = issue_key("octo/widget", 7)
+    db.record_event(
+        delivery_id="first-try",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"action": "opened"},
+    )
+    with db._lock:  # noqa: SLF001
+        db._conn.execute(  # noqa: SLF001
+            "UPDATE events SET state='failed', attempts=3, "
+            "last_error='Temporary failure in name resolution' WHERE delivery_id='first-try'"
+        )
+
+    candidates = db.stranded_issues(max_attempts=3)
+
+    assert [candidate["key"] for candidate in candidates] == [key]
+    assert candidates[0]["repo"] == "octo/widget"
+    assert candidates[0]["number"] == 7
+    assert candidates[0]["redispatches"] == 0
