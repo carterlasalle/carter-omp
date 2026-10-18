@@ -328,8 +328,8 @@ _REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 _FORBIDDEN_URL_BYTES_RE = re.compile(r"[\x00-\x1f\x7f]|%(?:00|0a|0d)", re.IGNORECASE)
 _GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$")
 # trace:v1 id=impl.proxy-workspace-key-shape work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
-_WORKSPACE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*__(?:[0-9]+|release)$")
-_WORKSPACE_SUFFIX_RE = re.compile(r"(?:[0-9]+|release)")
+_WORKSPACE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*__(?:[0-9]{1,10}|release)$")
+_WORKSPACE_SUFFIX_RE = re.compile(r"(?:[0-9]{1,10}|release)")
 _GIT_PROBE_SCRUBBED_ENV_KEYS = (
     "CARTER_OMP_GIT_HTTP_AUTH",
     "GITHUB_TOKEN",
@@ -1365,7 +1365,13 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         if suffix == "release":
             number: int | str = "release"
         else:
-            number = _require_int(int(suffix), "workspace_key")
+            try:
+                number = _require_int(int(suffix), "workspace_key")
+            except ValueError:
+                raise HTTPException(400, f"invalid workspace_key {workspace_key!r}") from None
+            # PR follow-ups reuse the originating issue's workspace while the
+            # run token is bound to the PR thread; `_require_run_thread`
+            # accepts either bound thread, like every other threaded endpoint.
             _require_run_thread(token, number)
         repo_dir = _workspace_repo_dir(settings, compute_workspace_key(repo, number))
         if not repo_dir.is_dir():
@@ -1452,10 +1458,17 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         suffix = workspace_key.removeprefix(expected_prefix)
         if suffix == workspace_key or not _WORKSPACE_SUFFIX_RE.fullmatch(suffix):
             raise HTTPException(400, f"invalid workspace_key {workspace_key!r}")
-        release_number: int | str = "release" if suffix == "release" else _require_int(int(suffix), "workspace_key")
-        if release_number != "release":
+        if suffix == "release":
+            release_number: int | str = "release"
+        else:
+            try:
+                release_number = _require_int(int(suffix), "workspace_key")
+            except ValueError:
+                raise HTTPException(400, f"invalid workspace_key {workspace_key!r}") from None
             _require_run_thread(token, release_number)
         repo_dir = _workspace_repo_dir(settings, compute_workspace_key(repo, release_number))
+        if not repo_dir.is_dir():
+            raise HTTPException(404, f"workspace not found: {workspace_key}")
         # Workflow files are the one path an App token cannot touch without the
         # explicit permission; refusing here names the fix instead of letting the
         # remote reject a completed commit (carter-omp#30).
