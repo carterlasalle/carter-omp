@@ -269,6 +269,9 @@ class WorkerPool:
         recovered = self.db.reset_stuck_running()
         if recovered:
             log.info("recovered stuck events", extra={"count": recovered})
+        pruned = await asyncio.to_thread(self.db.prune_tool_calls)
+        if pruned:
+            log.info("tool-call audit pruned", extra={"removed": pruned})
         # Single dispatcher loop is simpler than N workers; concurrency is gated by the slot pool.
         self._workers.append(asyncio.create_task(self._dispatch_loop(), name="carter_omp-dispatch"))
         # Periodic natives-cache GC, if enabled. Sleep-first so a freshly

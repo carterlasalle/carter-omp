@@ -64,16 +64,91 @@ _BUN_INSTALL_IMPORTED_LOCK_COMMAND = ("bun", "install", "--ignore-scripts")
 _BUN_LOCKFILES = ("bun.lock", "bun.lockb")
 _IMPORTABLE_LOCKFILES = ("package-lock.json", "yarn.lock", "pnpm-lock.yaml")
 _BUN_INSTALL_TIMEOUT_SECONDS = 300.0
-_REPO_COMMAND_SCRUBBED_ENV_KEYS: tuple[str, ...] = (
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "GITHUB_APP_PRIVATE_KEY",
-    "GITHUB_APP_CLIENT_SECRET",
-    "GITHUB_WEBHOOK_SECRET",
-    "CARTER_OMP_REPLAY_TOKEN",
-    "CARTER_OMP_GH_PROXY_HMAC_KEY",
-    "CARTER_OMP_GITHUB_APP_PRIVATE_KEY",
+# Repo-owned commands (bun, formatter, local git) execute code from the
+# checkout, so they get a minimal environment built from an allowlist — never
+# a copy of the orchestrator's. Model-provider, org-MCP, and GitHub credentials
+# stay in os.environ for OMP itself; a repository script must not be able to
+# `printenv` them (audit finding A, P0).
+_REPO_COMMAND_ENV_ALLOWED: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "TERM",
+        "TZ",
+        "CI",
+        "VIRTUAL_ENV",
+        "GOPATH",
+        "GOCACHE",
+        "GOMODCACHE",
+        "GOFLAGS",
+        "JAVA_HOME",
+        "BUN_INSTALL_CACHE_DIR",
+        "NODE_OPTIONS",
+        "COREPACK_HOME",
+    }
 )
+_REPO_COMMAND_ENV_ALLOWED_PREFIXES: tuple[str, ...] = (
+    "LC_",
+    "XDG_",
+    "NPM_CONFIG_",
+    "YARN_",
+    "PNPM_",
+    "COREPACK_",
+    "BUN_",
+    "NODE_",
+    "CARGO_",
+    "RUSTUP_",
+    "GRADLE_",
+    "MAVEN_",
+)
+# Deny wins over any allow rule: a build never needs these, and a repository
+# script is exactly what must not read them.
+_REPO_COMMAND_ENV_DENIED_PREFIXES: tuple[str, ...] = (
+    "CARTER_OMP_",
+    "GITHUB_",
+    "GH_",
+    "SENTRY_",
+    "OPENROUTER_",
+    "ANTHROPIC_",
+    "OPENAI_",
+    "AWS_",
+    "AZURE_",
+    "GCP_",
+    "GOOGLE_",
+    "EXA_",
+    "BRAVE_",
+    "TAVILY_",
+    "JINA_",
+    "TINYFISH_",
+    "SEARXNG_",
+    "DATABASE_URL",
+    "REDIS_",
+)
+_REPO_COMMAND_ENV_DENIED_SUFFIXES: tuple[str, ...] = (
+    "_KEY",
+    "_TOKEN",
+    "_SECRET",
+    "_PASSWORD",
+    "_PASSWD",
+    "_DSN",
+    "_CREDENTIAL",
+    "_CREDENTIALS",
+)
+
+
+def _repo_command_env_allowed(key: str) -> bool:
+    upper = key.upper()
+    if upper.startswith(_REPO_COMMAND_ENV_DENIED_PREFIXES) or upper.endswith(_REPO_COMMAND_ENV_DENIED_SUFFIXES):
+        return False
+    return key in _REPO_COMMAND_ENV_ALLOWED or upper.startswith(_REPO_COMMAND_ENV_ALLOWED_PREFIXES)
+
+
 _NEEDS_INFO_LABEL = "needs-info"
 _AGENT_HOME = Path("/srv/agent-home")
 _PRE_PR_FIX_TIMEOUT_SECONDS = 600.0
@@ -440,9 +515,7 @@ def _repo_command_env(bindings: ToolBindings) -> dict[str, str]:
     exact same HOME/XDG/TMP/Bun cache paths as the agent process; otherwise
     host-side pre-publish gates validate a different machine than the agent saw.
     """
-    env = os.environ.copy()
-    for key in _REPO_COMMAND_SCRUBBED_ENV_KEYS:
-        env[key] = ""
+    env = {key: value for key, value in os.environ.items() if _repo_command_env_allowed(key)}
     if _AGENT_HOME.is_dir():
         env["HOME"] = str(_AGENT_HOME)
     env.update(_prepare_slot_runtime_env(bindings.workspace, bindings.slot_uid))
@@ -2137,6 +2210,80 @@ def _build_repro_record(bindings: ToolBindings) -> HostTool[Any, Any]:
     )
 
 
+# ---------- run_reproduction ----------
+# trace:v1 id=impl.host-tools-run-reproduction work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _build_run_reproduction(bindings: ToolBindings) -> HostTool[Any, Any]:
+    """Execute a reproduction command and record what actually happened.
+
+    `repro_record` persists an agent-supplied transcript; this runs the command
+    through the same sandboxed executor as the publish gates, so the exit code
+    and output are evidence rather than assertion (audit finding 10).
+    """
+
+    # trace:v1 id=impl.host-tools-run-reproduction-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def execute(args: dict[str, Any]) -> str:
+        command = args.get("command")
+        if not isinstance(command, str) or not command.strip():
+            _raise_command("run_reproduction requires a non-empty 'command'.")
+        title = args.get("title")
+        title = title.strip() if isinstance(title, str) and title.strip() else "reproduction"
+        raw_timeout = args.get("timeout_seconds", 300)
+        timeout = max(5, min(int(raw_timeout), 900)) if isinstance(raw_timeout, int | float) else 300
+        timed_out = False
+        try:
+            proc = _run_repo_command(bindings, ["bash", "-lc", command], timeout=float(timeout))
+            exit_code: int | None = proc.returncode
+            output = f"{proc.stdout or ''}{proc.stderr or ''}"
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            exit_code = None
+            raw = exc.stdout or ""
+            output = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        head = _run_repo_command(bindings, ["git", "rev-parse", "HEAD"]).stdout.strip()
+        bindings.workspace.repro_dir.mkdir(parents=True, exist_ok=True)
+        slug = "".join(c if c.isalnum() else "-" for c in title.lower()).strip("-")[:48] or "reproduction"
+        target = bindings.workspace.repro_dir / f"{int(time.time())}-{slug}.md"
+        target.write_text(
+            f"# {title}\n\n"
+            f"- head_sha: {head}\n"
+            f"- exit_code: {exit_code if exit_code is not None else 'timeout'}\n"
+            f"- timed_out: {timed_out}\n"
+            f"- command:\n\n```\n{command}\n```\n\n"
+            f"## Output\n\n```\n{output}\n```\n",
+            encoding="utf-8",
+        )
+        if _slot_permissions_active(bindings.slot_uid):
+            assert bindings.slot_uid is not None
+            os.chown(target, bindings.slot_uid, bindings.slot_uid)
+        result: dict[str, Any] = {
+            "path": str(target.relative_to(bindings.workspace.root)),
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "head_sha": head,
+            "output_tail": output[-4000:],
+        }
+        if _advance_needs_info(bindings, "reproducing"):
+            result["cleared_needs_info"] = True
+        _audit(bindings, "run_reproduction", args, result=result)
+        return json.dumps(result, indent=2)
+
+    return host_tool(
+        name="run_reproduction",
+        description=persona.host_tool_description("run_reproduction"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "title": {"type": "string"},
+                "timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 900},
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        execute=_tool_execute(execute),
+    )
+
+
 # ---------- mark_unable_to_reproduce ----------
 # trace:v1 id=impl.host-tools-mark-unable work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_mark_unable(bindings: ToolBindings) -> HostTool[Any, Any]:
@@ -2583,6 +2730,8 @@ def _build_fetch_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
         ]
         lines.extend(_format_pr_file(file) for file in files)
         rendered = "\n".join(lines)
+        if pr.head_sha:
+            bindings.db.set_review_head(bindings.issue_key, pr.head_sha)
         _audit(bindings, "fetch_pr", args, result={"files": len(files), "linked_issues": list(linked)})
         return rendered
 
@@ -2866,6 +3015,29 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             msg = "submit_pr_review requires a non-empty 'body'."
             _audit(bindings, "submit_pr_review", args, error=msg)
             _raise_command(msg)
+        # The review's evidence belongs to the head `fetch_pr` showed. If the
+        # PR moved since, findings would anchor to code nobody reviewed; make
+        # the agent re-fetch rather than publish a stale verdict (audit 8).
+        reviewed_head = bindings.db.review_head(bindings.issue_key)
+        if reviewed_head:
+            try:
+                current = _run_coro(
+                    bindings.loop,
+                    bindings.github.get_pull_request(
+                        repo=bindings.repo.full_name,
+                        number=bindings.default_comment_number,
+                    ),
+                )
+            except GitHubError as exc:
+                _audit(bindings, "submit_pr_review", args, error=f"head check failed: {exc.status}")
+                _raise_command(
+                    f"could not verify the PR head before submitting ({exc.status} {exc.message}); retry submit_pr_review."
+                )
+            if current.head_sha and current.head_sha != reviewed_head:
+                _raise_command(
+                    f"PR head moved from {reviewed_head[:12]} to {current.head_sha[:12]} since fetch_pr; "
+                    "re-run fetch_pr and review the new head before submitting."
+                )
         staged = bindings.db.list_staged_review_comments(bindings.issue_key)
         comments: list[Mapping[str, Any]] = [_review_comment_to_payload(comment) for comment in staged]
         # commit_id is only needed by Forgejo to anchor inline review comments.
@@ -3058,6 +3230,106 @@ def _build_set_issue_labels(bindings: ToolBindings) -> HostTool[Any, Any]:
                 "labels": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["labels"],
+            "additionalProperties": False,
+        },
+        execute=_tool_execute(execute),
+    )
+
+
+# trace:v1 id=impl.host-tools-revise-assessment work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _build_revise_assessment(bindings: ToolBindings) -> HostTool[Any, Any]:
+    """Correct an earlier classification when new evidence contradicts it.
+
+    Triage has to commit to a label before the strongest evidence exists; the
+    old no-op on `classify_issue` left no legitimate way to correct it. This
+    records the old and new labels plus the evidence, and swaps the mutually
+    exclusive primary label on GitHub.
+    """
+
+    # trace:v1 id=impl.host-tools-revise-assessment-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def execute(args: dict[str, Any]) -> str:
+        if bindings.inbound_is_pr:
+            _audit(bindings, "revise_issue_assessment", args, result={"skipped": "pr_thread"})
+            return "no-op: revise_issue_assessment applies to issues, not PR threads."
+        existing = bindings.db.get_issue(bindings.issue_key)
+        if existing is None or not existing.classification:
+            msg = "revise_issue_assessment requires an existing classification; call classify_issue first."
+            _audit(bindings, "revise_issue_assessment", args, error=msg)
+            _raise_command(msg)
+        primary = args.get("primary")
+        if primary not in _PRIMARY_TYPES:
+            msg = f"revise_issue_assessment 'primary' must be one of {_PRIMARY_TYPES}; got {primary!r}."
+            _audit(bindings, "revise_issue_assessment", args, error=msg)
+            _raise_command(msg)
+        rationale = args.get("rationale")
+        evidence = args.get("evidence")
+        if not isinstance(rationale, str) or not rationale.strip():
+            _raise_command("revise_issue_assessment requires a one-sentence 'rationale'.")
+        if not isinstance(evidence, str) or not evidence.strip():
+            _raise_command(
+                "revise_issue_assessment requires 'evidence': what you observed that contradicts the earlier label."
+            )
+        old = str(existing.classification)
+        if primary == old:
+            _audit(bindings, "revise_issue_assessment", args, result={"skipped": "unchanged"})
+            return f"no-op: issue #{_require_issue(bindings).number} is already classified as {old!r}."
+        number = _require_issue(bindings).number
+        try:
+            applied = _run_coro(
+                bindings.loop,
+                bindings.github.add_issue_labels(bindings.repo.full_name, number, [primary, "triaged"]),
+            )
+        except GitHubError as exc:
+            _audit(bindings, "revise_issue_assessment", args, error=str(exc))
+            _raise_command(f"GitHub rejected labels: {exc.status} {exc.message}")
+        if old in _PRIMARY_TYPES:
+            try:
+                _run_coro(
+                    bindings.loop,
+                    bindings.github.remove_issue_label(bindings.repo.full_name, number, old),
+                )
+            except GitHubError as exc:
+                # The correction still stands; a stale label is visible and fixable.
+                log.warning(
+                    "revise_issue_assessment could not remove the old label",
+                    extra={"issue": bindings.issue_key, "label": old, "status": exc.status},
+                )
+        bindings.db.set_issue_classification(bindings.issue_key, primary)
+        revision_id = bindings.db.record_assessment_revision(
+            bindings.issue_key, old_primary=old, new_primary=primary, evidence=evidence
+        )
+        _audit(
+            bindings,
+            "revise_issue_assessment",
+            args,
+            result={"old": old, "new": primary, "revision": revision_id, "labels": list(applied)},
+        )
+        return (
+            f"revised {old} → {primary} (revision {revision_id}); labels applied: {', '.join(applied)}. "
+            f"Next: {persona.classify_next_step(primary)}"
+        )
+
+    return host_tool(
+        name="revise_issue_assessment",
+        description=persona.host_tool_description("revise_issue_assessment"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "primary": {
+                    "type": "string",
+                    "enum": list(_PRIMARY_TYPES),
+                    "description": persona.host_tool_parameter_description("revise_issue_assessment", "primary"),
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("revise_issue_assessment", "rationale"),
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("revise_issue_assessment", "evidence"),
+                },
+            },
+            "required": ["primary", "rationale", "evidence"],
             "additionalProperties": False,
         },
         execute=_tool_execute(execute),
@@ -3267,7 +3539,11 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
     if Capability.COMMENT in caps:
         tools.append(_build_post_comment(bindings))
     if Capability.LABEL in caps:
-        tools += [_build_classify_issue(bindings), _build_set_issue_labels(bindings)]
+        tools += [
+            _build_classify_issue(bindings),
+            _build_revise_assessment(bindings),
+            _build_set_issue_labels(bindings),
+        ]
     if Capability.REVIEW_PR in caps:
         tools += [
             _build_fetch_pr(bindings),
@@ -3289,7 +3565,7 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
     if Capability.UPDATE_DEFAULT_BRANCH in caps and Capability.MOVE_RELEASE_TAG in caps:
         tools.append(_build_release_retag(bindings))
     if Capability.EDIT_WORKTREE in caps:
-        tools += [_build_repro_record(bindings), _build_mark_unable(bindings)]
+        tools += [_build_repro_record(bindings), _build_run_reproduction(bindings), _build_mark_unable(bindings)]
     return tuple(tools)
 
 

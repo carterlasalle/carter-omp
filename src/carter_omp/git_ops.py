@@ -758,10 +758,14 @@ class DirtyState:
     uncommitted: int
     unpushed: int
     summary: str
+    # The probe could not read the worktree (wiped, permissions, damaged git).
+    # Unknown must behave like dirty: treating it as clean let a run publish
+    # from a state nobody could inspect.
+    unknown: bool = False
 
     @property
     def is_dirty(self) -> bool:
-        return self.uncommitted > 0 or self.unpushed > 0
+        return self.unknown or self.uncommitted > 0 or self.unpushed > 0
 
 
 class HeadDriftError(GitCommandError):

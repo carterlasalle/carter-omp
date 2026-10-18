@@ -157,9 +157,11 @@ def test_repo_command_env_scrubs_secrets_and_uses_workspace_cache(
     finally:
         _stop_loop(loop, thread)
 
-    assert env["GITHUB_TOKEN"] == ""
-    assert env["GITHUB_WEBHOOK_SECRET"] == ""
-    assert env["CARTER_OMP_GH_PROXY_HMAC_KEY"] == ""
+    # The allowlist omits credentials entirely; absence is stronger than an
+    # empty value because a later-added secret cannot leak by omission.
+    assert "GITHUB_TOKEN" not in env
+    assert "GITHUB_WEBHOOK_SECRET" not in env
+    assert "CARTER_OMP_GH_PROXY_HMAC_KEY" not in env
     assert env["BUN_INSTALL_CACHE_DIR"] == str(bindings.workspace.root / ".omp-xdg" / "cache" / "bun-install")
     assert env["XDG_CACHE_HOME"] == str(bindings.workspace.root / ".omp-xdg" / "cache")
     assert env["TMPDIR"] == str(bindings.workspace.root / ".omp-tmp")
@@ -5521,3 +5523,99 @@ def test_similar_open_report_merges_a_rewording(db: Database) -> None:
     assert host_tools._similar_open_report(db, "octo/self", reworded) == 59
     # A different fault under the same prefix must not merge.
     assert host_tools._similar_open_report(db, "octo/self", "web search providers are all blocked") is None
+
+
+def test_repo_command_env_omits_model_and_mcp_credentials(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repository-executed code never sees provider or org-MCP credentials.
+
+    The allowlist (not a scrub list) is what makes this hold for credentials
+    added later — an unknown provider key cannot leak by omission.
+    """
+    for key, value in {
+        "OPENROUTER_API_KEY": "or-secret",
+        "ANTHROPIC_API_KEY": "anthropic-secret",
+        "SENTRY_ACCESS_TOKEN": "sentry-secret",
+        "BRAVE_API_KEY": "brave-secret",
+        "GITHUB_TOKEN": "gh-secret",
+        "CARTER_OMP_GH_PROXY_HMAC_KEY": "hmac-secret",
+        "SOME_FUTURE_PROVIDER_KEY": "future-secret",
+    }.items():
+        monkeypatch.setenv(key, value)
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
+    try:
+        env = host_tools._repo_command_env(bindings)
+    finally:
+        _stop_loop(loop, t)
+
+    for key in (
+        "OPENROUTER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "SENTRY_ACCESS_TOKEN",
+        "BRAVE_API_KEY",
+        "GITHUB_TOKEN",
+        "CARTER_OMP_GH_PROXY_HMAC_KEY",
+        "SOME_FUTURE_PROVIDER_KEY",
+    ):
+        assert key not in env, key
+    assert env["PATH"]
+
+
+def test_revise_issue_assessment_records_the_correction(db: Database, tmp_path: Path) -> None:
+    """wontfix → bug is a documented correction, not a silent re-label."""
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "DELETE":
+            return httpx.Response(200, json=[])
+        body = json.loads(request.content)
+        return httpx.Response(200, json=[{"name": n} for n in body["labels"]])
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    db.upsert_issue(key=bindings.issue_key, repo="octo/widget", number=42, state="opened")
+    db.set_issue_classification(bindings.issue_key, "wontfix")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "revise_issue_assessment")
+        result = tool.execute(
+            {
+                "primary": "bug",
+                "rationale": "the client silently drops the provider error instead of retrying",
+                "evidence": "reproduced a 502 then an unhandled KeyError in our response parser",
+            },
+            _ctx(),
+        )
+    finally:
+        _stop_loop(loop, t)
+
+    assert "revised wontfix" in _text(result)
+    assert "bug" in _text(result)
+    row = db.get_issue(bindings.issue_key)
+    assert row is not None and row.classification == "bug"
+    revisions = db.assessment_revisions(bindings.issue_key)
+    assert revisions and revisions[0]["old_primary"] == "wontfix" and revisions[0]["new_primary"] == "bug"
+    assert ("DELETE", "/repos/octo/widget/issues/42/labels/wontfix") in calls
+
+
+def test_run_reproduction_executes_and_records_real_output(db: Database, tmp_path: Path) -> None:
+    """The transcript comes from the process, not from the model."""
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
+    subprocess.run(["git", "init", "-q"], cwd=bindings.workspace.repo_dir, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "init"],
+        cwd=bindings.workspace.repo_dir,
+        check=True,
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "run_reproduction")
+        result = json.loads(_text(tool.execute({"command": "printf 'boom\\n'; exit 3", "title": "boom"}, _ctx())))
+    finally:
+        _stop_loop(loop, t)
+
+    assert result["exit_code"] == 3
+    assert result["timed_out"] is False
+    assert "boom" in result["output_tail"]
+    assert len(result["head_sha"]) == 40
+    transcript = bindings.workspace.root / result["path"]
+    assert "exit_code: 3" in transcript.read_text()

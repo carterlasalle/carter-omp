@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import grp
+import hashlib
 import json
 import logging
 import os
@@ -390,7 +391,11 @@ def _write_org_tools_overlay(skill_dirs: list[str]) -> Path | None:
         "mcp:\n"
         "  startupTimeoutMs: 30000\n"
     )
-    path = _ORG_MCP_DIR / "org-skills.yml"
+    # Content-addressed: two concurrent runs with different org skills must
+    # never share one mutable file (the old fixed name let run B overwrite the
+    # overlay run A had already passed to omp).
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
+    path = _ORG_MCP_DIR / f"org-skills-{digest}.yml"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.is_file() or path.read_text(encoding="utf-8") != body:
@@ -555,9 +560,14 @@ def _probe_workspace_dirty(workspace: Workspace, slot_uid: int | None) -> DirtyS
             slot_uid=slot_uid,
             safe_directory=workspace.repo_dir,
         )
-    except Exception as exc:  # noqa: BLE001 — best-effort post-turn probe
-        log.debug("workspace dirty probe failed", extra={"error": str(exc)})
-        return DirtyState(uncommitted=0, unpushed=0, summary="")
+    except Exception as exc:  # noqa: BLE001 — the probe must not raise into the turn
+        log.warning("workspace dirty probe failed; treating state as unknown", extra={"error": str(exc)})
+        return DirtyState(
+            uncommitted=0,
+            unpushed=0,
+            summary="workspace state unknown: git inspection failed; keep the workspace and report the failure",
+            unknown=True,
+        )
 
 
 # trace:v1 id=impl.worker-drive-turn work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
@@ -698,6 +708,17 @@ def _drive_turn(
                 "tools_called": sorted(tools_called),
             },
         )
+        # The model stopping is not the task being done. Preserve an actionable
+        # incomplete state instead of letting the queue mark this `done`
+        # (audit 2): the next human/dashboard view must show it unfinished.
+        inputs.db.mark_event(
+            inputs.delivery_id,
+            "failed",
+            error=(
+                f"incomplete: {task_kind} ended without a terminal action after "
+                f"{reminders_used} reminder(s); tools_called={sorted(tools_called)}"
+            ),
+        )
     if reminders_used and task_kind != "review_pr":
         final_dirty = _probe_workspace_dirty(inputs.workspace, inputs.slot_uid)
         if final_dirty.is_dirty:
@@ -709,7 +730,13 @@ def _drive_turn(
                     "reminders": reminders_used,
                     "uncommitted": final_dirty.uncommitted,
                     "unpushed": final_dirty.unpushed,
+                    "unknown": final_dirty.unknown,
                 },
+            )
+            inputs.db.mark_event(
+                inputs.delivery_id,
+                "failed",
+                error=f"incomplete: workspace still dirty after reminders ({final_dirty.summary or 'uncommitted or unpushed work'})",
             )
     return turn
 
@@ -1156,8 +1183,14 @@ def _run_rpc_blocking(
         },
     )
     model_override, thinking_override = _resolve_pragma_overrides(directive, settings)
-    chosen_model = model_override or (
-        settings.pick_release_model() if task_kind == "handle_release_ci" else settings.pick_model()
+    # A resumed session keeps the model it started under: `--continue` replays
+    # context that model produced, and a random pool pick would switch
+    # interpreters mid-conversation without anyone deciding to (audit 3).
+    pinned_model = bindings.db.latest_event_model(bindings.issue_key) if resuming else None
+    chosen_model = (
+        model_override
+        or pinned_model
+        or (settings.pick_release_model() if task_kind == "handle_release_ci" else settings.pick_model())
     )
     chosen_thinking = thinking_override or settings.thinking_level
     log.info(

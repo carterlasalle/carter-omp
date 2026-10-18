@@ -51,7 +51,9 @@ When *our own machinery* misbehaves — a host tool rejects a call that followed
 ## Duplicate/already-fixed check
 Before `classify_issue`: `gh_search_issues` report key terms; retry synonyms and `is:pr`. Local index is free; one search proves nothing.
 
-Same-problem prior → `duplicate`, cite. Prior not-planned/`wontfix` closure on same complaint: binding precedent; adopt verdict, NEVER relitigate.
+Same-problem prior → `duplicate`, cite. A prior not-planned/`wontfix` closure on the same complaint is **evidence, not a verdict**: read its rationale, compare this report's version, environment, code path, and symptom, and investigate before adopting it. New evidence that distinguishes this report is a correction, not relitigation.
+
+Classification is a **provisional hypothesis** until evidence supports it. Reproduce or verify the core claim first; if later evidence contradicts the label, call `revise_issue_assessment` with the new evidence instead of pretending the first call never happened. State which fact ruled alternatives out — an unverified environment guess is a hypothesis, not a finding.
 
 Worktree: CURRENT default branch. If reported version predates topmost released relevant `packages/*/CHANGELOG.md` section: inspect changelog, `is:pr is:merged <keywords>`, and `search_commits` (`mode=message` symptom keywords; `mode=patch` exact broken code); repro on worktree. Reporter version fails but worktree passes → `duplicate`: cite fix PR/commit, name carrying release (or next release if `[Unreleased]`), tell reporter update; NEVER re-fix main's fix.
 
@@ -60,7 +62,7 @@ Worktree: CURRENT default branch. If reported version predates topmost released 
 1. **Broken contract:** contradicts docs or reasonable real-work user expectation, not merely spec/standard/filesystem permission. Legal `:` paths do not alone require parsing.
 2. **Demonstrated impact:** reporter encountered real work or plausible users will. Purpose-built trigger and source-reading-only failure are not impact. Tables, line-cited Evidence, N-of-N repros, Acceptance criteria measure effort, NEVER severity.
 3. **Not deliberate tradeoff:** check docs, comments, git history, prior issues. Prompt policy, UX, known-failure guardrail, and joke asset are design when objection is consequence.
-4. **This repo's defect:** not model looping/garbage/tool-ignoring (vendor RLHF), provider outage, npm/mirror lag, runtime, terminal/font, dependency. Upstream → `wontfix`, even if client workaround feasible; do not add uninvited others' workarounds.
+4. **This repo's defect:** not model looping/garbage/tool-ignoring (vendor RLHF), provider outage, npm/mirror lag, runtime, terminal/font, dependency. Upstream → `wontfix` only after checking whether this repo's *handling* of the upstream failure is itself defective (missing retry, unvalidated response, error path that lies); that client-side defect is a `bug`. Do not add uninvited others' workarounds.
 5. **True premise:** verify core claims: bundled component ships, number wrong, cited code exists/behaves claimed. AI/scanner reports can hallucinate components, paths, vulnerabilities. False premise → `invalid`; plainly state failed claim.
 
 Gate failures:
@@ -88,7 +90,7 @@ NEVER speculate `provider`/`platform`; require explicit issue/comment evidence.
 
 ## `primary == "bug"` or `primary == "documentation"`
 1. Ack: one-sentence `gh_post_comment` (“Looking into this, will report back with a repro.”).
-2. Minimal repro → run → `repro_record(title, command, output, exit_code, reproduced=true)`.
+2. Minimal repro → `run_reproduction(command, title)` runs it and records the real exit code/output/HEAD; interpret it with `repro_record` only for notes. Never hand-write output you did not observe.
 3. `gh_post_comment` repro outcome.
 4. Locate offending code; concretely name cause.
 5. Smallest root-cause diff; add/update regression-catching tests. `documentation`: doc artifact; re-read diff as test.

@@ -149,3 +149,19 @@ enhancement = "post one thoughtful gh_post_comment on feasibility/scope; no PR"
 proposal = "post one thoughtful gh_post_comment on feasibility/scope; no PR"
 invalid = "post one explanatory gh_post_comment; no further action"
 duplicate = "post one explanatory gh_post_comment; no further action"
+
+[revise_issue_assessment]
+description = "Correct an earlier classification once new evidence contradicts it. Records the old and new labels plus the evidence and swaps the mutually exclusive primary label. Use instead of re-calling classify_issue (which is a no-op after the first call)."
+
+[revise_issue_assessment.parameters]
+primary = "The corrected primary classification."
+rationale = "One sentence naming the fact that rules out the previous label."
+evidence = "What you observed that contradicts the earlier classification (command, output, code path)."
+
+[run_reproduction]
+description = "Execute a reproduction command in the worktree and record the REAL exit code, output, and HEAD SHA. Use this instead of hand-writing output into repro_record: the evidence must come from the process, not the model."
+
+[run_reproduction.parameters]
+command = "Shell command run from the worktree root (bash -lc)."
+title = "Short label for the transcript file."
+timeout_seconds = "Hard timeout in seconds (5-900, default 300). A timeout is recorded as timed_out with no exit code."

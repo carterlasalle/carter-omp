@@ -982,3 +982,52 @@ def test_self_report_fingerprint_round_trip(db: Database) -> None:
     db.record_self_report("abc", issue_number=41, url="https://x/41", title="t2")
     assert db.self_report_fingerprint("abc") == 41
     assert db.self_report_fingerprint("other") is None
+
+
+def test_solution_retrieval_requires_shared_distinctive_terms(db: Database) -> None:
+    """One common word must not pull an unrelated note into the prompt."""
+    db.record_solution_entry(
+        trigger_desc="gate: gh_push_branch rejects workflow files",
+        body="Grant the App Workflows: Read and write and approve the installation.",
+    )
+
+    hit = db.match_solution_entry("workflow files rejected by the push gate")
+    assert hit is not None and "Workflows" in str(hit["body"])
+
+    assert db.match_solution_entry("workflow timeout in the dashboard") is None
+    assert db.match_solution_entry("something else entirely") is None
+
+
+def test_unknown_dirty_state_is_never_treated_as_clean() -> None:
+    from carter_omp.git_ops import DirtyState
+
+    assert DirtyState(uncommitted=0, unpushed=0, summary="", unknown=True).is_dirty
+    assert not DirtyState(uncommitted=0, unpushed=0, summary="").is_dirty
+
+
+def test_latest_event_model_returns_the_newest_recorded_model(db: Database) -> None:
+    db.record_event(delivery_id="a", event_type="issues", repo="octo/widget", issue_key="octo/widget#1", payload={})
+    db.set_event_model("a", "model/one")
+    db.record_event(delivery_id="b", event_type="issues", repo="octo/widget", issue_key="octo/widget#1", payload={})
+    db.set_event_model("b", "model/two")
+
+    assert db.latest_event_model("octo/widget#1") == "model/two"
+    assert db.latest_event_model("octo/widget#9") is None
+
+
+def test_tool_call_audit_redacts_secret_fields_and_prunes(db: Database) -> None:
+    """The audit trail keeps arguments but never credentials, and ages out."""
+    db.log_tool_call(
+        issue_key="octo/widget#1",
+        tool="gh_post_comment",
+        args={"api_key": "sk-live-secret", "body": "keep me"},
+        result={"token": "ghp_secret", "value": "ok"},
+    )
+    with db._lock:  # noqa: SLF001
+        row = db._conn.execute("SELECT args_json, result_json FROM tool_calls").fetchone()  # noqa: SLF001
+    assert "sk-live-secret" not in row["args_json"]
+    assert "ghp_secret" not in row["result_json"]
+    assert "keep me" in row["args_json"]
+
+    assert db.prune_tool_calls(older_than_days=0) == 1
+    assert db.recent_tool_errors("octo/widget#1") == []

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Generator, Iterable, Mapping
@@ -13,6 +14,110 @@ from pathlib import Path
 from typing import Any, Literal
 
 from carter_omp.github_client import IssueIndexEntry
+
+# Solution-memory retrieval: bm25 alone lets one common word win. A hit must
+# share at least this many distinctive terms with the incoming request,
+# otherwise no memory is injected at all (audit finding D).
+_SOLUTION_MIN_SHARED_TERMS = 2
+_SOLUTION_MIN_TERM_LENGTH = 4
+_SOLUTION_STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "that",
+        "this",
+        "from",
+        "into",
+        "when",
+        "then",
+        "than",
+        "does",
+        "doesn",
+        "cannot",
+        "not",
+        "but",
+        "are",
+        "was",
+        "were",
+        "has",
+        "have",
+        "had",
+        "its",
+        "you",
+        "your",
+        "our",
+        "all",
+        "any",
+        "may",
+        "can",
+        "will",
+        "would",
+        "should",
+        "could",
+        "one",
+        "same",
+        "after",
+        "before",
+        "over",
+        "under",
+        "again",
+        "still",
+        "only",
+        "also",
+        "more",
+        "most",
+        "some",
+        "such",
+        "very",
+        "just",
+        "like",
+        "make",
+        "made",
+        "gets",
+        "got",
+        "without",
+        "because",
+        "which",
+        "where",
+        "what",
+        "issue",
+        "error",
+        "fails",
+    }
+)
+
+
+def _retrieval_terms(text: str) -> set[str]:
+    """Distinctive lowercase words used to judge retrieval relevance."""
+    return {
+        token
+        for token in re.findall(r"[a-z0-9_]+", text.lower())
+        if len(token) >= _SOLUTION_MIN_TERM_LENGTH and token not in _SOLUTION_STOPWORDS
+    }
+
+
+# Tool-call audit: arguments and results are stored for replay, but a model can
+# accidentally pass a credential (or a tool can echo one). Redact by field name
+# and prune old rows so the audit trail is useful without becoming a secret
+# store (audit 9).
+_SECRET_FIELD_RE = re.compile(
+    r"(token|secret|password|passwd|api[_-]?key|private[_-]?key|credential|authorization|dsn)",
+    re.IGNORECASE,
+)
+
+
+def _redact_audit_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: "[redacted]" if _SECRET_FIELD_RE.search(str(key)) else _redact_audit_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_audit_value(item) for item in value]
+    return value
+
 
 EventState = Literal["queued", "running", "done", "failed", "skipped"]
 INACTIVE_EVENT_STATES: tuple[EventState, ...] = ("done", "failed", "skipped")
@@ -245,6 +350,27 @@ CREATE TABLE IF NOT EXISTS self_reports (
 -- incoming directive); `body` is injected verbatim. `hits`/`last_hit_at`
 -- record reuse; `stale` marks entries a human pruned (kept for audit, never
 -- retrieved).
+-- The PR head a review was based on. Submitting a review against a head that
+-- has since moved would anchor findings to code nobody reviewed (audit 8).
+CREATE TABLE IF NOT EXISTS review_heads (
+  issue_key  TEXT PRIMARY KEY,
+  head_sha   TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- Classification corrections: the label an issue carried, the label it now
+-- carries, and the evidence that forced the change. Append-only so a
+-- corrected verdict never erases the original one.
+CREATE TABLE IF NOT EXISTS assessment_revisions (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  issue_key   TEXT NOT NULL,
+  old_primary TEXT NOT NULL,
+  new_primary TEXT NOT NULL,
+  evidence    TEXT NOT NULL,
+  ts          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS assessment_revisions_issue ON assessment_revisions(issue_key, ts);
+
 CREATE TABLE IF NOT EXISTS solution_entries (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   trigger_desc TEXT NOT NULL,
@@ -1356,8 +1482,10 @@ class Database:
                 (
                     issue_key,
                     tool,
-                    json.dumps(args, separators=(",", ":"), default=str),
-                    json.dumps(result, separators=(",", ":"), default=str) if result is not None else None,
+                    json.dumps(_redact_audit_value(args), separators=(",", ":"), default=str),
+                    json.dumps(_redact_audit_value(result), separators=(",", ":"), default=str)
+                    if result is not None
+                    else None,
                     error,
                     _utcnow(),
                 ),
@@ -1538,7 +1666,8 @@ class Database:
         from datetime import UTC, datetime
 
         terms = [t for t in query.split() if t.strip()]
-        if not terms:
+        query_terms = _retrieval_terms(query)
+        if not terms or len(query_terms) < _SOLUTION_MIN_SHARED_TERMS:
             return None
         quoted = " OR ".join(f'"{t.strip().replace(chr(34), "")}"' for t in terms[:12])
         with self._lock:
@@ -1551,12 +1680,78 @@ class Database:
             ).fetchone()
             if row is None:
                 return None
+            entry_terms = _retrieval_terms(f"{row[1]} {row[2]}")
+            if len(query_terms & entry_terms) < _SOLUTION_MIN_SHARED_TERMS:
+                # A single common word (or an FTS OR match on one) is not
+                # evidence that this note applies. Inject nothing.
+                return None
             self._conn.execute(
                 "UPDATE solution_entries SET hits=hits+1, last_hit_at=? WHERE id=?",
                 (datetime.now(UTC).isoformat(), int(row[0])),
             )
             self._conn.commit()
             return {"id": int(row[0]), "trigger_desc": str(row[1]), "body": str(row[2])}
+
+    # trace:v1 id=impl.db-set-review-head work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def set_review_head(self, issue_key: str, head_sha: str) -> None:
+        """Record the PR head the review's evidence was gathered against."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO review_heads (issue_key, head_sha, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(issue_key) DO UPDATE SET head_sha=excluded.head_sha, updated_at=excluded.updated_at",
+                (issue_key, head_sha, _utcnow()),
+            )
+
+    # trace:v1 id=impl.db-review-head work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def review_head(self, issue_key: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute("SELECT head_sha FROM review_heads WHERE issue_key = ?", (issue_key,)).fetchone()
+        return str(row["head_sha"]) if row is not None else None
+
+    # trace:v1 id=impl.db-prune-tool-calls work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def prune_tool_calls(self, *, older_than_days: int = 30) -> int:
+        """Delete audit rows older than the retention window."""
+        cutoff = iso_seconds_ago(max(0, older_than_days) * 86400)
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM tool_calls WHERE ts < ?", (cutoff,))
+            return int(cur.rowcount)
+
+    # trace:v1 id=impl.db-latest-event-model work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def latest_event_model(self, issue_key: str) -> str | None:
+        """The model the most recent event for this issue ran with, if recorded.
+
+        Resumed sessions reuse it so a `--continue` never switches models by
+        random pool selection (audit finding 3).
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT model FROM events WHERE issue_key = ? AND model IS NOT NULL AND model != '' "
+                "ORDER BY received_at DESC LIMIT 1",
+                (issue_key,),
+            ).fetchone()
+        return str(row["model"]) if row is not None else None
+
+    # trace:v1 id=impl.db-record-assessment-revision work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def record_assessment_revision(self, issue_key: str, *, old_primary: str, new_primary: str, evidence: str) -> int:
+        """Append a classification correction with the evidence behind it."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO assessment_revisions (issue_key, old_primary, new_primary, evidence, ts) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (issue_key, old_primary, new_primary, evidence, _utcnow()),
+            )
+            return int(cur.lastrowid or 0)
+
+    # trace:v1 id=impl.db-assessment-revisions work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def assessment_revisions(self, issue_key: str) -> list[dict[str, Any]]:
+        """Every recorded correction for this issue, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT old_primary, new_primary, evidence, ts FROM assessment_revisions "
+                "WHERE issue_key = ? ORDER BY id",
+                (issue_key,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # ---- PR review comment staging ----
     def stage_review_comment(
