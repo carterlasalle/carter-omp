@@ -1051,6 +1051,31 @@ async def test_git_push_workspace_key_mismatch(proxy_settings: Settings) -> None
     assert "workspace_key" in resp.text
 
 
+async def test_git_push_rejects_malformed_workspace_key(proxy_settings: Settings) -> None:
+    app = _build_app(proxy_settings)
+    for bad_key in ("octo__widget__../x", "octo__widget__~root", "octo__widget__a b", "nodelim"):
+        body = (
+            b'{"repo":"octo/widget","workspace_key":"'
+            + bad_key.encode()
+            + b'","branch":"carter-omp/abc/x","expected_head":"'
+            + (b"0" * 40)
+            + b'"}'
+        )
+        async with await _async_client(app) as client:
+            resp = await client.post(
+                "/gh/v1/git/push",
+                content=body,
+                headers={
+                    **_signed(
+                        "POST", "/gh/v1/git/push", body, run_token=_run_token(issue=None, branch="carter-omp/abc/x")
+                    ),
+                    "Content-Type": "application/json",
+                },
+            )
+        assert resp.status_code == 400, (bad_key, resp.text)
+        assert "workspace_key" in resp.text
+
+
 async def test_git_push_release_requires_hmac(proxy_settings: Settings) -> None:
     app = _build_app(proxy_settings)
     body = json.dumps(
