@@ -5619,3 +5619,50 @@ def test_run_reproduction_executes_and_records_real_output(db: Database, tmp_pat
     assert len(result["head_sha"]) == 40
     transcript = bindings.workspace.root / result["path"]
     assert "exit_code: 3" in transcript.read_text()
+
+
+def test_post_comment_idempotent_dedupes_a_retry(db: Database, tmp_path: Path) -> None:
+    """A retried comment is evidence on the ledger, not a duplicate post."""
+    posts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        body = json.loads(request.content)["body"]
+        posts.append(body)
+        return httpx.Response(
+            201,
+            json={"id": 7, "body": body, "user": {"login": "bot"}, "created_at": "", "html_url": ""},
+        )
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    try:
+        first = host_tools._post_comment_idempotent(bindings, 42, "hello", logical_prefix="comment")
+        second = host_tools._post_comment_idempotent(bindings, 42, "hello", logical_prefix="comment")
+    finally:
+        _stop_loop(loop, t)
+
+    assert first == (7, False)
+    assert second == (7, True)
+    assert posts == ["hello"]
+
+
+def test_require_verification_receipt_blocks_missing_evidence(db: Database, tmp_path: Path) -> None:
+    from carter_omp.verification import VerificationPolicy
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
+    try:
+        policy = VerificationPolicy(fast=("ruff",), require_fast=True)
+        with pytest.raises(RpcCommandError):
+            host_tools._require_verification_receipt(bindings, policy, stage="open PR")
+        head, base = host_tools._head_and_base(bindings)
+        db.record_verification_receipt(
+            issue_key=bindings.issue_key,
+            head_sha=head,
+            base_sha=base,
+            source="policy",
+            phases=[{"phase": "fast", "command": "ruff", "exit_code": 0}],
+        )
+        host_tools._require_verification_receipt(bindings, policy, stage="open PR")
+    finally:
+        _stop_loop(loop, t)

@@ -6,13 +6,13 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from carter_omp import github_events, issue_index
@@ -922,6 +922,34 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         return HTMLResponse(render_index(token))
 
     # trace:v1 id=impl.server-api-status work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @app.get("/api/quality")
+    async def api_quality(request: Request) -> dict[str, Any]:
+        """Outcome-backed quality metrics (resolutions, cost per fix, rework)."""
+        db: Database = request.app.state.bag["db"]
+        return await asyncio.to_thread(db.quality_summary)
+
+    @app.get("/api/runs/{delivery_id}/phases")
+    async def api_run_phases(delivery_id: str, request: Request) -> dict[str, Any]:
+        db: Database = request.app.state.bag["db"]
+        phases = await asyncio.to_thread(db.run_phases, delivery_id)
+        return {"delivery": delivery_id, "phases": phases}
+
+    @app.get("/api/runs/{delivery_id}/events")
+    async def api_run_events(delivery_id: str, request: Request) -> StreamingResponse:
+        """Server-sent phase events for a live run replay."""
+        db: Database = request.app.state.bag["db"]
+
+        async def stream() -> AsyncIterator[str]:
+            seen = 0
+            while not await request.is_disconnected():
+                phases = await asyncio.to_thread(db.run_phases, delivery_id)
+                for phase in phases[seen:]:
+                    yield f"data: {json.dumps(phase, separators=(',', ':'))}\n\n"
+                seen = len(phases)
+                await asyncio.sleep(1.0)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
     @app.get("/api/status")
     async def api_status(request: Request) -> dict[str, Any]:
         bag = request.app.state.bag

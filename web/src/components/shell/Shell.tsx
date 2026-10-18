@@ -3,6 +3,7 @@ import { createEffect, createSignal, type JSX, Show } from "solid-js";
 import { activeView } from "../../view";
 import { Activity } from "../views/Activity";
 import { Operations } from "../views/Operations";
+import { Quality } from "../views/Quality";
 import { System } from "../views/System";
 import { Triage } from "../views/Triage";
 import { Rail } from "./Rail";
@@ -68,6 +69,9 @@ export function Shell(): JSX.Element {
             </div>
             <div class="rmp-view rmp-view-enter" style={{ display: viewDisplay("system") }}>
               <System />
+            </div>
+            <div class="rmp-view rmp-view-enter" style={{ display: viewDisplay("quality") }}>
+              <Quality />
             </div>
           </div>
         </main>

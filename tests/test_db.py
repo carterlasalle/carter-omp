@@ -1031,3 +1031,47 @@ def test_tool_call_audit_redacts_secret_fields_and_prunes(db: Database) -> None:
 
     assert db.prune_tool_calls(older_than_days=0) == 1
     assert db.recent_tool_errors("octo/widget#1") == []
+
+
+def test_quality_summary_counts_resolutions_cost_and_rework(db: Database) -> None:
+    db.record_event(delivery_id="d1", event_type="issues", repo="o/w", issue_key="o/w#1", payload={})
+    db.set_event_telemetry(
+        "d1",
+        fallback_model="",
+        duration_ms=1000,
+        cost_usd=2.0,
+        cache_cost_usd=0.0,
+        miss_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+    )
+    db.record_outcome(delivery_id="d1", issue_key="o/w#1", outcome="resolved")
+    db.record_outcome(delivery_id="d2", issue_key="o/w#2", outcome="incomplete")
+    db.record_outcome(delivery_id="d3", issue_key="o/w#1", outcome="resolved", rework_of="d1")
+
+    summary = db.quality_summary()
+
+    assert summary["resolved"] == 2
+    assert summary["decided"] == 3
+    assert summary["cost_usd"] == 2.0
+    assert summary["cost_per_resolution_usd"] == 1.0
+    assert summary["rework_rate"] == 0.5
+
+
+def test_run_phases_and_receipt_round_trip(db: Database) -> None:
+    db.record_run_phase(delivery_id="d1", issue_key="o/w#1", phase="classification", detail="bug")
+    db.record_run_phase(delivery_id="d1", issue_key="o/w#1", phase="reproduction", detail="exit=1")
+    assert [p["phase"] for p in db.run_phases("d1")] == ["classification", "reproduction"]
+
+    db.record_verification_receipt(
+        issue_key="o/w#1",
+        head_sha="a" * 40,
+        base_sha="b" * 40,
+        source="policy",
+        phases=[{"phase": "fast", "command": "ruff", "exit_code": 0}],
+    )
+    receipt = db.latest_verification_receipt("o/w#1", "a" * 40)
+    assert receipt is not None
+    assert receipt["phases"][0]["exit_code"] == 0
+    assert db.latest_verification_receipt("o/w#1", "c" * 40) is None

@@ -23,7 +23,7 @@ from typing import Any, NoReturn, Protocol
 
 from omp_rpc import HostTool, HostToolContext, RpcCommandError, host_tool
 
-from carter_omp import persona
+from carter_omp import persona, verification
 from carter_omp.capabilities import Capability
 from carter_omp.config import Settings
 from carter_omp.db import Database, IssueState, issue_key
@@ -342,6 +342,8 @@ class ToolBindings:
     author_name: str
     author_email: str
     settings: Settings | None = None
+    # Delivery this run belongs to; used for the phase timeline/replay.
+    delivery_id: str = ""
     # Number of the GitHub thread the inbound webhook arrived on. For an
     # issue comment this is the issue; for a PR conversation or review
     # comment it's the PR. `gh_post_comment` defaults its target here so
@@ -460,6 +462,15 @@ def _audit(
         result=result if isinstance(result, Mapping) else ({"value": result} if result is not None else None),
         error=error,
     )
+
+
+# trace:v1 id=impl.host-tools-run-phase work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _phase(bindings: ToolBindings, phase: str, detail: str = "") -> None:
+    """Record a replay milestone; no-op outside a delivery-scoped run."""
+    if bindings.delivery_id:
+        bindings.db.record_run_phase(
+            delivery_id=bindings.delivery_id, issue_key=bindings.issue_key, phase=phase, detail=detail
+        )
 
 
 # trace:v1 id=impl.host-tools-raise-command work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
@@ -677,6 +688,150 @@ def ensure_workspace_dependencies(bindings: ToolBindings) -> None:
         "dependency bootstrap ok",
         extra={"issue": bindings.issue_key, "command": " ".join(command)},
     )
+
+
+_POLICY_PHASE_TIMEOUTS: dict[str, float] = {"fast": 600.0, "targeted": 1800.0, "full": 3600.0}
+
+
+# trace:v1 id=impl.host-tools-load-verification-policy work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _load_verification_policy(bindings: ToolBindings) -> verification.VerificationPolicy | None:
+    """Read `.carter-omp.yml` from the BASE branch, never from the PR head.
+
+    A pull request must not be able to edit the gates that judge it, so the
+    policy is read through `git show origin/<base>:...` (audit 2).
+    """
+    base = bindings.repo.default_branch
+    proc = _run_repo_command(bindings, ["git", "show", f"origin/{base}:{verification.POLICY_PATH}"])
+    if proc.returncode != 0:
+        return None
+    try:
+        return verification.parse_policy(proc.stdout)
+    except verification.PolicyError as exc:
+        _raise_command(f"refusing to publish: {verification.POLICY_PATH} on `{base}` is invalid: {exc}")
+
+
+# trace:v1 id=impl.host-tools-head-base work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _head_and_base(bindings: ToolBindings) -> tuple[str, str]:
+    head = _run_repo_command(bindings, ["git", "rev-parse", "HEAD"]).stdout.strip()
+    base = _run_repo_command(bindings, ["git", "rev-parse", f"origin/{bindings.repo.default_branch}"]).stdout.strip()
+    return head, base
+
+
+# trace:v1 id=impl.host-tools-policy-phases work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _run_policy_phases(
+    bindings: ToolBindings,
+    policy: verification.VerificationPolicy,
+    *,
+    stage: str,
+    include_tests: bool,
+) -> list[dict[str, Any]]:
+    names = ["fast", "targeted", "full"] if include_tests else ["fast"]
+    phases: list[dict[str, Any]] = []
+    for name in names:
+        commands = policy.phase(name)
+        if not commands:
+            if policy.required(name):
+                _raise_command(
+                    f"refusing to {stage}: verification phase '{name}' is required by "
+                    f"{verification.POLICY_PATH} but defines no commands."
+                )
+            continue
+        if Capability.SKIP_CHECKS in bindings.capabilities:
+            phases.append({"phase": name, "skipped": "capability:skip_checks", "commands": list(commands)})
+            continue
+        for command in commands:
+            try:
+                proc = _run_repo_command(bindings, ["bash", "-lc", command], timeout=_POLICY_PHASE_TIMEOUTS[name])
+            except subprocess.TimeoutExpired as exc:
+                output = _format_process_output(exc.stdout, exc.stderr)
+                phases.append({"phase": name, "command": command, "timed_out": True})
+                _raise_command(
+                    f"refusing to {stage}: `{command}` timed out before {stage}.\n{output}\n\n"
+                    "Investigate the hang and retry."
+                )
+            phases.append({"phase": name, "command": command, "exit_code": proc.returncode})
+            if proc.returncode != 0:
+                output = _format_process_output(proc.stdout, proc.stderr)
+                _raise_command(
+                    f"refusing to {stage}: `{command}` failed before {stage} (exit {proc.returncode}).\n"
+                    f"{output}\n\nFix the failure, re-run the gate, and retry."
+                )
+    return phases
+
+
+# trace:v1 id=impl.host-tools-record-receipt work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _record_receipt(bindings: ToolBindings, *, source: str, phases: list[dict[str, Any]]) -> None:
+    head, base = _head_and_base(bindings)
+    bindings.db.record_verification_receipt(
+        issue_key=bindings.issue_key, head_sha=head, base_sha=base, source=source, phases=phases
+    )
+
+
+# trace:v1 id=impl.host-tools-pre-publish-gates work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _run_pre_publish_gates(
+    bindings: ToolBindings, args: Mapping[str, Any], *, tool_name: str, stage: str, include_tests: bool
+) -> None:
+    """Run the repository's own gates, falling back to the bun trio.
+
+    A policy on the base branch replaces the bun-only checks; without one the
+    previous behavior is unchanged.
+    """
+    policy = _load_verification_policy(bindings)
+    if policy is None:
+        _run_pre_publish_bun_fix(bindings, args, tool_name=tool_name, stage=stage)
+        _run_pre_publish_bun_check(bindings, args, tool_name=tool_name, stage=stage)
+        if include_tests:
+            _run_pre_publish_bun_test(bindings, args, tool_name=tool_name, stage=stage)
+        _record_receipt(bindings, source="bun", phases=[{"phase": "bun", "commands": ["bun run fix", "bun check"]}])
+        _phase(bindings, "verification", "bun gates")
+        return
+    phases = _run_policy_phases(bindings, policy, stage=stage, include_tests=include_tests)
+    _record_receipt(bindings, source="policy", phases=phases)
+    _phase(bindings, "verification", f"policy phases={len(phases)}")
+
+
+# trace:v1 id=impl.host-tools-require-receipt work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _require_verification_receipt(
+    bindings: ToolBindings, policy: verification.VerificationPolicy, *, stage: str
+) -> None:
+    """Publication gate: the current HEAD must carry the required evidence."""
+    head, _ = _head_and_base(bindings)
+    receipt = bindings.db.latest_verification_receipt(bindings.issue_key, head)
+    if receipt is None:
+        _raise_command(f"refusing to {stage}: no verification receipt for HEAD {head[:12]}; run the gates first.")
+    phases = receipt.get("phases") or []
+    for name in ("fast", "targeted", "full"):
+        if not policy.required(name):
+            continue
+        entries = [p for p in phases if p.get("phase") == name]
+        if not entries or any(p.get("skipped") or p.get("timed_out") or p.get("exit_code") != 0 for p in entries):
+            _raise_command(
+                f"refusing to {stage}: required verification phase '{name}' is missing, skipped, or failed "
+                f"for HEAD {head[:12]}."
+            )
+
+
+# trace:v1 id=impl.host-tools-receipt-block work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _receipt_block(bindings: ToolBindings) -> str:
+    head, _ = _head_and_base(bindings)
+    receipt = bindings.db.latest_verification_receipt(bindings.issue_key, head)
+    if receipt is None:
+        return ""
+    lines = [
+        "",
+        "## Verification receipt",
+        f"- head: `{receipt['head_sha']}`",
+        f"- base: `{receipt['base_sha']}`",
+        f"- source: {receipt['source']}",
+    ]
+    for phase in receipt.get("phases") or []:
+        if phase.get("skipped"):
+            lines.append(f"- {phase['phase']}: skipped ({phase['skipped']})")
+        elif "command" in phase:
+            lines.append(f"- {phase['phase']}: `{phase['command']}` → {phase.get('exit_code', 'timeout')}")
+        else:
+            lines.append(f"- {phase['phase']}: {', '.join(phase.get('commands') or [])}")
+    return "\n".join(lines)
 
 
 def _run_pre_publish_bun_fix(
@@ -1312,6 +1467,49 @@ def _build_record_solution(bindings: ToolBindings) -> HostTool[Any, Any]:
     )
 
 
+# trace:v1 id=impl.host-tools-post-comment-once work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _post_comment_idempotent(
+    bindings: ToolBindings, number: int, body: str, *, logical_prefix: str
+) -> tuple[int, bool]:
+    """Post a comment at most once per (issue, logical action).
+
+    Returns `(comment_id, deduped)`. The ledger row is written before the API
+    call; a retry after a partial failure reconciles against the thread's
+    actual comments by body before posting again (audit 1).
+    """
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+    logical_id = f"{logical_prefix}:{digest}"
+    scope = bindings.issue_key
+    prior = bindings.db.side_effect(scope, logical_id)
+    if prior is not None and prior["state"] == "done":
+        return int(prior["remote_id"] or 0), True
+    if prior is not None:
+        # A previous attempt may have landed before the ledger recorded it.
+        try:
+            existing = _run_coro(
+                bindings.loop,
+                bindings.github.list_comments(bindings.repo.full_name, number),
+            )
+        except GitHubError:
+            existing = []
+        wanted = body.strip()
+        for comment in existing:
+            if comment.body.strip() == wanted:
+                bindings.db.finish_side_effect(scope, logical_id, str(comment.id))
+                return comment.id, True
+    bindings.db.begin_side_effect(scope, logical_id, "comment", f"{bindings.repo.full_name}#{number}")
+    try:
+        comment = _run_coro(
+            bindings.loop,
+            bindings.github.post_comment(bindings.repo.full_name, number, body),
+        )
+    except GitHubError as exc:
+        bindings.db.fail_side_effect(scope, logical_id, f"{exc.status} {exc.message}")
+        raise
+    bindings.db.finish_side_effect(scope, logical_id, str(comment.id))
+    return comment.id, False
+
+
 # ---------- gh_post_comment ----------
 # trace:v1 id=impl.host-tools-post-comment work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
@@ -1333,24 +1531,25 @@ def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
             body_to_post = f"{body.rstrip()}\n\n{persona.question_autoclose_suffix(schedule_close)}"
         body_to_post = f"{body_to_post.rstrip()}{_footer_suffix(bindings)}"
         try:
-            comment = _run_coro(
-                bindings.loop,
-                bindings.github.post_comment(bindings.repo.full_name, target_number, body_to_post),
+            comment_id, deduped = _post_comment_idempotent(
+                bindings, target_number, body_to_post, logical_prefix="comment"
             )
         except GitHubError as exc:
             _audit(bindings, "gh_post_comment", args, error=str(exc))
             _raise_command(f"GitHub rejected comment: {exc.status} {exc.message}")
-        audit_result: dict[str, Any] = {"comment_id": comment.id}
+        audit_result: dict[str, Any] = {"comment_id": comment_id}
+        if deduped:
+            audit_result["deduped"] = True
         if schedule_close is not None:
             scheduled_at = _schedule_autoclose(
                 bindings,
-                comment_id=comment.id,
+                comment_id=comment_id,
                 hours=schedule_close,
             )
             if scheduled_at is not None:
                 audit_result["scheduled_close_at"] = scheduled_at
         _audit(bindings, "gh_post_comment", args, result=audit_result)
-        return f"comment posted: id={comment.id}"
+        return f"comment already posted: id={comment_id}" if deduped else f"comment posted: id={comment_id}"
 
     return host_tool(
         name="gh_post_comment",
@@ -1959,10 +2158,10 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
         # The suite itself is gated at `gh_open_pr`, not here: a push is not
         # yet a PR, and running it on every intermediate push would cost an
         # hour each time.
-        _run_pre_publish_bun_fix(bindings, args, tool_name="gh_push_branch", stage="push")
-        _run_pre_publish_bun_check(bindings, args, tool_name="gh_push_branch", stage="push")
+        _run_pre_publish_gates(bindings, args, tool_name="gh_push_branch", stage="push", include_tests=False)
         head = _guarded_push_branch(bindings, args, "gh_push_branch", branch)
         suffix = " (pre-push checks skipped)" if skip else ""
+        _phase(bindings, "implementation", f"{branch}@{head[:12]}")
         return f"pushed {branch} at {head[:12]} as {bindings.author_name} <{bindings.author_email}>{suffix}"
 
     return host_tool(
@@ -2016,11 +2215,11 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
             )
         # Same footer as comments: which model, how long, what it cost.
         body = f"{body.rstrip()}{_footer_suffix(bindings)}"
-        _run_pre_publish_bun_fix(bindings, args, tool_name="gh_open_pr", stage="open PR")
-        _run_pre_publish_bun_check(bindings, args, tool_name="gh_open_pr", stage="open PR")
-        # Last and slowest: the suite runs against the tree that is actually
-        # published, after the formatter amend, so a red PR cannot be created.
-        _run_pre_publish_bun_test(bindings, args, tool_name="gh_open_pr", stage="open PR")
+        _run_pre_publish_gates(bindings, args, tool_name="gh_open_pr", stage="open PR", include_tests=True)
+        policy = _load_verification_policy(bindings)
+        if policy is not None:
+            _require_verification_receipt(bindings, policy, stage="open PR")
+            body = f"{body.rstrip()}\n{_receipt_block(bindings)}"
         # Make sure the branch is pushed (idempotent) using the same preflight as gh_push_branch.
         _guarded_push_branch(bindings, args, "gh_open_pr", bindings.workspace.branch)
         base = args.get("base") or bindings.repo.default_branch
@@ -2042,6 +2241,7 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
             _raise_command(f"GitHub rejected PR: {exc.status} {exc.message}")
         bindings.db.set_issue_pr(bindings.issue_key, pr.number)
         bindings.db.set_issue_state(bindings.issue_key, "opened")
+        _phase(bindings, "publication", f"PR #{pr.number}")
         # The run owns this PR thread now (review requests, replies, label
         # edits). The token was minted with the originating issue only, so
         # re-mint before anything tries to touch the PR.
@@ -2264,6 +2464,7 @@ def _build_run_reproduction(bindings: ToolBindings) -> HostTool[Any, Any]:
         }
         if _advance_needs_info(bindings, "reproducing"):
             result["cleared_needs_info"] = True
+        _phase(bindings, "reproduction", f"exit={exit_code}")
         _audit(bindings, "run_reproduction", args, result=result)
         return json.dumps(result, indent=2)
 
@@ -3117,16 +3318,18 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
 
             posted_inline = 0
             try:
-                _run_coro(
-                    bindings.loop,
-                    bindings.github.post_comment(bindings.repo.full_name, bindings.default_comment_number, body),
+                _post_comment_idempotent(
+                    bindings,
+                    bindings.default_comment_number,
+                    body,
+                    logical_prefix="review-summary",
                 )
                 for comment in staged:
-                    _run_coro(
-                        bindings.loop,
-                        bindings.github.post_comment(
-                            bindings.repo.full_name, bindings.default_comment_number, _note(comment)
-                        ),
+                    _post_comment_idempotent(
+                        bindings,
+                        bindings.default_comment_number,
+                        _note(comment),
+                        logical_prefix=f"review-note:{comment.id}",
                     )
                     posted_inline += 1
             except GitHubError as fexc:
@@ -3136,6 +3339,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                 )
 
             cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
+            _phase(bindings, "review", f"fallback comments={posted_inline}")
             _audit(
                 bindings,
                 "submit_pr_review",
@@ -3152,6 +3356,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                 f"review rejected ({exc.status}); posted summary + {posted_inline} inline comment(s) as issue comments"
             )
         cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
+        _phase(bindings, "review", f"comments={len(comments)}")
         _audit(
             bindings,
             "submit_pr_review",
@@ -3295,6 +3500,7 @@ def _build_revise_assessment(bindings: ToolBindings) -> HostTool[Any, Any]:
                     extra={"issue": bindings.issue_key, "label": old, "status": exc.status},
                 )
         bindings.db.set_issue_classification(bindings.issue_key, primary)
+        _phase(bindings, "classification", f"{old}->{primary}")
         revision_id = bindings.db.record_assessment_revision(
             bindings.issue_key, old_primary=old, new_primary=primary, evidence=evidence
         )
@@ -3458,6 +3664,7 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
             _raise_command(f"GitHub rejected labels: {exc.status} {exc.message}")
 
         bindings.db.set_issue_classification(bindings.issue_key, primary)
+        _phase(bindings, "classification", primary)
         _audit(
             bindings,
             "classify_issue",

@@ -350,6 +350,61 @@ CREATE TABLE IF NOT EXISTS self_reports (
 -- incoming directive); `body` is injected verbatim. `hits`/`last_hit_at`
 -- record reuse; `stale` marks entries a human pruned (kept for audit, never
 -- retrieved).
+-- Terminal outcome per delivery. "done" is a queue state; this is the
+-- quality view: resolved means a terminal action landed, incomplete means the
+-- agent stopped without one (audit 4).
+CREATE TABLE IF NOT EXISTS outcomes (
+  delivery_id TEXT PRIMARY KEY,
+  issue_key   TEXT NOT NULL,
+  outcome     TEXT NOT NULL
+    CHECK (outcome IN ('resolved','needs_input','incomplete','cancelled','infra_failed')),
+  verified_by TEXT NOT NULL DEFAULT '',
+  rework_of   TEXT,
+  recorded_at TEXT NOT NULL
+);
+
+-- Phase timeline per delivery: investigation, reproduction, implementation,
+-- verification, publication. Powers the run replay (audit 4).
+CREATE TABLE IF NOT EXISTS run_phases (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  delivery_id TEXT NOT NULL,
+  issue_key   TEXT NOT NULL,
+  phase       TEXT NOT NULL,
+  detail      TEXT NOT NULL DEFAULT '',
+  ts          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS run_phases_delivery ON run_phases(delivery_id, id);
+
+-- Host-built verification receipts: what actually ran for a head SHA. The
+-- model may describe the evidence; it never supplies these rows (audit 3).
+CREATE TABLE IF NOT EXISTS verification_receipts (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  issue_key   TEXT NOT NULL,
+  head_sha    TEXT NOT NULL,
+  base_sha    TEXT NOT NULL,
+  source      TEXT NOT NULL,
+  phases_json TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS verification_receipts_head
+  ON verification_receipts(issue_key, head_sha);
+
+-- Exactly-once ledger for GitHub side effects. A row is written before the
+-- API call and resolved after it, so a retry can reconcile against GitHub's
+-- actual state instead of repeating a partial batch (audit 1).
+CREATE TABLE IF NOT EXISTS side_effects (
+  scope      TEXT NOT NULL,   -- issue key the action belongs to
+  logical_id TEXT NOT NULL,   -- stable id derived from the action's content
+  kind       TEXT NOT NULL,   -- comment | review | pr | labels | push
+  identity   TEXT NOT NULL,   -- reconciliation key (target, head, etc.)
+  state      TEXT NOT NULL CHECK (state IN ('pending','done','failed')),
+  remote_id  TEXT NOT NULL DEFAULT '',
+  error      TEXT,
+  attempts   INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (scope, logical_id)
+);
+
 -- The PR head a review was based on. Submitting a review against a head that
 -- has since moved would anchor findings to code nobody reviewed (audit 8).
 CREATE TABLE IF NOT EXISTS review_heads (
@@ -1691,6 +1746,137 @@ class Database:
             )
             self._conn.commit()
             return {"id": int(row[0]), "trigger_desc": str(row[1]), "body": str(row[2])}
+
+    # trace:v1 id=impl.db-record-outcome work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def record_outcome(
+        self, *, delivery_id: str, issue_key: str, outcome: str, verified_by: str = "", rework_of: str | None = None
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO outcomes (delivery_id, issue_key, outcome, verified_by, rework_of, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(delivery_id) DO UPDATE SET outcome=excluded.outcome, "
+                "verified_by=excluded.verified_by, rework_of=excluded.rework_of",
+                (delivery_id, issue_key, outcome, verified_by, rework_of, _utcnow()),
+            )
+
+    # trace:v1 id=impl.db-record-run-phase work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def record_run_phase(self, *, delivery_id: str, issue_key: str, phase: str, detail: str = "") -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO run_phases (delivery_id, issue_key, phase, detail, ts) VALUES (?, ?, ?, ?, ?)",
+                (delivery_id, issue_key, phase, detail[:500], _utcnow()),
+            )
+
+    # trace:v1 id=impl.db-run-phases work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def run_phases(self, delivery_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT phase, detail, ts FROM run_phases WHERE delivery_id = ? ORDER BY id",
+                (delivery_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # trace:v1 id=impl.db-quality-summary work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def quality_summary(self) -> dict[str, Any]:
+        """Outcome-backed metrics: resolutions, cost per fix, rework, accuracy."""
+        with self._lock:
+            totals = {
+                row["outcome"]: int(row["n"])
+                for row in self._conn.execute("SELECT outcome, COUNT(*) AS n FROM outcomes GROUP BY outcome").fetchall()
+            }
+            spend = float((self._conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM events").fetchone() or [0])[0])
+            rework = int(
+                (
+                    self._conn.execute(
+                        "SELECT COUNT(*) FROM outcomes WHERE rework_of IS NOT NULL AND rework_of != ''"
+                    ).fetchone()
+                    or [0]
+                )[0]
+            )
+            revisions = int((self._conn.execute("SELECT COUNT(*) FROM assessment_revisions").fetchone() or [0])[0])
+        resolved = totals.get("resolved", 0)
+        decided = sum(totals.values())
+        return {
+            "outcomes": totals,
+            "resolved": resolved,
+            "decided": decided,
+            "cost_usd": round(spend, 4),
+            "cost_per_resolution_usd": round(spend / resolved, 4) if resolved else None,
+            "rework_rate": round(rework / resolved, 4) if resolved else None,
+            "classification_revisions": revisions,
+        }
+
+    # trace:v1 id=impl.db-record-verification-receipt work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def record_verification_receipt(
+        self, *, issue_key: str, head_sha: str, base_sha: str, source: str, phases: list[dict[str, Any]]
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO verification_receipts (issue_key, head_sha, base_sha, source, phases_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    issue_key,
+                    head_sha,
+                    base_sha,
+                    source,
+                    json.dumps(phases, separators=(",", ":"), default=str),
+                    _utcnow(),
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    # trace:v1 id=impl.db-latest-verification-receipt work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def latest_verification_receipt(self, issue_key: str, head_sha: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT head_sha, base_sha, source, phases_json, created_at FROM verification_receipts "
+                "WHERE issue_key = ? AND head_sha = ? ORDER BY id DESC LIMIT 1",
+                (issue_key, head_sha),
+            ).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        data["phases"] = json.loads(data.pop("phases_json"))
+        return data
+
+    # trace:v1 id=impl.db-side-effect work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def side_effect(self, scope: str, logical_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT state, remote_id, attempts FROM side_effects WHERE scope = ? AND logical_id = ?",
+                (scope, logical_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    # trace:v1 id=impl.db-begin-side-effect work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def begin_side_effect(self, scope: str, logical_id: str, kind: str, identity: str) -> None:
+        """Record intent before the API call; increments the attempt counter."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO side_effects (scope, logical_id, kind, identity, state, attempts, updated_at) "
+                "VALUES (?, ?, ?, ?, 'pending', 1, ?) "
+                "ON CONFLICT(scope, logical_id) DO UPDATE SET "
+                "state='pending', attempts=side_effects.attempts+1, updated_at=excluded.updated_at",
+                (scope, logical_id, kind, identity, _utcnow()),
+            )
+
+    # trace:v1 id=impl.db-finish-side-effect work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def finish_side_effect(self, scope: str, logical_id: str, remote_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE side_effects SET state='done', remote_id=?, error=NULL, updated_at=? "
+                "WHERE scope = ? AND logical_id = ?",
+                (remote_id, _utcnow(), scope, logical_id),
+            )
+
+    # trace:v1 id=impl.db-fail-side-effect work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def fail_side_effect(self, scope: str, logical_id: str, error: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE side_effects SET state='failed', error=?, updated_at=? WHERE scope = ? AND logical_id = ?",
+                (error[:500], _utcnow(), scope, logical_id),
+            )
 
     # trace:v1 id=impl.db-set-review-head work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def set_review_head(self, issue_key: str, head_sha: str) -> None:

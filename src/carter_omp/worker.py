@@ -1493,6 +1493,7 @@ async def run_task(
         inputs.trigger.capabilities if isinstance(inputs.trigger, TriggerContext) else capabilities_for(task_kind)
     )
     bindings = ToolBindings(
+        delivery_id=inputs.delivery_id,
         db=inputs.db,
         github=inputs.github,
         git_transport=inputs.git_transport,

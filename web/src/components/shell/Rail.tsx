@@ -67,9 +67,20 @@ interface NavDef {
   badgeTitle?: string;
 }
 
+// trace:v1 id=impl.web-src-components-shell-rail.quality-icon work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+function QualityIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">
+      <path d="M4 19V5M4 19h16" />
+      <path d="M8 15l3-4 3 2 4-6" />
+    </svg>
+  );
+}
+
 const NAV: NavDef[] = [
   { id: "operations", label: "Operations", icon: OpsIcon, locked: false },
   { id: "activity", label: "Activity", icon: ActivityIcon, locked: false },
+  { id: "quality", label: "Quality", icon: QualityIcon, locked: false },
   { id: "triage", label: "Triage", icon: TriageIcon, locked: !CONFIG.replayEnabled },
   {
     id: "system",

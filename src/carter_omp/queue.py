@@ -613,6 +613,14 @@ class WorkerPool:
         if reclaimed:
             log.info("workspace caches reclaimed", extra={"key": row.issue_key})
 
+    # trace:v1 id=impl.queue-record-outcome work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def _record_outcome(self, row: EventRow, outcome: str) -> None:
+        """Persist the quality outcome for this delivery (audit 4)."""
+        if row.issue_key:
+            self.db.record_outcome(
+                delivery_id=row.delivery_id, issue_key=row.issue_key, outcome=outcome, verified_by="host"
+            )
+
     # trace:v1 id=impl.queue-dispatch-and-mark work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     async def _dispatch_and_mark(self, row: EventRow, *, slot_uid: int | None = None) -> None:
         if await _handle_control_command(self, row):
@@ -621,13 +629,23 @@ class WorkerPool:
         await self._dispatch(row, slot_uid=slot_uid)
         if row.delivery_id in self._cancelled:
             self.db.mark_event(row.delivery_id, "failed", error=CANCEL_REASON)
+            self._record_outcome(row, "cancelled")
             return
         latest = self.db.get_event(row.delivery_id)
         if latest is not None and latest.state in INACTIVE_EVENT_STATES:
             # The worker already recorded a terminal outcome (the agent aborted
             # mid-run with a reason). Do not overwrite diagnosis with success.
+            error = latest.last_error or ""
+            if error == CANCEL_REASON:
+                outcome = "cancelled"
+            elif error.startswith("incomplete:"):
+                outcome = "incomplete"
+            else:
+                outcome = "infra_failed"
+            self._record_outcome(row, outcome)
             return
         self.db.mark_event(row.delivery_id, "done")
+        self._record_outcome(row, "resolved")
 
     # trace:v1 id=impl.queue-dispatch work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
     async def _dispatch(self, row: EventRow, *, slot_uid: int | None = None) -> None:
