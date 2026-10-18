@@ -272,6 +272,13 @@ class WorkerPool:
         pruned = await asyncio.to_thread(self.db.prune_tool_calls)
         if pruned:
             log.info("tool-call audit pruned", extra={"removed": pruned})
+        if self.settings.events_retention_days > 0:
+            dropped = await asyncio.to_thread(
+                self.db.prune_skipped_events,
+                older_than_days=self.settings.events_retention_days,
+            )
+            if dropped:
+                log.info("skipped events pruned", extra={"removed": dropped})
         # Single dispatcher loop is simpler than N workers; concurrency is gated by the slot pool.
         self._workers.append(asyncio.create_task(self._dispatch_loop(), name="carter_omp-dispatch"))
         # Periodic natives-cache GC, if enabled. Sleep-first so a freshly
@@ -281,6 +288,10 @@ class WorkerPool:
         # Periodic redispatch of stranded work, if enabled. Sleep-first.
         if self.settings.redispatch_interval_seconds > 0:
             self._workers.append(asyncio.create_task(self._redispatch_loop(), name="carter_omp-redispatch"))
+        # Retention for webhooks that never triggered anything. Sleep-first, so
+        # a fresh start doesn't repeat the prune it just did inline above.
+        if self.settings.events_retention_days > 0:
+            self._workers.append(asyncio.create_task(self._retention_loop(), name="carter_omp-retention"))
 
     async def stop(self, *, drain_timeout: float = 25.0, kill_timeout: float = 5.0) -> None:
         """Halt the dispatcher, then drain (or kill) in-flight `_run_event` tasks.
@@ -364,6 +375,34 @@ class WorkerPool:
                         log.info("natives_cache gc swept", extra={"evicted": evicted})
                 except Exception:
                     log.exception("natives_cache gc raised")
+        except asyncio.CancelledError:
+            raise
+
+    # trace:v1 id=impl.queue-retention-loop work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def _retention_loop(self) -> None:
+        """Hourly: drop webhooks that never triggered anything past the window.
+
+        Sleep-first; cancellation is the only exit. A prune failure is logged
+        and the loop continues — retention must never take the orchestrator down.
+        """
+        interval = 3600.0
+        log.info("event retention loop online", extra={"days": self.settings.events_retention_days})
+        try:
+            while not self._stop.is_set():
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                    return  # stop was set during the wait
+                except TimeoutError:
+                    pass
+                try:
+                    removed = await asyncio.to_thread(
+                        self.db.prune_skipped_events,
+                        older_than_days=self.settings.events_retention_days,
+                    )
+                    if removed:
+                        log.info("skipped events pruned", extra={"removed": removed})
+                except Exception:
+                    log.exception("event retention prune raised")
         except asyncio.CancelledError:
             raise
 

@@ -272,6 +272,13 @@ class Settings(BaseSettings):
     # disables the sweeper.
     redispatch_interval_seconds: float = Field(300.0, alias="CARTER_OMP_REDISPATCH_INTERVAL_SECONDS")
     redispatch_max_per_issue: int = Field(1, alias="CARTER_OMP_REDISPATCH_MAX_PER_ISSUE")
+    # Retention for webhooks that never triggered anything. Every delivery is
+    # stored with its full payload, including the ones the trigger policy drops
+    # (label noise, workflow_run storms) — 32k rows and ~800 MB on the VPS.
+    # `skipped` rows survive this many days so the console can explain recent
+    # skips, then are deleted. Events that actually ran (queued/running/done/
+    # failed) are never pruned. 0 disables pruning.
+    events_retention_days: int = Field(5, alias="CARTER_OMP_EVENTS_RETENTION_DAYS")
     # Premature-end reminder. When a `triage_issue` turn ends without the
     # agent having reached a terminal tool (`gh_open_pr`,
     # `mark_unable_to_reproduce`, `abort_task`) for a `bug`/`documentation`

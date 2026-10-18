@@ -1910,6 +1910,33 @@ class Database:
             cur = self._conn.execute("DELETE FROM tool_calls WHERE ts < ?", (cutoff,))
             return int(cur.rowcount)
 
+    # trace:v1 id=impl.db-prune-skipped-events work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def prune_skipped_events(self, *, older_than_days: int = 5) -> int:
+        """Delete webhooks that never triggered anything, once they age out.
+
+        Every delivery is stored with its full payload — including the ones the
+        trigger policy drops (label noise, workflow_run storms). That was 32k
+        rows and ~800 MB on the VPS, and nothing ever removed them. `skipped`
+        rows are kept for the retention window so the console can still explain
+        recent skips; events that actually ran (queued/running/done/failed) are
+        never touched.
+        """
+        cutoff = iso_seconds_ago(max(0, older_than_days) * 86400)
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM events WHERE state = 'skipped' AND received_at < ?",
+                (cutoff,),
+            )
+            removed = int(cur.rowcount)
+            # Authorization decisions only exist to explain an event row; drop
+            # the orphans so that table doesn't grow without bound either.
+            self._conn.execute(
+                "DELETE FROM authorization_decisions WHERE created_at < ? "
+                "AND delivery_id NOT IN (SELECT delivery_id FROM events)",
+                (cutoff,),
+            )
+            return removed
+
     # trace:v1 id=impl.db-latest-event-model work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def latest_event_model(self, issue_key: str) -> str | None:
         """The model the most recent event for this issue ran with, if recorded.

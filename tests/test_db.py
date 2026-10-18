@@ -1105,3 +1105,33 @@ def test_list_events_newest_first_uses_received_index(db: Database) -> None:
             )
         )
     assert "events_received" in plan
+
+
+def test_prune_skipped_events_drops_only_old_non_triggers(db: Database) -> None:
+    """Retention must never delete an event that actually ran."""
+    for delivery_id, state in (
+        ("old-skip", "skipped"),
+        ("new-skip", "skipped"),
+        ("old-done", "done"),
+    ):
+        db.record_event(
+            delivery_id=delivery_id,
+            event_type="issues",
+            repo="octo/widget",
+            issue_key=issue_key("octo/widget", 1),
+            payload={"action": "labeled"},
+            state=state,
+            last_error="label noise" if state == "skipped" else None,
+        )
+
+    six_days_ago = iso_seconds_ago(6 * 86400)
+    with db._lock:  # noqa: SLF001
+        db._conn.execute(  # noqa: SLF001
+            "UPDATE events SET received_at = ? WHERE delivery_id IN ('old-skip','old-done')",
+            (six_days_ago,),
+        )
+
+    assert db.prune_skipped_events(older_than_days=5) == 1
+    assert db.get_event("old-skip") is None
+    assert db.get_event("new-skip") is not None
+    assert db.get_event("old-done") is not None
