@@ -11,4 +11,6 @@ For `bug` / `documentation` issues, exactly one turn-ending action:
 
 Review TodoList and prior tool calls; continue where stopped. Do NOT re-classify or re-post the same preamble comment. Fix drafted in worktree → commit, push, open PR now. No source files edited → fix; continue to PR.
 
+Before the terminal call: if this run burned real effort on something a short note would have skipped — a misleading error, a gate that lied, a fix that took three tries — call `record_solution` once (trigger in the next run's words, answer concrete). Skip it when nothing stung.
+
 MUST end this turn: call one of the three listed tools.
