@@ -217,8 +217,11 @@ def _pool_dir(cfg: Settings, repo: str) -> Path:
 
 def _workspace_repo_dir(cfg: Settings, workspace_key: str) -> Path:
     # Defense-in-depth: workspace_key is constructed by `sandbox.workspace_key`
-    # as `<repo_with_underscores>__<number>`. Reject anything outside that shape.
-    if "/" in workspace_key or workspace_key.startswith(".") or ".." in workspace_key:
+    # as `<repo_with_underscores>__<suffix>` (`<number>` per issue, `release`
+    # for the release flow). Anchor the full shape: leading alnum kills
+    # absolute paths and dotfiles, the charset kills `/`, control bytes, and
+    # `..`-style escapes by construction instead of substring-denylisting.
+    if not _WORKSPACE_KEY_RE.fullmatch(workspace_key) or ".." in workspace_key:
         raise HTTPException(400, f"invalid workspace_key {workspace_key!r}")
     return Path(cfg.workspace_root) / workspace_key / "repo"
 
@@ -321,6 +324,10 @@ _ORIGIN_READ_TIMEOUT_SECONDS = 5.0
 _REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 _FORBIDDEN_URL_BYTES_RE = re.compile(r"[\x00-\x1f\x7f]|%(?:00|0a|0d)", re.IGNORECASE)
 _GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$")
+# trace:v1 id=impl.proxy-workspace-key-shape work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+_WORKSPACE_KEY_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?__[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+)
 _GIT_PROBE_SCRUBBED_ENV_KEYS = (
     "CARTER_OMP_GIT_HTTP_AUTH",
     "GITHUB_TOKEN",
