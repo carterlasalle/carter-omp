@@ -1162,3 +1162,26 @@ def test_stranded_issues_covers_failures_without_an_issue_row(db: Database) -> N
     assert candidates[0]["repo"] == "octo/widget"
     assert candidates[0]["number"] == 7
     assert candidates[0]["redispatches"] == 0
+
+
+def test_stranded_issues_skips_deterministic_orphan_failures(db: Database) -> None:
+    """A bad payload that died before registration is not retried.
+
+    The orphan sweep exists for transient outages (the github-proxy was down).
+    A deterministic failure would burn another run to fail identically.
+    """
+    key = issue_key("octo/widget", 9)
+    db.record_event(
+        delivery_id="bad-payload",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key=key,
+        payload={"action": "opened"},
+    )
+    with db._lock:  # noqa: SLF001
+        db._conn.execute(  # noqa: SLF001
+            "UPDATE events SET state='failed', attempts=3, "
+            "last_error='422 validation failed: missing field action' WHERE delivery_id='bad-payload'"
+        )
+
+    assert db.stranded_issues(max_attempts=3) == []

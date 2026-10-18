@@ -152,6 +152,41 @@ REDISPATCH_PREFIX = "redispatch-"
 # own exception text.
 CANCEL_REASON = "cancelled by operator"
 
+# Failures worth one more attempt when a trigger died before the issue was
+# registered. Everything else is deterministic — a bad payload, a validation
+# error, a rejected credential — where another run only burns tokens to fail
+# the same way. Matched case-insensitively against `last_error`.
+TRANSIENT_FAILURE_MARKERS: tuple[str, ...] = (
+    "name resolution",
+    "temporary failure",
+    "connecterror",
+    "connecttimeout",
+    "readtimeout",
+    "writetimeout",
+    "remoteprotocolerror",
+    "connection reset",
+    "connection refused",
+    "timed out",
+    "timeout",
+    "rate limit",
+    " 429",
+    " 502",
+    " 503",
+    " 504",
+    "database is locked",
+    "rpc process exited",
+)
+
+
+# trace:v1 id=impl.db-is-transient-failure work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
+def is_transient_failure(text: str | None) -> bool:
+    """Whether a terminal event failure is worth another run."""
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in TRANSIENT_FAILURE_MARKERS)
+
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
@@ -897,7 +932,7 @@ class Database:
             ).fetchall()
             orphans = self._conn.execute(
                 f"""
-                SELECT e.issue_key AS key,
+                SELECT e.issue_key AS key, e.last_error AS last_error,
                        (SELECT COUNT(*) FROM events r
                          WHERE r.issue_key = e.issue_key
                            AND r.delivery_id LIKE '{REDISPATCH_PREFIX}%') AS redispatches
@@ -922,6 +957,11 @@ class Database:
         out = [dict(row) for row in rows]
         seen = {str(row["key"]) for row in out}
         for row in orphans:
+            # A deterministic failure (bad payload, validation, rejected
+            # credential) is not worth another run: retrying only burns tokens
+            # to fail identically. Only transient errors get the extra attempt.
+            if not is_transient_failure(row["last_error"]):
+                continue
             key = str(row["key"])
             if key in seen:
                 continue
