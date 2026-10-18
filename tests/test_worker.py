@@ -195,6 +195,10 @@ def _reset_fake() -> None:
 def _patch_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("carter_omp.worker.RpcClient", _FakeRpcClient)
     monkeypatch.setattr("carter_omp.worker._AGENT_HOME_STAGE", tmp_path / "missing-agent-home-stage")
+    # Isolate from the container's real `/srv/agent-home`: `_build_extra_env`
+    # chowns that tree (and warns on EACCES), which leaks harness state into
+    # assertions on chown calls and env overlays.
+    monkeypatch.setattr("carter_omp.worker._AGENT_HOME", tmp_path / "agent-home")
     monkeypatch.setattr("carter_omp.worker.host_tools.build", lambda _b: ())
     monkeypatch.setattr(
         "carter_omp.worker.persona.system_append",
@@ -494,6 +498,11 @@ async def test_run_rpc_uses_workspace_xdg_dirs_for_slot_without_chown(
     monkeypatch.setattr(
         "carter_omp.sandbox.os.chown", lambda path, uid, gid: chown_calls.append((Path(path), uid, gid))
     )
+    # `_build_extra_env` chowns the (now isolated) agent-home tree via
+    # `carter_omp.worker.os.chown` — a separate module reference the sandbox
+    # mock above does not cover; swallow it so the assertion measures only
+    # workspace-tree chowns.
+    monkeypatch.setattr("carter_omp.worker.os.chown", lambda *args, **kwargs: None)
 
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False, slot_uid=2001)
     worker._run_rpc_blocking(

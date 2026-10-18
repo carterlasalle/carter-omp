@@ -130,8 +130,17 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]:
         "CARTER_OMP_GITHUB_APP_ID",
         "CARTER_OMP_GITHUB_INSTALLATION_ID",
         "CARTER_OMP_GITHUB_PRIVATE_KEY_FILE",
+        # Shadow harness runtime env: pydantic-settings falls back to real
+        # process env for any key the fixture omits, so the runner's model
+        # routing and telemetry leak into status-contract + worker assertions.
+        "CARTER_OMP_FALLBACK_MODEL",
+        "CARTER_OMP_RELEASE_MODEL",
+        "SENTRY_ACCESS_TOKEN",
     ):
         monkeypatch.setenv(_key, "")
+    # The harness exports its own runner model; force the fixture default
+    # rather than inheriting whatever model invoked pytest.
+    monkeypatch.setenv("CARTER_OMP_MODEL", _baseline_env(tmp_path)["CARTER_OMP_MODEL"])
     reset_settings_cache()
     yield env
     reset_settings_cache()
@@ -162,12 +171,13 @@ def proxy_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]
         "CARTER_OMP_GITHUB_APP_ID",
         "CARTER_OMP_GITHUB_INSTALLATION_ID",
         "CARTER_OMP_GITHUB_PRIVATE_KEY_FILE",
+        # Same harness-env shadowing as `env` (model routing + telemetry).
+        "CARTER_OMP_FALLBACK_MODEL",
+        "CARTER_OMP_RELEASE_MODEL",
+        "SENTRY_ACCESS_TOKEN",
     ):
         monkeypatch.setenv(_key, "")
-    reset_settings_cache()
-    yield baseline
-    reset_settings_cache()
-    close_database()
+    monkeypatch.setenv("CARTER_OMP_MODEL", baseline["CARTER_OMP_MODEL"])
 
 
 @pytest.fixture
