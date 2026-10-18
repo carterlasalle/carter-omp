@@ -225,6 +225,29 @@ minutes, `--timeout`/`--force` to change that).
 the proxy channel, the model catalog + selectors, and the dashboard bundle —
 and refuses (non-zero exit) on any mismatch. Do not proceed with failures.
 
+### Host-local compose additions
+
+Never edit `compose.yaml` on a running host. It is tracked, so the next
+`git pull` either conflicts with the edit or drops it — the github-proxy
+`restart: unless-stopped` policy and `CARTER_OMP_LINKED_REPOS` were each lost
+that way, and the orchestrator ran without them until someone noticed. Put
+host-specific mounts and services in an untracked `compose.override.yaml`
+next to it; Compose merges that file automatically:
+
+```yaml
+# compose.override.yaml — host-local, never committed
+services:
+  carter-omp:
+    volumes:
+      - ./org_tools.toml:/srv/org_tools.toml:ro
+```
+
+Keep it out of git with the local exclude file (no repo change needed):
+
+```bash
+echo compose.override.yaml >> .git/info/exclude
+```
+
 ## 8. First working run
 
 <!-- trace:v1 id=doc.setup-first-run work=WORK-CO-Q8Z1HJJJ -->
@@ -308,7 +331,7 @@ secrets. Adding a tool for a new org is config-only, no code:
 
 ```bash
 cp org_tools.toml.example org_tools.toml   # then add a [[tool]] block
-# uncomment the org_tools.toml bind mount in compose.yaml
+# add the mount in compose.override.yaml (see "Host-local compose additions")
 # set CARTER_OMP_ORG_TOOLS_FILE=/srv/org_tools.toml in .env
 # put the tool's secret in .env (e.g. SENTRY_ACCESS_TOKEN=sntryu_...)
 docker compose up -d                        # env-only change — no rebuild
