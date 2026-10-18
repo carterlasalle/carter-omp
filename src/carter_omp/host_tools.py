@@ -2298,6 +2298,82 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
     )
 
 
+# ---------- gh_create_issue ----------
+# trace:v1 id=impl.host-tools-create-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _build_create_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
+    """File a defect the run found outside its own task.
+
+    Without this, "out of scope" is where findings go to die: the PR merges in
+    minutes and the observation is gone. The destination is the run's repo or a
+    repo the deployment declared as linked; the proxy authorizes both from the
+    run token, so the model cannot spray issues at arbitrary repositories.
+    """
+
+    # trace:v1 id=impl.host-tools-create-issue-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    def execute(args: dict[str, Any]) -> str:
+        bindings.require(Capability.CREATE_ISSUE, "gh_create_issue", args)
+        # Anti-flood: three findings per issue. Beyond that the marginal issue
+        # is noise; anything else belongs in a comment on the PR.
+        if bindings.db.count_successful_tool_calls(bindings.issue_key, "gh_create_issue") >= 3:
+            msg = "gh_create_issue spent for this issue (3 filed); fold anything else into a comment."
+            _audit(bindings, "gh_create_issue", args, error=msg)
+            _raise_command(msg)
+        title = args.get("title")
+        body = args.get("body")
+        if not isinstance(title, str) or not title.strip():
+            _raise_command("gh_create_issue requires a non-empty 'title'.")
+        if not isinstance(body, str) or not body.strip():
+            _raise_command("gh_create_issue requires 'body': what is broken, where, and the evidence.")
+        repo = str(args.get("repo") or bindings.repo.full_name).strip()
+        labels = args.get("labels")
+        if labels is None:
+            labels = ["carter-omp-finding"]
+        if not isinstance(labels, list):
+            _raise_command("gh_create_issue 'labels' must be an array of strings.")
+        try:
+            result = _run_coro(
+                bindings.loop,
+                bindings.github.create_issue(
+                    repo=repo,
+                    title=title.strip()[:200],
+                    body=body.strip(),
+                    labels=[str(label) for label in labels][:5],
+                ),
+            )
+        except GitHubError as exc:
+            _audit(bindings, "gh_create_issue", args, error=str(exc))
+            _raise_command(f"could not file the issue: {exc.status} {exc.message}")
+        # The proxy returns {created, number}; the direct client returns an
+        # IssueSummary. Both are valid backends for this tool.
+        if isinstance(result, Mapping):
+            number = result.get("number")
+            created = result.get("created") is not False
+        else:
+            number = getattr(result, "number", None)
+            created = True
+        _audit(bindings, "gh_create_issue", args, result={"repo": repo, "number": number})
+        if not created:
+            return f"already tracked as {repo}#{number}; add evidence there instead of filing again."
+        return f"filed {repo}#{number}"
+
+    return host_tool(
+        name="gh_create_issue",
+        description=persona.host_tool_description("gh_create_issue"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "repo": {"type": "string"},
+                "labels": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["title", "body"],
+            "additionalProperties": False,
+        },
+        execute=_tool_execute(execute),
+    )
+
+
 # ---------- gh_request_review ----------
 def _build_request_review(bindings: ToolBindings) -> HostTool[Any, Any]:
     def execute(args: dict[str, Any]) -> str:
@@ -3764,6 +3840,8 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
         tools.append(_build_open_pr(bindings))
     if Capability.REQUEST_REVIEW in caps:
         tools.append(_build_request_review(bindings))
+    if Capability.CREATE_ISSUE in caps:
+        tools.append(_build_create_issue(bindings))
     if Capability.REPORT_UPSTREAM in caps:
         tools.append(_build_report_pain_point(bindings))
         tools.append(_build_record_solution(bindings))

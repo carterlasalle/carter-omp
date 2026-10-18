@@ -360,3 +360,34 @@ async def test_pr_triggered_run_pushes_the_originating_issue_workspace(
             },
         )
     assert resp.status_code == 200, resp.text
+
+
+def test_run_token_carries_declared_linked_repos() -> None:
+    """A run may file an issue against a dependency, so the token names it.
+
+    The proxy authorizes the destination from this list, never from the model;
+    an empty list means the run can only write to its own repo.
+    """
+    from carter_omp.run_token import mint_run_token, verify_run_token
+
+    key = b"k" * 32
+    token = mint_run_token(
+        key=key,
+        run_id="run-1",
+        repo_id=1,
+        repo="octo/widget",
+        capabilities={"create_issue"},
+        linked_repos=("octo/dep",),
+        ttl_seconds=60,
+    )
+    parsed = verify_run_token(key=key, token=token)
+    assert parsed is not None
+    assert parsed.linked_repos == ("octo/dep",)
+
+    plain = verify_run_token(
+        key=key,
+        token=mint_run_token(
+            key=key, run_id="run-2", repo_id=1, repo="octo/widget", capabilities=set(), ttl_seconds=60
+        ),
+    )
+    assert plain is not None and plain.linked_repos == ()

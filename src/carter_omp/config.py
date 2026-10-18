@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     # without listing IDs. The App-install list stays the real boundary:
     # only repos where the App is actually installed can deliver webhooks.
     allowed_repo_owners_raw: str = Field("", alias="CARTER_OMP_REPO_OWNERS")
+    # Declared dependencies between repos, `owner/repo=dep1,dep2;other/repo=dep`.
+    # A run on the left side may read the right side and file issues against it
+    # (the run token carries the list; the proxy authorizes from that, never
+    # from the model). Without it an agent can only see the repo it cloned.
+    linked_repos_raw: str = Field("", alias="CARTER_OMP_LINKED_REPOS")
     # Comma-separated installation ids — one per account/org the App is
     # installed on. A deployment can serve several orgs; each has its own
     # installation id, and webhooks from any of them must be admissible.
@@ -157,6 +162,27 @@ class Settings(BaseSettings):
         return frozenset(piece.strip().lower() for piece in self.allowed_repo_names_raw.split(",") if piece.strip())
 
     # trace:exempt reason=internal-detail
+    # trace:v1 id=impl.config-linked-repos work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    @property
+    def linked_repos(self) -> dict[str, tuple[str, ...]]:
+        """Parsed dependency map: repo -> the repos it is allowed to reach."""
+        out: dict[str, tuple[str, ...]] = {}
+        for entry in self.linked_repos_raw.split(";"):
+            entry = entry.strip()
+            if not entry or "=" not in entry:
+                continue
+            repo, _, deps = entry.partition("=")
+            repo = repo.strip().lower()
+            values = tuple(dep.strip().lower() for dep in deps.split(",") if dep.strip())
+            if repo and values:
+                out[repo] = values
+        return out
+
+    # trace:v1 id=impl.config-links-for work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def links_for(self, repo: str) -> tuple[str, ...]:
+        """Declared dependencies of `repo` (empty when none)."""
+        return self.linked_repos.get(repo.strip().lower(), ())
+
     @property
     def allowed_repo_owners(self) -> frozenset[str]:
         """Owner logins whose repos are all authorized (past/present/future)."""

@@ -71,6 +71,11 @@ class GitHubBackend(Protocol):
         provenance: str = "",
         issue_number: int | None = None,
     ) -> Mapping[str, Any]: ...
+    # Returns the proxy's {created, number, url} mapping on a run, or an
+    # IssueSummary from the direct client — hence `Any`.
+    # trace:exempt reason=protocol-shape
+    async def create_issue(self, *, repo: str, title: str, body: str, labels: list[str] | None = None) -> Any: ...
+
     async def list_issue_index_entries(
         self,
         repo: str,

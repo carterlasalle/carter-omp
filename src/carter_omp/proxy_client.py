@@ -380,6 +380,25 @@ class GitHubProxyClient:
             payload["issue_number"] = issue_number
         return await self._request("POST", "/gh/v1/self-report", json_body=payload)
 
+    # trace:v1 id=impl.proxy-client-create-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def create_issue(
+        self,
+        *,
+        repo: str,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+    ) -> Mapping[str, Any]:
+        """File an issue in the run's repo or a declared dependency.
+
+        The proxy authorizes the destination from the run token and dedupes on
+        an exact open title, so a repeat finding returns the existing number.
+        """
+        payload: dict[str, Any] = {"repo": repo, "title": title, "body": body}
+        if labels:
+            payload["labels"] = labels
+        return await self._request("POST", "/gh/v1/issues", json_body=payload)
+
     async def request_reviewers(
         self,
         *,

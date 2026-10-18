@@ -61,6 +61,9 @@ services:
       CARTER_OMP_GIT_AUTHOR_EMAIL: ${CARTER_OMP_GIT_AUTHOR_EMAIL:-}
       CARTER_OMP_GIT_COAUTHOR: "${CARTER_OMP_GIT_COAUTHOR:-Carter Lasalle <carterlasalle@gmail.com>}"
       CARTER_OMP_REPO_ALLOWLIST: ${CARTER_OMP_REPO_ALLOWLIST:-}
+      # Declared dependencies: `owner/repo=dep1,dep2;other/repo=dep`.
+      # A run may read the right side and file issues against it.
+      CARTER_OMP_LINKED_REPOS: ${CARTER_OMP_LINKED_REPOS:-}
 
       # --- trigger policy (explicit invocation; strict by default) ---
       CARTER_OMP_TRIGGER_MODE: ${CARTER_OMP_TRIGGER_MODE:-strict}

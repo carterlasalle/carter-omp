@@ -280,3 +280,11 @@ def test_web_search_env_parses_forwarded_keys(env: dict[str, str], monkeypatch: 
     cfg = Settings()  # type: ignore[call-arg]
 
     assert cfg.web_search_env == ("BRAVE_API_KEY", "EXA_API_KEY")
+
+
+def test_linked_repos_parses_dependencies_and_is_case_insensitive() -> None:
+    cfg = Settings.model_construct(
+        linked_repos_raw="Phoenix-Fire-Labs/mockingbird=Phoenix-Fire-Labs/jetson-infra, octo/dep; broken-entry"
+    )
+    assert cfg.links_for("phoenix-fire-labs/mockingbird") == ("phoenix-fire-labs/jetson-infra", "octo/dep")
+    assert cfg.links_for("octo/other") == ()

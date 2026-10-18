@@ -782,6 +782,7 @@ class _TokenBindings(Protocol):
     def git_transport(self) -> object: ...
 
 
+# trace:v1 id=impl.worker-attach-run-token work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _attach_run_token(inputs: TaskInputs, bindings: _TokenBindings) -> None:
     """Mint a per-run proxy token and scope the GitHub client to it.
 
@@ -843,6 +844,7 @@ def _attach_run_token(inputs: TaskInputs, bindings: _TokenBindings) -> None:
             workspace=None,
             branch=claims["branch"] if isinstance(claims["branch"], str) else None,
             capabilities=capabilities,
+            linked_repos=inputs.settings.links_for(trigger.repository_full_name),
             ttl_seconds=ttl_seconds,
         )
 
@@ -1213,15 +1215,32 @@ def _run_rpc_blocking(
         },
     )
     inputs.db.set_event_model(inputs.delivery_id, chosen_model)
-    repo_policy_section = ""
+    policy_blocks: list[str] = []
     if not settings.feature_enabled(inputs.repo.full_name, "ci_fix"):
-        repo_policy_section = (
+        policy_blocks.append(
             "<repo-policy>\n"
             "CI/CD fix work is DISABLED for this repository by operator config. Do not attempt "
             "to fix failing CI/CD checks or workflows. Report the failing check, whether it also "
             "fails on the base branch, and stop.\n"
             "</repo-policy>"
         )
+    links = settings.links_for(inputs.repo.full_name)
+    if links:
+        policy_blocks.append(
+            "<linked-repos>\n"
+            "This repository depends on: " + ", ".join(f"`{repo}`" for repo in links) + ". "
+            "You may read them through the GitHub tools, and when the defect lives there rather "
+            "than here you may file the issue against them.\n"
+            "</linked-repos>"
+        )
+    policy_blocks.append(
+        "<out-of-scope>\n"
+        "When you find a real defect that does not belong in this task, file it with "
+        "gh_create_issue (this repo, or a declared dependency) before you finish. Do not just "
+        "call it out of scope: the PR merges in minutes and the finding is lost.\n"
+        "</out-of-scope>"
+    )
+    repo_policy_section = "\n".join(policy_blocks)
     if task_kind == "handle_release_ci":
         assert inputs.release is not None
         append_system_prompt = persona.system_append_release(

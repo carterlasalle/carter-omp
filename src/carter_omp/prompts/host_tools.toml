@@ -88,6 +88,15 @@ base = "Optional base branch override (default: repo default)."
 [gh_request_review]
 description = "Request reviewers and/or add assignees on the open PR."
 
+[gh_create_issue]
+description = "File an issue for a real defect you found outside this task — in this repo or a declared dependency — instead of only calling it out of scope."
+
+[gh_create_issue.parameters]
+title = "Short, specific headline naming the symptom."
+body = "What is broken, where you saw it, and the evidence (file:line, command output, link)."
+repo = "Target repo. Defaults to the repo this run works on; only declared dependencies are accepted."
+labels = "Labels to attach. Defaults to [\"carter-omp-finding\"]."
+
 [repro_record]
 description = "Persist a reproduction transcript (command, output, exit code) for the issue."
 

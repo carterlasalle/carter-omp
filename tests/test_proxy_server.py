@@ -174,6 +174,7 @@ def _run_token(
     pull_request: int | None = None,
     branch: str | None = None,
     capabilities: set[str] | frozenset[str] | None = None,
+    linked_repos: tuple[str, ...] = (),
     key: bytes | None = None,
     expired: bool = False,
     tamper: bool = False,
@@ -189,6 +190,7 @@ def _run_token(
         pull_request=pull_request,
         branch=branch,
         capabilities=capabilities or {"comment", "label", "push_branch", "open_pr", "request_review", "review_pr"},
+        linked_repos=linked_repos,
         now=(_time.time() - 3600) if expired else None,
     )
     if tamper:
@@ -2124,3 +2126,102 @@ async def test_git_push_retries_once_with_a_fresh_token_after_a_workflow_refusal
     assert resp.json() == {"head": head, "branch": branch}
     assert attempts == [1, 2]  # refused once, retried once
     assert invalidated == ["octo/widget"]
+
+
+# ---------- gh_create_issue ----------
+
+
+def _issue_item(number: int, title: str, state: str = "open") -> dict[str, Any]:
+    return {
+        "number": number,
+        "title": title,
+        "state": state,
+        "user": {"login": "carter_omp-bot"},
+        "labels": [],
+        "comments": 0,
+        "updated_at": "2026-01-01T00:00:00Z",
+        "created_at": "2026-01-01T00:00:00Z",
+        "html_url": f"https://github.com/octo/dep/issues/{number}",
+    }
+
+
+async def test_create_issue_files_into_a_linked_repo(tmp_path: Path) -> None:
+    cfg = _build_settings(tmp_path)
+    cfg.repo_allowlist_raw = "octo/widget,octo/dep"
+    cfg.linked_repos_raw = "octo/widget=octo/dep"
+    posts: list[str] = []
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/search/issues":
+            return httpx.Response(200, json={"total_count": 0, "items": []})
+        posts.append(req.url.path)
+        return httpx.Response(201, json=_issue_item(77, "boom"))
+
+    app = _build_app(cfg, gh)
+    token = _run_token(capabilities={"create_issue"}, linked_repos=("octo/dep",))
+    body = json.dumps({"repo": "octo/dep", "title": "boom", "body": "details"}).encode()
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/issues",
+            content=body,
+            headers={**_signed("POST", "/gh/v1/issues", body, run_token=token), "Content-Type": "application/json"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"created": True, "number": 77, "url": "https://github.com/octo/dep/issues/77"}
+    assert posts == ["/repos/octo/dep/issues"]
+
+
+async def test_create_issue_rejects_repos_outside_the_run(tmp_path: Path) -> None:
+    cfg = _build_settings(tmp_path)
+    cfg.repo_allowlist_raw = "octo/widget,octo/other"
+    app = _build_app(cfg, lambda _: httpx.Response(200, json={"total_count": 0, "items": []}))
+    token = _run_token(capabilities={"create_issue"})
+    body = json.dumps({"repo": "octo/other", "title": "boom", "body": "details"}).encode()
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/issues",
+            content=body,
+            headers={**_signed("POST", "/gh/v1/issues", body, run_token=token), "Content-Type": "application/json"},
+        )
+    assert resp.status_code == 403
+
+
+async def test_create_issue_reuses_an_open_issue_with_the_same_title(tmp_path: Path) -> None:
+    cfg = _build_settings(tmp_path)
+    created: list[str] = []
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/search/issues":
+            return httpx.Response(200, json={"total_count": 1, "items": [_issue_item(12, "boom")]})
+        created.append(req.url.path)
+        return httpx.Response(201, json=_issue_item(99, "boom"))
+
+    app = _build_app(cfg, gh)
+    token = _run_token(capabilities={"create_issue"})
+    body = json.dumps({"title": "boom", "body": "details"}).encode()
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/issues",
+            content=body,
+            headers={**_signed("POST", "/gh/v1/issues", body, run_token=token), "Content-Type": "application/json"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["created"] is False
+    assert resp.json()["number"] == 12
+    assert created == []
+
+
+async def test_create_issue_requires_the_capability(tmp_path: Path) -> None:
+    cfg = _build_settings(tmp_path)
+    app = _build_app(cfg, lambda _: httpx.Response(200, json={"total_count": 0, "items": []}))
+    token = _run_token(capabilities={"comment"})
+    body = json.dumps({"title": "boom", "body": "details"}).encode()
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/issues",
+            content=body,
+            headers={**_signed("POST", "/gh/v1/issues", body, run_token=token), "Content-Type": "application/json"},
+        )
+    assert resp.status_code == 403

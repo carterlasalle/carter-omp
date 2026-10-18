@@ -31,6 +31,11 @@ class Capability(StrEnum):
     # destination from its own config, never from the model.
     REPORT_UPSTREAM = "report_upstream"
 
+    # File a real defect the run found outside its own task, so "out of scope"
+    # stops being a dead end. Destination: the run's repo or a declared
+    # dependency (the proxy decides from the token, never the model).
+    CREATE_ISSUE = "create_issue"
+
     REVIEW_PR = "review_pr"
 
     SKIP_CHECKS = "skip_checks"
@@ -56,6 +61,7 @@ ISSUE_RUN_CAPABILITIES: frozenset[Capability] = frozenset(
         Capability.OPEN_PR,
         Capability.REQUEST_REVIEW,
         Capability.REPORT_UPSTREAM,
+        Capability.CREATE_ISSUE,
     }
 )
 

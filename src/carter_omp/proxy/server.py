@@ -1057,6 +1057,55 @@ def create_proxy_app(settings: Settings) -> FastAPI:
             return _gh_error_response(exc)
         return JSONResponse(result)
 
+    # trace:v1 id=impl.proxy-create-issue work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    @app.post("/gh/v1/issues")
+    async def create_issue_endpoint(request: Request) -> JSONResponse:
+        """File an issue in the run's repo or a repo the deployment linked to it.
+
+        The destination is authorized from the run token — the run's own repo or
+        one listed in its `linked_repos` — never from the model. Exact open-title
+        dedupe means ten runs hitting one bug file one issue, not ten.
+        """
+        data = await _json_body(request)
+        cfg: Settings = request.app.state.settings
+        token = _require_run_token(request, cfg)
+        _require_run_cap(token, "create_issue")
+        repo = _require_str(data.get("repo") or token.repo, "repo").strip().lower()
+        if repo != token.repo.lower() and repo not in token.linked_repos:
+            raise HTTPException(403, "repo is neither the run's repo nor a declared dependency")
+        _enforce_repo_scope(cfg, repo)
+        title = _require_str(data.get("title"), "title").strip()
+        body = _require_str(data.get("body"), "body").strip()
+        if not title or not body:
+            raise HTTPException(400, "title and body must be non-empty")
+        labels = [str(name)[:50] for name in (data.get("labels") or [])][:5]
+        github = _scoped_client(request, repo)
+        try:
+            matches = await github.search_issues(repo, f'in:title "{title}"', limit=10)
+            for match in matches:
+                if (
+                    not match.is_pull_request
+                    and match.state == "open"
+                    and match.title.strip().casefold() == title.casefold()
+                ):
+                    return JSONResponse(
+                        {
+                            "created": False,
+                            "number": match.number,
+                            "url": f"https://github.com/{repo}/issues/{match.number}",
+                        }
+                    )
+            issue = await github.create_issue(repo=repo, title=title, body=body, labels=labels)
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse(
+            {
+                "created": True,
+                "number": issue.number,
+                "url": f"https://github.com/{repo}/issues/{issue.number}",
+            }
+        )
+
     @app.post("/gh/v1/request_reviewers")
     async def request_reviewers(request: Request) -> JSONResponse:
         data = await _json_body(request)

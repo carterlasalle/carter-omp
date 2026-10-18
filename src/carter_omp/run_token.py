@@ -44,6 +44,10 @@ class RunToken:
     capabilities: frozenset[str]
     iat: int
     exp: int
+    # Repos this run may reach beyond its own (declared dependencies). Reads
+    # are already allowlist-scoped; this is what lets a run *file an issue*
+    # against the dependency that actually broke.
+    linked_repos: tuple[str, ...] = ()
 
 
 def _b64e(raw: bytes) -> str:
@@ -66,6 +70,7 @@ def mint_run_token(
     workspace: str | None = None,
     branch: str | None = None,
     capabilities: frozenset[str] | set[str] | tuple[str, ...] | list[str],
+    linked_repos: tuple[str, ...] | list[str] = (),
     ttl_seconds: int = RUN_TOKEN_TTL_SECONDS,
     now: float | None = None,
 ) -> str:
@@ -80,6 +85,7 @@ def mint_run_token(
         "workspace": workspace,
         "branch": branch,
         "capabilities": sorted(set(capabilities)),
+        "linked_repos": sorted({str(repo).lower() for repo in linked_repos}),
         "iat": now_int,
         "exp": now_int + ttl_seconds,
     }
@@ -122,6 +128,7 @@ def verify_run_token(*, key: bytes, token: str | None, now: float | None = None)
             workspace=str(payload["workspace"]) if payload.get("workspace") is not None else None,
             branch=str(payload["branch"]) if payload.get("branch") is not None else None,
             capabilities=frozenset(str(c) for c in (payload.get("capabilities") or [])),
+            linked_repos=tuple(str(repo) for repo in (payload.get("linked_repos") or [])),
             iat=int(payload["iat"]),
             exp=exp,
         )

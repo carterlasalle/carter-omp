@@ -5666,3 +5666,55 @@ def test_require_verification_receipt_blocks_missing_evidence(db: Database, tmp_
         host_tools._require_verification_receipt(bindings, policy, stage="open PR")
     finally:
         _stop_loop(loop, t)
+
+
+def _issue_response(number: int, title: str) -> dict[str, Any]:
+    return {
+        "number": number,
+        "title": title,
+        "state": "open",
+        "user": {"login": "carter_omp-bot"},
+        "labels": [],
+        "html_url": f"https://github.com/octo/widget/issues/{number}",
+    }
+
+
+def test_gh_create_issue_files_with_the_finding_label(db: Database, tmp_path: Path) -> None:
+    """An out-of-scope defect becomes a real issue instead of a lost remark."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json=_issue_response(77, "boom"))
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_create_issue")
+        result = tool.execute({"title": "boom", "body": "details"}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert _text(result) == "filed octo/widget#77"
+    assert captured["url"].endswith("/repos/octo/widget/issues")
+    assert captured["body"]["labels"] == ["carter-omp-finding"]
+
+
+def test_gh_create_issue_is_capped_per_issue(db: Database, tmp_path: Path) -> None:
+    """Three findings per issue; beyond that it is noise on the tracker."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(201, json=_issue_response(100 + calls["n"], f"finding {calls['n']}"))
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_create_issue")
+        for n in range(3):
+            tool.execute({"title": f"finding {n}", "body": "details"}, _ctx())
+        with pytest.raises(RpcCommandError):
+            tool.execute({"title": "finding 4", "body": "details"}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+    assert calls["n"] == 3
