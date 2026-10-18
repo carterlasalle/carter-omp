@@ -217,17 +217,25 @@ def _pool_dir(cfg: Settings, repo: str) -> Path:
 
 # trace:v1 id=impl.proxy-workspace-key-shape work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _workspace_repo_dir(cfg: Settings, workspace_key: str) -> Path:
-    # Gate the join on the canonical shape `sandbox.workspace_key` produces —
-    # anything else 400s before a user-controlled value reaches the path
-    # expression (py/path-injection). Both push endpoints share this helper.
+    # Gate on the canonical shape `sandbox.workspace_key` produces — anything
+    # else 400s before the filesystem is touched. Both push endpoints share
+    # this helper.
     if not _WORKSPACE_KEY_RE.fullmatch(workspace_key):
         raise HTTPException(400, f"invalid workspace_key {workspace_key!r}")
-    repo_dir = Path(cfg.workspace_root) / workspace_key / "repo"
-    # A symlink planted inside the workspace root could still redirect the
-    # join; resolve and confirm containment before handing it to git ops.
-    if not repo_dir.resolve().is_relative_to(Path(cfg.workspace_root).resolve()):
-        raise HTTPException(400, f"invalid workspace_key {workspace_key!r}")
-    return repo_dir
+    root = Path(cfg.workspace_root)
+    # Resolve the directory through the listing rather than joining the request
+    # value: the path expression only ever sees a real child entry, which is
+    # what makes this safe against path injection instead of merely validating
+    # the string (py/path-injection). The containment check still rejects a
+    # symlinked entry that resolves outside the root.
+    for entry in root.iterdir() if root.is_dir() else ():
+        if entry.name != workspace_key:
+            continue
+        repo_dir = entry / "repo"
+        if repo_dir.resolve().is_relative_to(root.resolve()):
+            return repo_dir
+        break
+    raise HTTPException(404, f"workspace not found: {workspace_key}")
 
 
 def _resolve_token(cfg: Settings) -> str:
