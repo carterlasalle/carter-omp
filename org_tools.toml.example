@@ -33,4 +33,4 @@ env = ["SENTRY_ACCESS_TOKEN"]
 # run's `--config` overlay (`skills.customDirectories`).
 skills = ["ci-fix-dont-freeze"]
 # One-liner rendered into the run's system prompt when this tool is active.
-prompt_hint = "Sentry MCP `sentry` is available: query recent issues/events for this repo to ground the diagnosis in production signal, not just code reading."
+prompt_hint = "Before diagnosing a Sentry-sourced issue (label `sentry:*`, a `MOCKINGBIRD-*` signature, or a Sentry-synced report), call `mcp__sentry_search_events` or `mcp__sentry_search_issues` for the exact event. NEVER hand-roll Sentry REST with `SENTRY_ACCESS_TOKEN` in bash/python: the MCP returns the same data structured and is the only sanctioned path."
