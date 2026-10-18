@@ -41,8 +41,10 @@ from tests.test_proxy_server import (
     _async_client,
     _build_app,
     _build_settings,
+    _git,
     _run_token,
     _signed,
+    _stage_workspace,
 )
 
 ORIGINAL = "carter-omp/abc123/issue-4"
@@ -255,6 +257,7 @@ async def test_attach_run_token_installs_a_refresh_that_follows_the_rename_and_p
         workspace=SimpleNamespace(branch=ORIGINAL),
         github=client,
         git_transport=None,
+        issue=SimpleNamespace(number=4),
     )
     bindings = SimpleNamespace(github=client, git_transport=None)
 
@@ -270,3 +273,90 @@ async def test_attach_run_token_installs_a_refresh_that_follows_the_rename_and_p
     pr = await bindings.github.open_pull_request(repo="octo/widget", head=RENAMED, base="main", title="t", body="b")
     assert pr.number == PR_NUMBER
     await bindings.github.request_reviewers(repo="octo/widget", pr_number=PR_NUMBER, reviewers=["alice"])
+
+
+def _pr_trigger() -> TriggerContext:
+    """A run triggered from the bot's own PR: the trigger carries the PR only."""
+    t = _trigger()
+    return TriggerContext(
+        run_id=t.run_id,
+        delivery_id=t.delivery_id,
+        repository_id=t.repository_id,
+        repository_full_name=t.repository_full_name,
+        installation_id=t.installation_id,
+        actor_id=t.actor_id,
+        actor_login=t.actor_login,
+        actor_type=t.actor_type,
+        event_type="issue_comment",
+        action="created",
+        trigger_kind="mention",
+        trigger_object_id=None,
+        trigger_value="carter-omp",
+        issue_number=None,
+        pull_request_number=8,
+        capabilities=t.capabilities,
+        policy_version=t.policy_version,
+        authorized_at=t.authorized_at,
+    )
+
+
+async def test_pr_triggered_run_pushes_the_originating_issue_workspace(
+    proxy_settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #70: the production-minted token pushes the issue workspace, not just the PR thread."""
+    from carter_omp import run_token as run_token_module
+
+    seed = tmp_path / "seed"
+    upstream = tmp_path / "upstream.git"
+    seed.mkdir()
+    _git(["init", "--initial-branch=main", str(seed)], tmp_path)
+    (seed / "README.md").write_text("hello\n", encoding="utf-8")
+    _git(["-C", str(seed), "add", "."], tmp_path)
+    _git(["-C", str(seed), "commit", "-m", "init"], tmp_path)
+    _git(["init", "--bare", str(upstream)], tmp_path)
+    _git(["-C", str(seed), "push", str(upstream), "main"], tmp_path)
+    branch = "carter-omp/abc123/pr-followup"
+    _, head = _stage_workspace(proxy_settings, upstream, "octo/widget", 7, branch)
+    client = GitHubProxyClient(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={})),
+    )
+    inputs = SimpleNamespace(
+        trigger=_pr_trigger(),
+        settings=proxy_settings,
+        workspace=SimpleNamespace(branch=branch),
+        github=client,
+        git_transport=None,
+        issue=SimpleNamespace(number=7),
+    )
+    bindings = SimpleNamespace(github=client, git_transport=None)
+    real_mint = run_token_module.mint_run_token
+    seen: dict[str, object] = {}
+
+    def _capture(**kwargs: object) -> str:
+        seen.update(kwargs)
+        return real_mint(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(run_token_module, "mint_run_token", _capture)
+    worker._attach_run_token(cast(Any, inputs), cast(Any, bindings))
+    assert (seen["issue"], seen["pull_request"]) == (7, 8)
+    app = _build_app(proxy_settings)
+    body = json.dumps(
+        {
+            "repo": "octo/widget",
+            "workspace_key": "octo__widget__7",
+            "branch": branch,
+            "expected_head": head,
+        }
+    ).encode()
+    async with await _async_client(app) as http:
+        resp = await http.post(
+            "/gh/v1/git/push",
+            content=body,
+            headers={
+                **_signed("POST", "/gh/v1/git/push", body, run_token=bindings.github._run_token),
+                "Content-Type": "application/json",
+            },
+        )
+    assert resp.status_code == 200, resp.text
