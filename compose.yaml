@@ -217,6 +217,13 @@ services:
   # ───────────────────────────────────────────────────────────────────────────
   github-proxy:
     image: carter-omp:dev
+    # The orchestrator reaches GitHub ONLY through this container
+    # (CARTER_OMP_GH_PROXY_URL). Without a restart policy a daemon restart came
+    # back with the orchestrator alone: the proxy stayed dead, its hostname
+    # stopped resolving, and every GitHub call failed with
+    # `Temporary failure in name resolution` until someone noticed by hand.
+    # The pair must restart together.
+    restart: unless-stopped
     security_opt:
       - no-new-privileges:true
     # Same reasoning as the orchestrator block above: the proxy runs the
