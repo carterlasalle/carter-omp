@@ -2135,6 +2135,79 @@ class Database:
             for row in rows
         ]
 
+    def get_staged_review_comment(self, issue_key: str, id: int) -> StagedReviewComment | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, issue_key, path, line, side, start_line, start_side, body, created_at
+                FROM pr_review_comments
+                WHERE id=? AND issue_key=?
+                """,
+                (id, issue_key),
+            ).fetchone()
+            if row is None:
+                return None
+        return StagedReviewComment(
+            id=int(row["id"]),
+            issue_key=row["issue_key"],
+            path=row["path"],
+            line=int(row["line"]),
+            side=row["side"],
+            body=row["body"],
+            created_at=row["created_at"],
+            start_line=int(row["start_line"]) if row["start_line"] is not None else None,
+            start_side=row["start_side"],
+        )
+
+    def update_staged_review_comment(
+        self,
+        issue_key: str,
+        id: int,
+        *,
+        path: str,
+        line: int,
+        side: str,
+        start_line: int | None,
+        start_side: str | None,
+        body: str,
+    ) -> StagedReviewComment | None:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE pr_review_comments
+                SET path=?, line=?, side=?, start_line=?, start_side=?, body=?
+                WHERE id=? AND issue_key=?
+                """,
+                (path, line, side, start_line, start_side, body, id, issue_key),
+            )
+            if (cur.rowcount or 0) == 0:
+                return None
+            row = self._conn.execute(
+                """
+                SELECT id, issue_key, path, line, side, start_line, start_side, body, created_at
+                FROM pr_review_comments
+                WHERE id=? AND issue_key=?
+                """,
+                (id, issue_key),
+            ).fetchone()
+        assert row is not None
+        return StagedReviewComment(
+            id=int(row["id"]),
+            issue_key=row["issue_key"],
+            path=row["path"],
+            line=int(row["line"]),
+            side=row["side"],
+            body=row["body"],
+            created_at=row["created_at"],
+            start_line=int(row["start_line"]) if row["start_line"] is not None else None,
+            start_side=row["start_side"],
+        )
+
+    def delete_staged_review_comment(self, issue_key: str, id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM pr_review_comments WHERE id=? AND issue_key=?", (id, issue_key))
+            return (cur.rowcount or 0) > 0
+
     def clear_staged_review_comments(self, issue_key: str) -> int:
         with self._lock:
             cur = self._conn.execute("DELETE FROM pr_review_comments WHERE issue_key=?", (issue_key,))

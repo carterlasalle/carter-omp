@@ -29,6 +29,39 @@ description = "Submit one GitHub PR review with all staged inline comments. Alwa
 body = "Markdown review summary. Required even when there are no inline comments."
 event = "Ignored except for schema compatibility; the orchestrator always sends `COMMENT`."
 
+[list_staged_pr_review_comments]
+description = "List staged inline PR review comments for this issue, oldest first. Read-only; review-mode only."
+
+[get_staged_pr_review_comment]
+description = "Fetch one staged inline PR review comment by id. Read-only; review-mode only."
+
+[get_staged_pr_review_comment.parameters]
+id = "Staged comment id from list_staged_pr_review_comments."
+
+[update_staged_pr_review_comment]
+description = "Edit one staged inline PR review comment in place. Omitted fields keep their values; explicit null start_line/start_side clears the range. Revalidates the anchor against the PR diff. Review-mode only."
+
+[update_staged_pr_review_comment.parameters]
+id = "Staged comment id from list_staged_pr_review_comments."
+path = "Changed file path to comment on. Omit to keep the current value."
+line = "Line number in the PR diff. Omit to keep the current value."
+side = "`RIGHT` for added/changed lines, `LEFT` for removed lines. Omit to keep the current value."
+body = "Markdown body for one concrete finding. Omit to keep the current value."
+start_line = "First line for a multi-line comment range. Explicit null clears the range."
+start_side = "Side for start_line; `RIGHT` or `LEFT`. Explicit null clears the range."
+
+[unstage_pr_review_comment]
+description = "Delete one staged inline PR review comment by id. Review-mode only."
+
+[unstage_pr_review_comment.parameters]
+id = "Staged comment id from list_staged_pr_review_comments."
+
+[clear_staged_pr_review_comments]
+description = "Delete all staged inline PR review comments for this issue. Review-mode only."
+
+[preview_pr_review]
+description = "Preview the submit-time view of staged inline comments: anchorable inline set, excluded set with reasons, and head validation. Read-only: performs zero DB writes and zero GitHub writes. Review-mode only."
+
 # trace:v1 id=ops.host-tool-report-pain-point work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 [report_pain_point]
 description = "Vent any annoyance or pain point you hit in this run — the harness, a tool, a gate, the instructions, anything that made the work harder than it should have been. Opens one issue on the carter-omp repo, labelled for triage, deduped by title so a repeat appends evidence instead of filing another. Use it whenever something feels wrong, not just when something breaks. WANT: `bun check` passes locally but the push gate rejects with a different error (gate/reality mismatch); a tool description promises X but the call does Y; the third run in a row lost 10 minutes to the same confusing retry; these instructions told you to do something that turned out to be wrong. DO NOT WANT: narrating normal work (`I had to think for a moment`); restating the task; speculation about internals you cannot see; defects in the repo you are working on (those are the job, not a report). Max 3 per issue — spend them on what stung most."

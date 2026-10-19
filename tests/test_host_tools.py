@@ -1391,7 +1391,9 @@ def test_submit_pr_review_failure_keeps_staged_comments_and_review_unrecorded(db
         stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
         submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
         stage_tool.execute({"path": "src/app.py", "line": 12, "body": "finding"}, _ctx())
-        stage_tool.execute({"path": "src/app.py", "line": 15, "body": "gap finding"}, _ctx())
+        # Stale-row seed: staging-time anchor validation rejects the line-15 gap;
+        # rows that went stale after staging still exercise the submit filter.
+        db.stage_review_comment(issue_key=bindings.issue_key, path="src/app.py", line=15, body="gap finding")
         with pytest.raises(RpcCommandError):
             submit_tool.execute({"body": "summary"}, _ctx())
     finally:
@@ -1427,7 +1429,9 @@ def test_submit_pr_review_drops_unanchorable_comment_and_folds_into_summary(db: 
         stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
         submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
         stage_tool.execute({"path": "src/app.py", "line": 12, "body": "in-hunk finding"}, _ctx())
-        stage_tool.execute({"path": "src/app.py", "line": 15, "body": "gap finding"}, _ctx())
+        # Stale-row seed: staging-time anchor validation rejects the line-15 gap;
+        # rows that went stale after staging still exercise the submit filter.
+        db.stage_review_comment(issue_key=bindings.issue_key, path="src/app.py", line=15, body="gap finding")
         result = submit_tool.execute({"body": "summary"}, _ctx())
     finally:
         _stop_loop(loop, t)
@@ -1463,9 +1467,10 @@ def test_submit_pr_review_drops_all_comments_submits_summary_only(db: Database, 
 
     bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
     try:
-        stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
         submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
-        stage_tool.execute({"path": "src/app.py", "line": 15, "body": "gap finding"}, _ctx())
+        # Stale-row seed: staging-time anchor validation rejects the line-15 gap;
+        # rows that went stale after staging still exercise the submit filter.
+        db.stage_review_comment(issue_key=bindings.issue_key, path="src/app.py", line=15, body="gap finding")
         result = submit_tool.execute({"body": "summary"}, _ctx())
     finally:
         _stop_loop(loop, t)
@@ -1499,9 +1504,10 @@ def test_submit_pr_review_drops_comment_for_path_not_in_diff(db: Database, tmp_p
 
     bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
     try:
-        stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
         submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
-        stage_tool.execute({"path": "src/other.py", "line": 3, "body": "stale path finding"}, _ctx())
+        # Stale-row seed: staging-time anchor validation rejects unknown paths;
+        # rows that went stale after staging still exercise the submit filter.
+        db.stage_review_comment(issue_key=bindings.issue_key, path="src/other.py", line=3, body="stale path finding")
         result = submit_tool.execute({"body": "summary"}, _ctx())
     finally:
         _stop_loop(loop, t)
@@ -1534,9 +1540,10 @@ def test_submit_pr_review_skips_validation_when_files_fetch_fails(db: Database, 
 
     bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
     try:
-        stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
         submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
-        stage_tool.execute({"path": "src/app.py", "line": 15, "body": "gap finding"}, _ctx())
+        # Stale-row seed: with the files fetch failing, staging-time validation
+        # is a recoverable error, so seed directly to exercise submit fail-open.
+        db.stage_review_comment(issue_key=bindings.issue_key, path="src/app.py", line=15, body="gap finding")
         result = submit_tool.execute({"body": "summary"}, _ctx())
     finally:
         _stop_loop(loop, t)
@@ -1633,16 +1640,16 @@ def test_submit_pr_review_range_requires_both_endpoints_anchorable(db: Database,
         stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
         submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
         # Reversed range: start_line (15) > line (14) — dropped.
-        stage_tool.execute(
-            {
-                "path": "src/app.py",
-                "line": 14,
-                "start_line": 15,
-                "start_side": "RIGHT",
-                "side": "RIGHT",
-                "body": "reversed range",
-            },
-            _ctx(),
+        # Stale-row seed: staging-time validation rejects reversed ranges now;
+        # rows that went stale after staging still exercise the submit filter.
+        db.stage_review_comment(
+            issue_key=bindings.issue_key,
+            path="src/app.py",
+            line=14,
+            side="RIGHT",
+            start_line=15,
+            start_side="RIGHT",
+            body="reversed range",
         )
         # Valid range: both endpoints (10, 12) are context lines in the hunk — kept.
         stage_tool.execute(
@@ -1657,16 +1664,16 @@ def test_submit_pr_review_range_requires_both_endpoints_anchorable(db: Database,
             _ctx(),
         )
         # Cross-side range: start_side LEFT with side RIGHT — dropped.
-        stage_tool.execute(
-            {
-                "path": "src/app.py",
-                "line": 11,
-                "start_line": 10,
-                "start_side": "LEFT",
-                "side": "RIGHT",
-                "body": "cross-side range",
-            },
-            _ctx(),
+        # Stale-row seed: staging-time validation rejects cross-side ranges now;
+        # rows that went stale after staging still exercise the submit filter.
+        db.stage_review_comment(
+            issue_key=bindings.issue_key,
+            path="src/app.py",
+            line=11,
+            side="RIGHT",
+            start_line=10,
+            start_side="LEFT",
+            body="cross-side range",
         )
         result = submit_tool.execute({"body": "summary"}, _ctx())
     finally:
@@ -1872,7 +1879,11 @@ def test_submit_pr_review_left_side_single_line_anchoring(db: Database, tmp_path
         stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
         submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
         stage_tool.execute({"path": "src/app.py", "line": 10, "side": "LEFT", "body": "old line finding"}, _ctx())
-        stage_tool.execute({"path": "src/app.py", "line": 13, "side": "LEFT", "body": "gap finding"}, _ctx())
+        # Stale-row seed: staging-time validation rejects the LEFT line-13 gap;
+        # rows that went stale after staging still exercise the submit filter.
+        db.stage_review_comment(
+            issue_key=bindings.issue_key, path="src/app.py", line=13, side="LEFT", body="gap finding"
+        )
         result = submit_tool.execute({"body": "summary"}, _ctx())
     finally:
         _stop_loop(loop, t)

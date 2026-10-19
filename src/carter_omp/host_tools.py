@@ -3181,9 +3181,30 @@ def _build_pr_review_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
             msg = "pr_review_comment 'start_side' must be RIGHT or LEFT when provided."
             _audit(bindings, "pr_review_comment", args, error=msg)
             _raise_command(msg)
+        clean_path = path.strip()
+        try:
+            pr_files = _run_coro(
+                bindings.loop,
+                bindings.github.list_pr_files(
+                    repo=bindings.repo.full_name,
+                    pr_number=bindings.default_comment_number,
+                ),
+            )
+        except GitHubError as exc:
+            msg = f"could not validate the comment anchor ({exc.status} {exc.message}); retry pr_review_comment."
+            _audit(bindings, "pr_review_comment", args, error=msg)
+            _raise_command(msg)
+        by_path = {pr_file.path: pr_file for pr_file in pr_files}
+        rejection = _anchor_rejection(clean_path, line, side, start_line, start_side, by_path, {})
+        if rejection is not None:
+            msg = f"pr_review_comment not anchorable: {rejection}."
+            _audit(bindings, "pr_review_comment", args, error=msg)
+            _raise_command(msg)
+        entry = by_path[clean_path]
+        unverified = not entry.patch
         staged = bindings.db.stage_review_comment(
             issue_key=bindings.issue_key,
-            path=path.strip(),
+            path=clean_path,
             line=line,
             side=side,
             start_line=start_line,
@@ -3192,6 +3213,8 @@ def _build_pr_review_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
         )
         count = len(bindings.db.list_staged_review_comments(bindings.issue_key))
         _audit(bindings, "pr_review_comment", args, result={"id": staged.id, "staged": count})
+        if unverified:
+            return f"staged review comment #{staged.id}; staged_count={count} (unverified: no diff patch for '{clean_path}')"
         return f"staged review comment #{staged.id}; staged_count={count}"
 
     return host_tool(
@@ -3277,6 +3300,53 @@ def _diff_anchorable_lines(patch: str) -> tuple[frozenset[int], frozenset[int]]:
     return frozenset(right), frozenset(left)
 
 
+def _anchor_rejection(
+    path: str,
+    line: int,
+    side: str,
+    start_line: int | None,
+    start_side: str | None,
+    by_path: Mapping[str, PullRequestFileInfo],
+    cache: dict[str, tuple[frozenset[int], frozenset[int]]],
+) -> str | None:
+    """Return why a comment cannot anchor, or None when it can.
+
+    Patchless entries (binary file, no-op change, API gap) fail open with
+    None — callers treat them as unverified, and the submit-time filter plus
+    the 422/500 fallback still catch a genuine rejection.
+    """
+    entry = by_path.get(path)
+    if entry is None:
+        changed = sorted(by_path)
+        expected = f"one of [{', '.join(changed)}]" if changed else "a path in the PR diff (changed set is empty)"
+        return f"path '{path}' is not in the PR diff; expected {expected}"
+    if not entry.patch:
+        return None
+    if entry.path not in cache:
+        cache[entry.path] = _diff_anchorable_lines(entry.patch)
+    right, left = cache[entry.path]
+    norm_side = side.upper()
+    lines = right if norm_side == "RIGHT" else left
+    if line not in lines:
+        return (
+            f"line {line} is not anchorable on side {norm_side} for '{path}'; "
+            f"anchorable {norm_side} lines: {sorted(lines)}"
+        )
+    if start_line is not None:
+        eff_start_side = (start_side or side).upper()
+        if eff_start_side != norm_side:
+            return f"start_side {eff_start_side} must match side {norm_side} for '{path}:{line}'"
+        if start_line > line:
+            return f"start_line {start_line} must be <= line {line} for '{path}'"
+        start_lines = right if eff_start_side == "RIGHT" else left
+        if start_line not in start_lines:
+            return (
+                f"start_line {start_line} is not anchorable on side {eff_start_side} for '{path}'; "
+                f"anchorable {eff_start_side} lines: {sorted(start_lines)}"
+            )
+    return None
+
+
 def _filter_anchorable_comments(staged: list[Any], files: list[PullRequestFileInfo]) -> tuple[list[Any], list[Any]]:
     """Partition staged comments into (anchorable, dropped) by diff hunk membership."""
     by_path = {f.path: f for f in files}
@@ -3284,33 +3354,11 @@ def _filter_anchorable_comments(staged: list[Any], files: list[PullRequestFileIn
     anchorable: list[Any] = []
     dropped: list[Any] = []
     for c in staged:
-        entry = by_path.get(c.path)
-        if entry is None:
-            dropped.append(c)  # path not in the PR diff (stale/renamed path)
-            continue
-        if entry.path not in cache:
-            cache[entry.path] = _diff_anchorable_lines(entry.patch)
-        right, left = cache[entry.path]
-        if not entry.patch:
-            # Platform omitted the patch (binary file, no-op, API gap) —
-            # fail open per handoff §3c; a genuine rejection is caught by
-            # the 422/500 fallback after submit.
-            anchorable.append(c)
-            continue
         side = str(c.side or "RIGHT").upper()
-        lines = right if side == "RIGHT" else left
-        if c.start_line is not None:
-            start_side = str(c.start_side or side).upper()
-            if start_side != side or c.start_line > c.line:
-                dropped.append(c)
-                continue
-            if c.start_line not in lines or c.line not in lines:
-                dropped.append(c)
-                continue
-        elif c.line not in lines:
+        if _anchor_rejection(c.path, c.line, side, c.start_line, c.start_side, by_path, cache) is None:
+            anchorable.append(c)
+        else:
             dropped.append(c)
-            continue
-        anchorable.append(c)
     return anchorable, dropped
 
 
@@ -3366,6 +3414,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                 commit_id = None
         body = f"{body.strip()}{_footer_suffix(bindings)}"
         dropped: list[Any] = []
+        filtered: list[Any] = list(staged)
         if staged:
             try:
                 pr_files = _run_coro(
@@ -3432,7 +3481,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                     body,
                     logical_prefix="review-summary",
                 )
-                for comment in staged:
+                for comment in filtered:
                     _post_comment_idempotent(
                         bindings,
                         bindings.default_comment_number,
@@ -3460,8 +3509,10 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                     "cleared": cleared,
                 },
             )
+            dropped_suffix = f"; dropped {len(dropped)} not anchored to diff" if dropped else ""
             return (
                 f"review rejected ({exc.status}); posted summary + {posted_inline} inline comment(s) as issue comments"
+                f"{dropped_suffix}"
             )
         cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
         _phase(bindings, "review", f"comments={len(comments)}")
@@ -3501,6 +3552,366 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             "required": ["body"],
             "additionalProperties": False,
         },
+        execute=_tool_execute(execute),
+    )
+
+
+def _staged_comment_id(bindings: ToolBindings, name: str, args: Mapping[str, Any]) -> int:
+    raw = args.get("id")
+    if not isinstance(raw, int) or raw <= 0:
+        msg = f"{name} requires a positive integer 'id'."
+        _audit(bindings, name, args, error=msg)
+        _raise_command(msg)
+    return int(raw)
+
+
+def _format_staged_comment(comment: Any) -> str:
+    start = ""
+    if comment.start_line is not None:
+        start = f" [{comment.start_side or comment.side}:{comment.start_line}]"
+    return f"#{comment.id} `{comment.path}:{comment.line}` ({comment.side}{start})\n  {comment.body}"
+
+
+def _build_list_staged(bindings: ToolBindings) -> HostTool[Any, Any]:
+    def execute(args: dict[str, Any]) -> str:
+        _require_review_mode(bindings, "list_staged_pr_review_comments", args)
+        staged = bindings.db.list_staged_review_comments(bindings.issue_key)
+        _audit(
+            bindings,
+            "list_staged_pr_review_comments",
+            args,
+            result={"staged": len(staged), "ids": [c.id for c in staged]},
+        )
+        if not staged:
+            return "no staged review comments."
+        lines = [f"staged review comments ({len(staged)}):"]
+        lines.extend(_format_staged_comment(c) for c in staged)
+        return "\n".join(lines)
+
+    return host_tool(
+        name="list_staged_pr_review_comments",
+        description=persona.host_tool_description("list_staged_pr_review_comments"),
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+        execute=_tool_execute(execute),
+    )
+
+
+def _build_get_staged(bindings: ToolBindings) -> HostTool[Any, Any]:
+    def execute(args: dict[str, Any]) -> str:
+        _require_review_mode(bindings, "get_staged_pr_review_comment", args)
+        comment_id = _staged_comment_id(bindings, "get_staged_pr_review_comment", args)
+        comment = bindings.db.get_staged_review_comment(bindings.issue_key, comment_id)
+        if comment is None:
+            msg = f"unknown staged review comment #{comment_id}."
+            _audit(bindings, "get_staged_pr_review_comment", args, error=msg)
+            _raise_command(msg)
+        _audit(bindings, "get_staged_pr_review_comment", args, result={"id": comment.id})
+        return (
+            f"staged comment #{comment.id}\n"
+            f"path: {comment.path}\n"
+            f"line: {comment.line}\n"
+            f"side: {comment.side}\n"
+            f"start_line: {comment.start_line}\n"
+            f"start_side: {comment.start_side}\n"
+            f"body:\n{comment.body}"
+        )
+
+    return host_tool(
+        name="get_staged_pr_review_comment",
+        description=persona.host_tool_description("get_staged_pr_review_comment"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": persona.host_tool_parameter_description("get_staged_pr_review_comment", "id"),
+                },
+            },
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+        execute=_tool_execute(execute),
+    )
+
+
+def _build_update_staged(bindings: ToolBindings) -> HostTool[Any, Any]:
+    def execute(args: dict[str, Any]) -> str:
+        name = "update_staged_pr_review_comment"
+        _require_review_mode(bindings, name, args)
+        comment_id = _staged_comment_id(bindings, name, args)
+        existing = bindings.db.get_staged_review_comment(bindings.issue_key, comment_id)
+        if existing is None:
+            msg = f"unknown staged review comment #{comment_id}."
+            _audit(bindings, name, args, error=msg)
+            _raise_command(msg)
+        path = existing.path
+        if "path" in args and args["path"] is not None:
+            if not isinstance(args["path"], str) or not args["path"].strip():
+                msg = f"{name} requires a non-empty 'path' when provided."
+                _audit(bindings, name, args, error=msg)
+                _raise_command(msg)
+            path = args["path"].strip()
+        line = existing.line
+        if "line" in args and args["line"] is not None:
+            if not isinstance(args["line"], int) or args["line"] <= 0:
+                msg = f"{name} requires a positive integer 'line' when provided."
+                _audit(bindings, name, args, error=msg)
+                _raise_command(msg)
+            line = args["line"]
+        body = existing.body
+        if "body" in args and args["body"] is not None:
+            if not isinstance(args["body"], str) or not args["body"].strip():
+                msg = f"{name} requires a non-empty 'body' when provided."
+                _audit(bindings, name, args, error=msg)
+                _raise_command(msg)
+            body = args["body"].strip()
+        side = existing.side
+        if "side" in args and args["side"] is not None:
+            if args["side"] not in ("RIGHT", "LEFT"):
+                msg = f"{name} 'side' must be RIGHT or LEFT when provided."
+                _audit(bindings, name, args, error=msg)
+                _raise_command(msg)
+            side = args["side"]
+        start_line = existing.start_line
+        if "start_line" in args:
+            if args["start_line"] is None:
+                start_line = None
+            else:
+                if not isinstance(args["start_line"], int) or args["start_line"] <= 0:
+                    msg = f"{name} 'start_line' must be a positive integer when provided."
+                    _audit(bindings, name, args, error=msg)
+                    _raise_command(msg)
+                start_line = args["start_line"]
+        start_side = existing.start_side
+        if "start_side" in args:
+            if args["start_side"] is None:
+                start_side = None
+            else:
+                if args["start_side"] not in ("RIGHT", "LEFT"):
+                    msg = f"{name} 'start_side' must be RIGHT or LEFT when provided."
+                    _audit(bindings, name, args, error=msg)
+                    _raise_command(msg)
+                start_side = args["start_side"]
+        try:
+            pr_files = _run_coro(
+                bindings.loop,
+                bindings.github.list_pr_files(
+                    repo=bindings.repo.full_name,
+                    pr_number=bindings.default_comment_number,
+                ),
+            )
+        except GitHubError as exc:
+            msg = f"could not validate the comment anchor ({exc.status} {exc.message}); retry {name}."
+            _audit(bindings, name, args, error=msg)
+            _raise_command(msg)
+        by_path = {pr_file.path: pr_file for pr_file in pr_files}
+        rejection = _anchor_rejection(path, line, side, start_line, start_side, by_path, {})
+        if rejection is not None:
+            msg = f"{name} not anchorable: {rejection}."
+            _audit(bindings, name, args, error=msg)
+            _raise_command(msg)
+        updated = bindings.db.update_staged_review_comment(
+            bindings.issue_key,
+            comment_id,
+            path=path,
+            line=line,
+            side=side,
+            start_line=start_line,
+            start_side=start_side,
+            body=body,
+        )
+        if updated is None:
+            msg = f"unknown staged review comment #{comment_id}."
+            _audit(bindings, name, args, error=msg)
+            _raise_command(msg)
+        _audit(bindings, name, args, result={"id": updated.id, "path": updated.path, "line": updated.line})
+        return f"updated staged review comment #{updated.id} (`{updated.path}:{updated.line}`)"
+
+    return host_tool(
+        name="update_staged_pr_review_comment",
+        description=persona.host_tool_description("update_staged_pr_review_comment"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": persona.host_tool_parameter_description("update_staged_pr_review_comment", "id"),
+                },
+                "path": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("update_staged_pr_review_comment", "path"),
+                },
+                "line": {
+                    "type": "integer",
+                    "description": persona.host_tool_parameter_description("update_staged_pr_review_comment", "line"),
+                },
+                "side": {
+                    "type": "string",
+                    "enum": ["RIGHT", "LEFT"],
+                    "description": persona.host_tool_parameter_description("update_staged_pr_review_comment", "side"),
+                },
+                "body": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("update_staged_pr_review_comment", "body"),
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": persona.host_tool_parameter_description(
+                        "update_staged_pr_review_comment", "start_line"
+                    ),
+                },
+                "start_side": {
+                    "type": "string",
+                    "enum": ["RIGHT", "LEFT"],
+                    "description": persona.host_tool_parameter_description(
+                        "update_staged_pr_review_comment", "start_side"
+                    ),
+                },
+            },
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+        execute=_tool_execute(execute),
+    )
+
+
+def _build_unstage(bindings: ToolBindings) -> HostTool[Any, Any]:
+    def execute(args: dict[str, Any]) -> str:
+        _require_review_mode(bindings, "unstage_pr_review_comment", args)
+        comment_id = _staged_comment_id(bindings, "unstage_pr_review_comment", args)
+        removed = bindings.db.delete_staged_review_comment(bindings.issue_key, comment_id)
+        if not removed:
+            msg = f"unknown staged review comment #{comment_id}."
+            _audit(bindings, "unstage_pr_review_comment", args, error=msg)
+            _raise_command(msg)
+        _audit(bindings, "unstage_pr_review_comment", args, result={"id": comment_id, "removed": True})
+        return f"unstaged review comment #{comment_id}"
+
+    return host_tool(
+        name="unstage_pr_review_comment",
+        description=persona.host_tool_description("unstage_pr_review_comment"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": persona.host_tool_parameter_description("unstage_pr_review_comment", "id"),
+                },
+            },
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+        execute=_tool_execute(execute),
+    )
+
+
+def _build_clear_staged(bindings: ToolBindings) -> HostTool[Any, Any]:
+    def execute(args: dict[str, Any]) -> str:
+        _require_review_mode(bindings, "clear_staged_pr_review_comments", args)
+        cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
+        _audit(bindings, "clear_staged_pr_review_comments", args, result={"cleared": cleared})
+        return f"cleared {cleared} staged review comment(s)"
+
+    return host_tool(
+        name="clear_staged_pr_review_comments",
+        description=persona.host_tool_description("clear_staged_pr_review_comments"),
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+        execute=_tool_execute(execute),
+    )
+
+
+def _build_preview(bindings: ToolBindings) -> HostTool[Any, Any]:
+    def execute(args: dict[str, Any]) -> str:
+        _require_review_mode(bindings, "preview_pr_review", args)
+        staged = bindings.db.list_staged_review_comments(bindings.issue_key)
+        try:
+            current = _run_coro(
+                bindings.loop,
+                bindings.github.get_pull_request(
+                    repo=bindings.repo.full_name,
+                    number=bindings.default_comment_number,
+                ),
+            )
+        except GitHubError as exc:
+            msg = (
+                f"could not verify the PR head before previewing ({exc.status} {exc.message}); retry preview_pr_review."
+            )
+            _audit(bindings, "preview_pr_review", args, error=msg)
+            _raise_command(msg)
+        reviewed_head = bindings.db.review_head(bindings.issue_key)
+        validation: list[str] = []
+        if not reviewed_head:
+            validation.append(
+                "head: no recorded review head (fetch_pr has not stored one); submit will skip the head check"
+            )
+        elif current.head_sha and current.head_sha != reviewed_head:
+            validation.append(
+                f"head: MOVED from {reviewed_head[:12]} to {current.head_sha[:12]} since fetch_pr; "
+                "re-run fetch_pr and review the new head before submitting"
+            )
+        elif current.head_sha:
+            validation.append(f"head: {current.head_sha[:12]} matches fetch_pr; review evidence is current")
+        else:
+            validation.append("head: PR head SHA unavailable; submit will skip the head check")
+        anchorable: list[Any] = list(staged)
+        dropped: list[Any] = []
+        reasons: dict[int, str] = {}
+        if staged:
+            try:
+                pr_files = _run_coro(
+                    bindings.loop,
+                    bindings.github.list_pr_files(
+                        repo=bindings.repo.full_name,
+                        pr_number=bindings.default_comment_number,
+                    ),
+                )
+            except GitHubError as exc:
+                msg = (
+                    "could not fetch PR files to preview anchors "
+                    f"({exc.status} {exc.message}); retry preview_pr_review."
+                )
+                _audit(bindings, "preview_pr_review", args, error=msg)
+                _raise_command(msg)
+            anchorable, dropped = _filter_anchorable_comments(staged, pr_files)
+            by_path = {pr_file.path: pr_file for pr_file in pr_files}
+            cache: dict[str, tuple[frozenset[int], frozenset[int]]] = {}
+            for comment in dropped:
+                reasons[comment.id] = (
+                    _anchor_rejection(
+                        comment.path,
+                        comment.line,
+                        str(comment.side or "RIGHT"),
+                        comment.start_line,
+                        comment.start_side,
+                        by_path,
+                        cache,
+                    )
+                    or "not anchorable to the PR diff"
+                )
+            validation.append(f"files: {len(pr_files)} changed file(s) fetched")
+            validation.append(f"submit would post {len(anchorable)} inline comment(s); {len(dropped)} excluded")
+        else:
+            validation.append("files: no staged comments; nothing to anchor")
+        lines = [f"preview: {len(staged)} staged comment(s) for {bindings.issue_key}"]
+        lines.append(f"## Inline ({len(anchorable)})")
+        lines.extend(_format_staged_comment(comment) for comment in anchorable)
+        lines.append(f"## Excluded ({len(dropped)})")
+        for comment in dropped:
+            lines.append(f"{_format_staged_comment(comment)} — {reasons.get(comment.id, 'not anchorable')}")
+        lines.append("## Validation")
+        lines.extend(f"- {item}" for item in validation)
+        _audit(
+            bindings,
+            "preview_pr_review",
+            args,
+            result={"staged": len(staged), "anchorable": len(anchorable), "dropped": len(dropped)},
+        )
+        return "\n".join(lines)
+
+    return host_tool(
+        name="preview_pr_review",
+        description=persona.host_tool_description("preview_pr_review"),
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
         execute=_tool_execute(execute),
     )
 
@@ -3864,6 +4275,12 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
             _build_fetch_pr(bindings),
             _build_classify_pr(bindings),
             _build_pr_review_comment(bindings),
+            _build_list_staged(bindings),
+            _build_get_staged(bindings),
+            _build_update_staged(bindings),
+            _build_unstage(bindings),
+            _build_clear_staged(bindings),
+            _build_preview(bindings),
             _build_submit_pr_review(bindings),
         ]
     if Capability.PUSH_BRANCH in caps:
