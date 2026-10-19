@@ -119,17 +119,29 @@ applied.
   `python/robomp`-scoped hunk is the `AGENTS.md` local-install recipe
   (carried from `ff8a98362e`); carter already resolves `omp-rpc` locally via
   `[tool.uv.sources]` in `pyproject.toml`. Reviewed, no new diff.
+- `cbaab046652af69d356da1a3b93f3cb1ecb5a995` (2026-10-01, merge of main into
+  the #12358 branch on top of `06ca9883f7`, itself 2026-10-01 main) — the
+  tree diff against extraction `3d3ec7e` for the extracted paths is identical
+  in substance to the already-reviewed `fd4542b` (2026-10-03): the delta comes
+  from the main-side parent, not from new `python/robomp` work. It resolves
+  to (a) the already-ported `baf63aa1` backfill (`_backfill_tip_blobs`,
+  `input=` on `_run_git`, tip-only `--missing=print -n1` fixture assertions),
+  now visible in `src/carter_omp/git_ops.py` and `tests/test_sandbox.py` with
+  the `oh-my-pi#1818` comment intact, plus one retained `live-older` test
+  matching carter's `web/src/work-items.test.ts`; (b) the already-reviewed
+  `6647b0bf` branding divergence (`oh-my-pi` → `omp` in `.env.example` /
+  `AGENTS.md` / `README.md`), intentionally not adopted; (c) the already-
+  deferred 18.3–18.5 RPC/wire features (`prompt_result` /
+  `session_settled`, queued-message snapshot + `promote_queued_message`,
+  `open_session` / `set_event_filter`, `set_cache_warming`, `fork`, goal
+  mode/subagents/live voice, `sdk/python/omp-rpc` move), still blocked on a
+  deliberate `OMP_VERSION` bump past the pinned `18.2.11` (`Dockerfile`) and
+  absent from `vendor/omp-rpc` by design; and (d) the already-reviewed
+  `aa5aab0f` duplicate-test removals, with only the older duplicates gone and
+  the newest duplicate sibling kept in both trees. The second parent also
+  reverts `worker.py` / `tests/test_worker.py` to the pre-`fd4542b` state
+  (manual todo-merge loop, no `on_host_tool_completed` / eval-bridge
+  paragraph) — carter already ports the newer `fd4542b` side (`_on_host_tool_completed`
+  at `src/carter_omp/worker.py:1145`, registered at `:1355`), so there is no
+  regression to adopt. Nothing to port; no new diff.
 - `1459332dc8f48b65124fcd0b831f28881e02bb1c` (2026-09-24) prompt results /
-  session-settled frames / headless host mode, `c867895e83b1672db67244d4455ebbb2cefcaf30`
-  (2026-09-29) queued groups + Python binding, `b493cf68658b0fce88e78c745514d10c2775c14b`
-  (2026-09-29) queued-message snapshot, `10a0846131fe86d0da3252cbe405a3ec6528027a`
-  (2026-09-30) `promote_queued_message`, `0f1e064d01ccef2667440948f3b729e8ec12c9ed`
-  (2026-09-30) aborted-refresh billed usage + `set_cache_warming`,
-  `cb94bcb5eb198cbdf7ddb905cd181aaad05f9d7b` (2026-10-02) `fork` command,
-  `c2ccbee9a27575c683ece74b793d25fab486cd7f` (2026-10-03) goal
-  mode/subagents/live voice, `c4d3204151aaafdc4fc4b91045789ff1fed84c9f`
-  (2026-10-03) generated wire schema + moved `sdk/python/omp-rpc` — RPC client
-  and wire features from OMP 18.3–18.5. They bind to the 18.5.0 wire protocol;
-  carter pins the OMP binary at `18.2.11` (`Dockerfile`) and keeps
-  `vendor/omp-rpc` in sync with that binary, so incorporating them requires a
-  deliberate `OMP_VERSION` bump first.
