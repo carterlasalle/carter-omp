@@ -1227,3 +1227,19 @@ def test_abandon_missing_issues_settles_rows_gone_upstream(db: Database) -> None
     assert _issue(db, "octo/widget#1").state == "reproducing"
     assert _issue(db, "octo/widget#2").state == "abandoned"
     assert db.abandon_missing_issues("octo/widget", {1}) == []
+
+
+def test_issue_run_count_ignores_the_current_delivery(db: Database) -> None:
+    key = issue_key("octo/widget", 1)
+    for delivery_id, state in (("run-1", "done"), ("run-2", "done"), ("run-3", "failed")):
+        db.record_event(
+            delivery_id=delivery_id,
+            event_type="issues",
+            repo="octo/widget",
+            issue_key=key,
+            payload={},
+            state=state,
+        )
+
+    assert db.issue_run_count(key) == 2
+    assert db.issue_run_count(key, exclude_delivery="run-2") == 1

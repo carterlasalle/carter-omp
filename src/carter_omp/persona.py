@@ -180,6 +180,67 @@ def system_append(
     )
 
 
+# trace:v1 id=impl.persona-authority work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def authority_section(*, actor: str, trigger_kind: str, is_maintainer: bool) -> str:
+    """Tell the run who authorized it, when that person is a maintainer.
+
+    The model's default caution is to hand decisions back ("deferring to
+    maintainers"), which is right for a drive-by commenter and absurd when the
+    maintainer is the one who labeled the issue. The request IS the decision.
+    """
+    if not actor or not is_maintainer:
+        return ""
+    return (
+        "<authority>\n"
+        f"This run was requested by `{actor}` via a `{trigger_kind}` trigger, and they are a "
+        "maintainer of this deployment. That request is the maintainer decision: do not defer "
+        "the call back to maintainers, do not ask whether they want it fixed, and never describe "
+        "the outcome as left to maintainer judgment. Make the call, do the work, and justify it "
+        "in the PR body.\n"
+        "</authority>"
+    )
+
+
+# trace:v1 id=impl.persona-root-cause work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+def root_cause_section(*, reopened: bool, prior_runs: int) -> str:
+    """The discipline block every issue run gets.
+
+    "Fix the root cause" was already one line in the system prompt, and a run
+    still shipped a lock-striping patch only after a human said "trace it to
+    the source". Making the trace a stated deliverable — file:line, mechanism,
+    and why it is not a band-aid — is what turns the instruction into work.
+    """
+    lines = [
+        "<root-cause>",
+        "Trace before you edit. Find the line that produces the reported symptom, name it "
+        "(file:line) and the mechanism, then fix that line — not the caller that noticed it. "
+        "A retry, timeout bump, catch, or input special-case that hides the symptom is not a fix.",
+        "Never close a report as expected, intended, or by design. The signal may be intentional "
+        "(telemetry, a guard, a Sentry event) — the condition that fires it is still the defect. "
+        "Find what triggers it and fix that. If the cause belongs to another repo, file it with "
+        "gh_create_issue and say where.",
+        "When the report is CI/telemetry carrying only an error code, start at the code that emits "
+        "that code and walk outward to its trigger.",
+        "`## Cause` in the PR body must name the mechanism with file:line; 'expected behavior' is not a cause.",
+        "</root-cause>",
+    ]
+    if reopened:
+        lines.insert(
+            1,
+            "This issue was closed and has been REOPENED: the previous fix did not hold. Read the "
+            "prior PR and reproduce the failure again before changing anything — find why the "
+            "earlier change missed.",
+        )
+    if prior_runs:
+        lines.insert(
+            1,
+            f"This issue already has {prior_runs} completed run(s). Treat their patches as evidence "
+            "to check, not as a foundation: if the same symptom is back, the previous diagnosis was "
+            "incomplete.",
+        )
+    return "\n".join(lines)
+
+
 # trace:v1 id=impl.persona-system-append-pr-review work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
 def system_append_pr_review(
     *, repo: RepoInfo, issue: IssueInfo, workspace: Workspace, bot_login: str, org_tools_section: str = ""

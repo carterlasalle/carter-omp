@@ -2663,7 +2663,7 @@ def test_gh_open_pr_rejects_wrong_identity_before_push_or_pr(db: Database, tmp_p
         )
         db.set_issue_classification(bindings.issue_key, "bug")
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
-        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        body = "## Repro\nrepro\n\n## Cause\napp/module.py:1 — cause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
         with pytest.raises(RpcCommandError) as exc:
             tool.execute({"title": "fix: x", "body": body}, _ctx())
         assert "identity mismatch" in str(exc.value)
@@ -2817,7 +2817,7 @@ def test_gh_open_pr_requires_closes_keyword(db: Database, tmp_path: Path) -> Non
     db.set_issue_classification(bindings.issue_key, "bug")
     try:
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
-        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n"
+        body = "## Repro\nrepro\n\n## Cause\napp/module.py:1 — cause\n\n## Fix\nfix\n\n## Verification\nran tests\n"
         with pytest.raises(RpcCommandError) as exc:
             tool.execute({"title": "fix: x", "body": body}, _ctx())
         assert "Fixes #42" in str(exc.value)
@@ -2867,7 +2867,7 @@ def test_gh_open_pr_refuses_failed_bun_check_before_push_or_pr(
 
     try:
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
-        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        body = "## Repro\nrepro\n\n## Cause\napp/module.py:1 — cause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
         with pytest.raises(RpcCommandError) as exc:
             tool.execute({"title": "fix: x", "body": body}, _ctx())
     finally:
@@ -2930,7 +2930,7 @@ def test_gh_open_pr_refuses_failed_bun_run_test_before_push_or_pr(
 
     try:
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
-        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        body = "## Repro\nrepro\n\n## Cause\napp/module.py:1 — cause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
         with pytest.raises(RpcCommandError) as exc:
             tool.execute({"title": "fix: x", "body": body}, _ctx())
     finally:
@@ -3995,7 +3995,7 @@ def test_gh_open_pr_runs_fix_then_check_and_amends_formatter_diff(
         # mechanics, not the implementation-authorization gate.
         db.set_issue_classification(bindings.issue_key, "bug")
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
-        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        body = "## Repro\nrepro\n\n## Cause\napp/module.py:1 — cause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
         result = tool.execute({"title": "fix: x", "body": body}, _ctx())
     finally:
         _stop_loop(loop, thread)
@@ -4177,7 +4177,7 @@ def test_gh_open_pr_skip_capability_bypasses_failing_bun_run_test(
         )
         db.set_issue_classification(bindings.issue_key, "bug")
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
-        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\n`bun run test` red on main\n\nFixes #42\n"
+        body = "## Repro\nrepro\n\n## Cause\napp/module.py:1 — cause\n\n## Fix\nfix\n\n## Verification\n`bun run test` red on main\n\nFixes #42\n"
         from dataclasses import replace
 
         bindings = replace(bindings, capabilities=bindings.capabilities | {Capability.SKIP_CHECKS})
@@ -4338,7 +4338,7 @@ def test_gh_open_pr_refuses_dirty_worktree_before_fix(
         assert "dirty worktree" in str(exc.value).lower()
 
         pr_tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
-        body = "## Repro\nr\n\n## Cause\nc\n\n## Fix\nf\n\n## Verification\nv\n\nFixes #42\n"
+        body = "## Repro\nr\n\n## Cause\napp/module.py:1 — c\n\n## Fix\nf\n\n## Verification\nv\n\nFixes #42\n"
         with pytest.raises(RpcCommandError) as exc2:
             pr_tool.execute({"title": "fix: x", "body": body}, _ctx())
         assert "dirty worktree" in str(exc2.value).lower()
@@ -4514,7 +4514,7 @@ def test_gh_open_pr_skips_fix_when_no_script(db: Database, tmp_path: Path, monke
         refreshes: list[tuple[str | None, int | None]] = []
         object.__setattr__(bindings, "refresh_run_token", lambda branch, pr: refreshes.append((branch, pr)))
         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
-        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        body = "## Repro\nrepro\n\n## Cause\napp/module.py:1 — cause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
         result = tool.execute({"title": "fix: x", "body": body}, _ctx())
     finally:
         _stop_loop(loop, thread)
@@ -5718,3 +5718,29 @@ def test_gh_create_issue_is_capped_per_issue(db: Database, tmp_path: Path) -> No
     finally:
         _stop_loop(loop, t)
     assert calls["n"] == 3
+
+
+def test_gh_open_pr_rejects_a_cause_that_names_no_code(db: Database, tmp_path: Path) -> None:
+    """'It's an intentional telemetry signal' is not a cause — nothing fires itself."""
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda *_: httpx.Response(500)))
+    db.set_issue_classification(bindings.issue_key, "bug")
+    body = (
+        "## Repro\nx\n\n## Cause\nthis error is expected; it is a telemetry signal by design\n\n"
+        "## Fix\nf\n\n## Verification\nv\n\nFixes #42\n"
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "t", "body": body}, _ctx())
+        assert "cite the code" in str(exc.value)
+    finally:
+        _stop_loop(loop, t)
+
+
+def test_cause_section_accepts_a_file_and_line() -> None:
+    from carter_omp.host_tools import _CAUSE_LOCATION_RE, _cause_section
+
+    section = _cause_section("## Repro\nx\n\n## Cause\n`api/geo_layer_sync.py:120` holds one lock\n\n## Fix\nf\n")
+    assert _CAUSE_LOCATION_RE.search(section)
+    assert _CAUSE_LOCATION_RE.search("web/src/state.ts")
+    assert not _CAUSE_LOCATION_RE.search("expected behavior from the upstream API")

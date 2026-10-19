@@ -1233,6 +1233,26 @@ def _run_rpc_blocking(
             "than here you may file the issue against them.\n"
             "</linked-repos>"
         )
+    issue_number = inputs.issue.number if inputs.issue is not None else None
+    prior_runs = (
+        inputs.db.issue_run_count(inputs.repo.full_name + "#" + str(issue_number), exclude_delivery=inputs.delivery_id)
+        if issue_number is not None
+        else 0
+    )
+    authority = persona.authority_section(
+        actor=str(getattr(inputs.trigger, "actor_login", "") or ""),
+        trigger_kind=str(getattr(inputs.trigger, "trigger_kind", "") or ""),
+        is_maintainer=str(getattr(inputs.trigger, "actor_login", "") or "").lower()
+        in inputs.settings.maintainer_logins,
+    )
+    if authority:
+        policy_blocks.append(authority)
+    policy_blocks.append(
+        persona.root_cause_section(
+            reopened=str(getattr(inputs.trigger, "action", "") or "") == "reopened",
+            prior_runs=prior_runs,
+        )
+    )
     policy_blocks.append(
         "<out-of-scope>\n"
         "When you find a real defect that does not belong in this task, file it with "

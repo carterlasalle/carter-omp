@@ -356,3 +356,33 @@ def test_system_append_renders_the_repo_policy_section() -> None:
 
     assert "<repo-policy>" in out
     assert "CI disabled here." in out
+
+
+def test_root_cause_section_demands_a_trace_and_names_reopens() -> None:
+    """The block is the difference between 'fix the root cause' as a slogan and
+    as a deliverable: file:line, mechanism, and why it is not a band-aid."""
+    from carter_omp.persona import root_cause_section
+
+    plain = root_cause_section(reopened=False, prior_runs=0)
+    assert "`## Cause`" in plain
+    assert "expected, intended, or by design" in plain
+    assert "REOPENED" not in plain
+    assert "completed run" not in plain
+
+    reopened = root_cause_section(reopened=True, prior_runs=3)
+    assert "REOPENED" in reopened
+    assert "3 completed run(s)" in reopened
+
+
+def test_authority_section_only_for_maintainer_triggers() -> None:
+    """'Deferring to maintainers' is wrong when the maintainer asked for it."""
+    from carter_omp.persona import authority_section
+
+    assert authority_section(actor="someone", trigger_kind="mention", is_maintainer=False) == ""
+    assert authority_section(actor="", trigger_kind="label", is_maintainer=True) == ""
+
+    block = authority_section(actor="carterlasalle", trigger_kind="label", is_maintainer=True)
+    assert "`carterlasalle`" in block
+    assert "`label`" in block
+    assert "do not defer" in block
+    assert "maintainer judgment" in block

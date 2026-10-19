@@ -2182,6 +2182,26 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 
 # ---------- gh_open_pr ----------
+# A real cause names code: `api/geo.py:120`, `web/src/state.ts`. A dismissal
+# ("expected telemetry") names nothing, which is exactly how a report gets
+# closed without anyone finding what fires it.
+_CAUSE_LOCATION_RE = re.compile(
+    r"[\w./-]+\.(?:py|ts|tsx|js|jsx|mjs|cjs|go|rs|rb|java|kt|swift|sql|ya?ml|toml|css|html)\b(?::\d+)?",
+    re.IGNORECASE,
+)
+
+
+# trace:v1 id=impl.host-tools-cause-section work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+def _cause_section(body: str) -> str:
+    """Text under `## Cause`, up to the next section header."""
+    start = body.find("## Cause")
+    if start < 0:
+        return ""
+    rest = body[start + len("## Cause") :]
+    end = rest.find("\n## ")
+    return rest if end < 0 else rest[:end]
+
+
 # trace:v1 id=impl.host-tools-open-pr work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
     # trace:v1 id=impl.host-tools-open-pr-execute work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
@@ -2202,6 +2222,18 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
                 _raise_command(
                     f"PR body missing required section header {required!r}. "
                     "Follow the template in the system prompt verbatim."
+                )
+        # A bug PR whose Cause names no code is a dismissal in disguise: the
+        # signal may be intentional, but something fires it, and that is the
+        # defect. Blocked here rather than argued about in review.
+        issue_row = bindings.db.get_issue(bindings.issue_key)
+        if issue_row is not None and issue_row.classification == "bug":
+            cause = _cause_section(body)
+            if not _CAUSE_LOCATION_RE.search(cause):
+                _raise_command(
+                    "## Cause must cite the code that produced the bug (a path like "
+                    "`api/geo.py:120`). 'Expected behavior' is not a cause: the signal may be "
+                    "intentional, but the condition that fires it is the defect."
                 )
         # Auto-close keyword. GitHub closes the linked issue on merge only when
         # one of `Fixes / Closes / Resolves #<n>` is present in the PR body.

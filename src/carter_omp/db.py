@@ -2536,6 +2536,16 @@ class Database:
             self._conn.execute("DELETE FROM _issue_index_keep")
             return int(cur.rowcount)
 
+    # trace:v1 id=impl.db-issue-run-count work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
+    def issue_run_count(self, issue_key: str, *, exclude_delivery: str | None = None) -> int:
+        """Completed runs recorded for this issue, optionally excluding one delivery."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM events WHERE issue_key = ? AND state = 'done' AND delivery_id != ?",
+                (issue_key, exclude_delivery or ""),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
     # trace:v1 id=impl.db-abandon-missing-issues work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     def abandon_missing_issues(self, repo: str, keep: set[int]) -> list[str]:
         """Settle tracked work items whose issue no longer exists upstream.
