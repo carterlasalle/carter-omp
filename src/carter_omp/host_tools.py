@@ -2788,6 +2788,7 @@ def _build_search_issues(bindings: ToolBindings) -> HostTool[Any, Any]:
                 merged=parsed.merged,
                 label=parsed.label,
                 author=parsed.author,
+                numbers=parsed.numbers,
                 limit=limit + 1,  # headroom for the self-filter below
             )
             entries = [e for e in entries if e.is_pull_request or e.number != _require_issue(bindings).number][:limit]

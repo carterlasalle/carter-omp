@@ -53,6 +53,7 @@ class ParsedSearchQuery:
     merged: bool | None = None
     label: str | None = None
     author: str | None = None
+    numbers: tuple[int, ...] = ()
 
 
 def parse_search_query(query: str) -> ParsedSearchQuery:
@@ -61,9 +62,13 @@ def parse_search_query(query: str) -> ParsedSearchQuery:
     Supported qualifiers: `is:pr` / `is:issue` / `is:open` / `is:closed` /
     `is:merged`, `label:<name>`, `author:<login>`. Unrecognized `key:value`
     qualifiers are dropped rather than fed to FTS5 (a bare `in:title` token
-    would otherwise be a syntax error). Everything else is a keyword.
+    would otherwise be a syntax error). Bare numeric tokens (`494`, `#494`)
+    become exact issue/PR number filters — GitHub resolves those by number,
+    and the FTS index only covers title/body text so they would otherwise
+    never match. Everything else is a keyword.
     """
     keywords: list[str] = []
+    numbers: list[int] = []
     is_pr: bool | None = None
     state: str | None = None
     merged: bool | None = None
@@ -72,7 +77,11 @@ def parse_search_query(query: str) -> ParsedSearchQuery:
     for token in query.split():
         key, sep, value = token.partition(":")
         if not sep or not value or " " in key:
-            keywords.append(token)
+            stripped = token.lstrip("#")
+            if stripped.isdigit():
+                numbers.append(int(stripped))
+            else:
+                keywords.append(token)
             continue
         key = key.lower()
         if key == "is":
@@ -98,6 +107,7 @@ def parse_search_query(query: str) -> ParsedSearchQuery:
         merged=merged,
         label=label,
         author=author,
+        numbers=tuple(numbers),
     )
 
 

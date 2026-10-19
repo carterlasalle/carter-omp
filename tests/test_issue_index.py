@@ -43,6 +43,7 @@ def test_parse_search_query_extracts_supported_qualifiers() -> None:
     assert parsed.merged is True
     assert parsed.label == "bug"
     assert parsed.author == "alice"
+    assert parsed.numbers == ()
 
 
 def test_parse_search_query_state_and_issue_kind() -> None:
@@ -50,6 +51,16 @@ def test_parse_search_query_state_and_issue_kind() -> None:
     assert parsed.is_pr is False
     assert parsed.state == "closed"
     assert parsed.keywords == ("crash",)
+
+
+def test_parse_search_query_extracts_bare_issue_numbers() -> None:
+    assert parse_search_query("is:pr 494").numbers == (494,)
+    assert parse_search_query("is:pr 494").keywords == ()
+    assert parse_search_query("#494").numbers == (494,)
+    # Numbers ride alongside text keywords instead of replacing them.
+    parsed = parse_search_query("gateway 494")
+    assert parsed.numbers == (494,)
+    assert parsed.keywords == ("gateway",)
 
 
 # ---- db index: upsert + search ----
@@ -96,6 +107,18 @@ def test_search_issue_index_quotes_fts_metacharacters(db: Database) -> None:
     db.upsert_issue_index(_entry(1, title='crash with "quoted" AND (parens)'))
     found = db.search_issue_index("octo/widget", keywords=('"quoted"', "AND", "(parens)"))
     assert [e.number for e in found] == [1]
+
+
+def test_search_issue_index_matches_bare_number_without_text_mention(db: Database) -> None:
+    """`is:pr 494` must find #494 even when title/body never mention 494."""
+    db.upsert_issue_index(_entry(494, is_pull_request=True, title="transient gateway geometry"))
+    db.upsert_issue_index(_entry(495, is_pull_request=True, title="unrelated docs"))
+    by_number = db.search_issue_index("octo/widget", is_pr=True, numbers=(494,))
+    assert [e.number for e in by_number] == [494]
+    # Combined with text: exact number leads, text hit follows, dupes removed.
+    db.upsert_issue_index(_entry(7, title="gateway retry"))
+    mixed = db.search_issue_index("octo/widget", keywords=("gateway",), numbers=(494,))
+    assert [e.number for e in mixed] == [494, 7]
 
 
 def test_issue_index_watermark_roundtrip(db: Database) -> None:

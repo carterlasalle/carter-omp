@@ -2401,11 +2401,15 @@ class Database:
         merged: bool | None = None,
         label: str | None = None,
         author: str | None = None,
+        numbers: Iterable[int] = (),
         limit: int = 10,
     ) -> list[IssueIndexEntry]:
         """Query the local index. Keywords go through FTS5 (bm25-ranked, AND
         semantics); the remaining filters are exact. With no keywords, results
-        order by `updated_at` descending.
+        order by `updated_at` descending. Bare numeric tokens (`494`) bypass
+        FTS — the FTS index only covers title/body — and match `number`
+        exactly, OR-ed with any text match so `is:pr 494` still finds PR #494
+        even when its title/body never mentions 494.
         """
         conds = ["i.repo = ?"]
         params: list[Any] = [repo]
@@ -2423,20 +2427,50 @@ class Database:
         if author is not None:
             conds.append("i.author = ?")
             params.append(author)
+        wanted = [int(n) for n in numbers]
         terms = [t for t in keywords if t.strip()]
         limit = max(1, min(int(limit), 50))
+        base_conds = " AND ".join(conds)
         with self._lock:
+            if terms and wanted:
+                # Exact number hits come first (most relevant), then FTS text
+                # hits not already included. Two simple queries beat one clever
+                # JOIN: the FTS `MATCH` clause cannot OR against `i.number`.
+                match = " ".join('"' + t.replace('"', '""') + '"' for t in terms)
+                placeholders = ", ".join("?" for _ in wanted)
+                by_number = self._conn.execute(
+                    f"SELECT i.* FROM issue_index i WHERE {base_conds} AND i.number IN ({placeholders}) "
+                    "ORDER BY i.updated_at DESC LIMIT ?",
+                    (*params, *wanted, limit),
+                ).fetchall()
+                seen = {row["number"] for row in by_number}
+                by_text = self._conn.execute(
+                    "SELECT i.* FROM issue_index_fts f JOIN issue_index i ON i.rowid = f.rowid "
+                    f"WHERE issue_index_fts MATCH ? AND {base_conds} "
+                    "ORDER BY bm25(issue_index_fts) LIMIT ?",
+                    (match, *params, limit),
+                ).fetchall()
+                rows = list(by_number) + [r for r in by_text if r["number"] not in seen]
+                return [_index_entry_from_row(row) for row in rows[:limit]]
             if terms:
                 # Quote every term so reporter text can never inject FTS5 syntax.
                 match = " ".join('"' + t.replace('"', '""') + '"' for t in terms)
                 sql = (
                     "SELECT i.* FROM issue_index_fts f JOIN issue_index i ON i.rowid = f.rowid "
-                    f"WHERE issue_index_fts MATCH ? AND {' AND '.join(conds)} "
+                    f"WHERE issue_index_fts MATCH ? AND {base_conds} "
                     "ORDER BY bm25(issue_index_fts) LIMIT ?"
                 )
                 rows = self._conn.execute(sql, (match, *params, limit)).fetchall()
+            elif wanted:
+                placeholders = ", ".join("?" for _ in wanted)
+                sql = (
+                    "SELECT i.* FROM issue_index i "
+                    f"WHERE {base_conds} AND i.number IN ({placeholders}) "
+                    "ORDER BY i.updated_at DESC LIMIT ?"
+                )
+                rows = self._conn.execute(sql, (*params, *wanted, limit)).fetchall()
             else:
-                sql = f"SELECT i.* FROM issue_index i WHERE {' AND '.join(conds)} ORDER BY i.updated_at DESC LIMIT ?"
+                sql = f"SELECT i.* FROM issue_index i WHERE {base_conds} ORDER BY i.updated_at DESC LIMIT ?"
                 rows = self._conn.execute(sql, (*params, limit)).fetchall()
         return [_index_entry_from_row(row) for row in rows]
 
