@@ -410,14 +410,21 @@ class GitHubClient:
         )
 
     # ---- request helpers ----
+    # trace:v1 id=impl.github-check work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
     def _check(self, resp: httpx.Response) -> Any:
         if resp.status_code >= 400:
             retry_after = _parse_retry_after(resp)
             try:
-                msg = resp.json().get("message", resp.text)
+                data = resp.json()
+                msg = str(data.get("message", resp.text))
+                errors = data.get("errors")
+                if errors:
+                    # GitHub's top-level message for a 422 is "Unprocessable
+                    # Entity"; the field/code that failed is only in errors[].
+                    msg = f"{msg}; errors={errors!s:.400}"
             except Exception:
-                msg = resp.text
-            raise GitHubError(resp.status_code, str(msg), retry_after=retry_after)
+                msg = resp.text[:400]
+            raise GitHubError(resp.status_code, msg, retry_after=retry_after)
         if resp.status_code >= 300:
             # Redirect we couldn't (or weren't asked to) follow. GitHub uses 301
             # for transferred repos / issues. Surface as a normal error so host

@@ -1577,7 +1577,7 @@ def test_submit_pr_review_422_falls_back_to_issue_comments(db: Database, tmp_pat
     finally:
         _stop_loop(loop, t)
 
-    assert "posted summary + 1 inline comment(s) as issue comments" in result
+    assert "1 finding(s) as issue comments, not inline" in result
     assert comment_bodies == ["summary", "**`src/app.py:12`**\n\nfinding"]
     assert db.list_staged_review_comments(bindings.issue_key) == []
 
@@ -1610,7 +1610,7 @@ def test_submit_pr_review_500_falls_back_to_issue_comments(db: Database, tmp_pat
     finally:
         _stop_loop(loop, t)
 
-    assert "posted summary + 1 inline comment(s) as issue comments" in result
+    assert "1 finding(s) as issue comments, not inline" in result
     assert comment_bodies == ["summary", "**`src/app.py:12`**\n\nfinding"]
     assert db.list_staged_review_comments(bindings.issue_key) == []
 
@@ -1812,43 +1812,26 @@ def test_submit_pr_review_422_and_fallback_comment_failure_raises_and_keeps_stag
     assert rows[0].path == "src/app.py"
 
 
-def test_submit_pr_review_empty_patch_fails_open(db: Database, tmp_path: Path) -> None:
-    """A file whose patch the platform omitted is not a rejection reason: the
-    comment is kept rather than folded into a 'Not anchored to diff' section."""
-    captured: dict[str, Any] = {}
+def test_pr_review_comment_rejects_an_anchor_on_a_file_without_a_patch(db: Database, tmp_path: Path) -> None:
+    """A file with no patch has no line to anchor to. One such comment 422s the
+    whole review (observed: a 0-byte .lock file turned five inline findings into
+    five issue comments), so it is refused at stage time instead."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/repos/octo/widget/pulls/99/files":
             return _pr_files_response(request, patch="")
-        if request.url.path.endswith("/reviews"):
-            captured["body"] = json.loads(request.content)
-            return httpx.Response(
-                200,
-                json={
-                    "id": 44,
-                    "user": {"login": "carter_omp-bot"},
-                    "body": "ok",
-                    "state": "COMMENTED",
-                    "submitted_at": "t",
-                },
-            )
         return httpx.Response(404, json={"message": "unrouted"})
 
     bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
     try:
         stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
-        submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
-        stage_tool.execute({"path": "src/app.py", "line": 12, "body": "binary finding"}, _ctx())
-        result = submit_tool.execute({"body": "summary"}, _ctx())
+        with pytest.raises(RpcCommandError) as exc:
+            stage_tool.execute({"path": "src/app.py", "line": 12, "body": "binary finding"}, _ctx())
     finally:
         _stop_loop(loop, t)
 
-    assert "submitted PR review" in result
-    assert "dropped" not in result
-    assert captured["body"]["comments"] == [
-        {"path": "src/app.py", "line": 12, "side": "RIGHT", "body": "binary finding"}
-    ]
-    assert "Not anchored to diff" not in captured["body"]["body"]
+    assert "no diff to anchor to" in str(exc.value)
+    assert "review body" in str(exc.value)
 
 
 def test_submit_pr_review_left_side_single_line_anchoring(db: Database, tmp_path: Path) -> None:
@@ -5755,3 +5738,25 @@ def test_cause_section_accepts_a_file_and_line() -> None:
     assert _CAUSE_LOCATION_RE.search(section)
     assert _CAUSE_LOCATION_RE.search("web/src/state.ts")
     assert not _CAUSE_LOCATION_RE.search("expected behavior from the upstream API")
+
+
+def test_filter_drops_comments_on_files_without_a_patch() -> None:
+    """GitHub rejects the whole review for one bad anchor — fail closed."""
+    from types import SimpleNamespace
+
+    from carter_omp.github_client import PullRequestFileInfo
+    from carter_omp.host_tools import _filter_anchorable_comments
+
+    files = [
+        PullRequestFileInfo(path="empty.lock", status="added", additions=0, deletions=0, patch=""),
+        PullRequestFileInfo(
+            path="code.py", status="modified", additions=1, deletions=0, patch="@@ -1,0 +1,1 @@\n+x = 1"
+        ),
+    ]
+    staged = [
+        SimpleNamespace(id=1, path="empty.lock", line=1, side="RIGHT", start_line=None, start_side=None, body="x"),
+        SimpleNamespace(id=2, path="code.py", line=1, side="RIGHT", start_line=None, start_side=None, body="y"),
+    ]
+    anchorable, dropped = _filter_anchorable_comments(staged, files)
+    assert [c.path for c in anchorable] == ["code.py"]
+    assert [c.path for c in dropped] == ["empty.lock"]

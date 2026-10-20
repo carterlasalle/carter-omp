@@ -434,12 +434,15 @@ def test_staged_lifecycle_07_renamed_deleted_multiline_patchless_cases(db: Datab
     bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
     try:
         stage_tool = _require_tool(bindings, "pr_review_comment")
-        # Patchless file fail-opens at staging with an "(unverified" marker.
-        out = stage_tool.execute({"path": "src/binary.py", "line": 12, "body": "binary finding"}, _ctx())
-        assert "unverified" in out
-        # Bypass validation for the stale/renamed/range rows.
+        # Patchless file has no diff lines: refused at staging, because one
+        # such anchor 422s the whole review at submit time.
+        with pytest.raises(RpcCommandError) as exc:
+            stage_tool.execute({"path": "src/binary.py", "line": 12, "body": "binary finding"}, _ctx())
+        assert "no diff to anchor to" in str(exc.value)
+        # Bypass validation for the stale/renamed/range/patchless rows.
         db.stage_review_comment(issue_key=bindings.issue_key, path="src/app.py", line=12, body="single kept")
         db.stage_review_comment(issue_key=bindings.issue_key, path="src/old.py", line=12, body="renamed away")
+        db.stage_review_comment(issue_key=bindings.issue_key, path="src/binary.py", line=12, body="binary finding")
         db.stage_review_comment(
             issue_key=bindings.issue_key,
             path="src/app.py",
@@ -466,10 +469,11 @@ def test_staged_lifecycle_07_renamed_deleted_multiline_patchless_cases(db: Datab
     kept = {(c["path"], c["line"], c["body"]) for c in captured["body"]["comments"]}
     assert ("src/app.py", 12, "single kept") in kept
     assert ("src/app.py", 12, "valid range") in kept
-    assert ("src/binary.py", 12, "binary finding") in kept
+    assert all(c["path"] != "src/binary.py" for c in captured["body"]["comments"])
     assert all(c["path"] != "src/old.py" for c in captured["body"]["comments"])
     assert not any(c["body"] == "bad range" for c in captured["body"]["comments"])
-    assert "dropped=2" in result
+    assert "dropped=3" in result
+    assert "src/binary.py:12" in captured["body"]["body"]
     assert "src/old.py:12" in captured["body"]["body"]
     assert db.list_staged_review_comments(bindings.issue_key) == []
 
@@ -533,7 +537,7 @@ def test_staged_lifecycle_09_fallback_posts_only_anchorable_comments(db: Databas
     finally:
         _stop_loop(loop, t)
 
-    assert f"review rejected ({status})" in result
+    assert f"review rejected ({status}" in result
     assert len(comment_bodies) == 2
     assert "## Not anchored to diff" in comment_bodies[0]
     assert "**`src/app.py:15`** — gap finding" in comment_bodies[0]

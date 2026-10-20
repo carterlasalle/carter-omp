@@ -3301,6 +3301,7 @@ def _diff_anchorable_lines(patch: str) -> tuple[frozenset[int], frozenset[int]]:
     return frozenset(right), frozenset(left)
 
 
+# trace:v1 id=impl.host-tools-anchor-rejection work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
 def _anchor_rejection(
     path: str,
     line: int,
@@ -3312,9 +3313,10 @@ def _anchor_rejection(
 ) -> str | None:
     """Return why a comment cannot anchor, or None when it can.
 
-    Patchless entries (binary file, no-op change, API gap) fail open with
-    None — callers treat them as unverified, and the submit-time filter plus
-    the 422/500 fallback still catch a genuine rejection.
+    Patchless entries (binary file, empty file, API gap) fail *closed*: with
+    no diff there is no line to anchor to, and GitHub rejects the entire
+    review for one bad anchor — which degrades every other finding to an
+    issue comment. Such a finding belongs in the review body.
     """
     entry = by_path.get(path)
     if entry is None:
@@ -3322,7 +3324,9 @@ def _anchor_rejection(
         expected = f"one of [{', '.join(changed)}]" if changed else "a path in the PR diff (changed set is empty)"
         return f"path '{path}' is not in the PR diff; expected {expected}"
     if not entry.patch:
-        return None
+        return (
+            f"'{path}' has no diff to anchor to (empty, binary, or patch omitted); put this finding in the review body"
+        )
     if entry.path not in cache:
         cache[entry.path] = _diff_anchorable_lines(entry.patch)
     right, left = cache[entry.path]
@@ -3512,7 +3516,8 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             )
             dropped_suffix = f"; dropped {len(dropped)} not anchored to diff" if dropped else ""
             return (
-                f"review rejected ({exc.status}); posted summary + {posted_inline} inline comment(s) as issue comments"
+                f"review rejected ({exc.status} {exc.message}); posted the summary and "
+                f"{posted_inline} finding(s) as issue comments, not inline"
                 f"{dropped_suffix}"
             )
         cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
