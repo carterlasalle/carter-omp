@@ -1584,6 +1584,25 @@ class SandboxManager:
                 count += 1
         return count
 
+    # trace:exempt reason=internal-detail
+    def reap_settled_workspaces(self, keys: Iterable[tuple[str, int | str]]) -> int:
+        """Remove worktrees for issues that settled without a cleanup event.
+
+        Settle paths that mark `abandoned` without removing the checkout —
+        ``abort_task`` (``host_tools``), the redispatch cap (``queue``), the
+        deleted/transferred webhook (``server``), and the index pruner
+        (``issue_index``) — accumulate full worktrees (source + node_modules +
+        session) until the disk fills. The queue's reaper loop feeds this
+        only keys with no queued/running event, so an active run is never
+        touched. Delegates to ``remove_workspace`` (same pool-prune behavior,
+        error propagation) and returns the count removed.
+        """
+        count = 0
+        for repo, number in keys:
+            self.remove_workspace(repo=repo, number=number)
+            count += 1
+        return count
+
 
 __all__ = [
     "GitCommandError",

@@ -536,3 +536,78 @@ async def test_cancelled_run_is_not_redispatched(settings: Settings, db: Databas
     assert db.stranded_issues(max_attempts=0) == []
     assert await _make_pool(settings, db)._redispatch_stranded() == 0  # noqa: SLF001
     assert [row.state for row in db.list_events(limit=5)] == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_reaper_removes_abandoned_workspace_without_live_event(
+    settings: Settings, db: Database
+) -> None:
+    """A settled issue's worktree is pure disk pressure — the sweep removes it."""
+    removed: list[tuple[str, int | str]] = []
+
+    class _ReapingSandbox(_StubSandbox):
+        def reap_settled_workspaces(self, keys) -> int:  # type: ignore[no-untyped-def]
+            removed.extend(keys)
+            return len(keys)
+
+    def _pool() -> WorkerPool:
+        pool = _make_pool(settings, db)
+        pool.sandbox = _ReapingSandbox()  # type: ignore[assignment]
+        return pool
+
+    db.upsert_issue(key="octo/widget#4", repo="octo/widget", number=4, state="abandoned", branch="b")
+
+    assert await _pool()._reap_settled_workspaces() == 1  # noqa: SLF001
+    assert removed == [("octo/widget", 4)]
+
+
+@pytest.mark.asyncio
+async def test_reaper_skips_abandoned_workspace_with_live_event(
+    settings: Settings, db: Database
+) -> None:
+    """An abandoned row with a queued event may be mid-reopen — never touch it."""
+    removed: list[tuple[str, int | str]] = []
+
+    class _ReapingSandbox(_StubSandbox):
+        def reap_settled_workspaces(self, keys) -> int:  # type: ignore[no-untyped-def]
+            removed.extend(keys)
+            return len(keys)
+
+    def _pool() -> WorkerPool:
+        pool = _make_pool(settings, db)
+        pool.sandbox = _ReapingSandbox()  # type: ignore[assignment]
+        return pool
+
+    db.upsert_issue(key="octo/widget#4", repo="octo/widget", number=4, state="abandoned", branch="b")
+    db.record_event(
+        delivery_id="d-reopen",
+        event_type="issues",
+        repo="octo/widget",
+        issue_key="octo/widget#4",
+        payload={"action": "reopened"},
+        state="queued",
+    )
+
+    assert await _pool()._reap_settled_workspaces() == 0  # noqa: SLF001
+    assert removed == []
+
+
+@pytest.mark.asyncio
+async def test_reaper_keeps_going_when_one_remove_fails(settings: Settings, db: Database) -> None:
+    """One bad checkout must not pin every other settled worktree on disk."""
+    removed: list[tuple[str, int | str]] = []
+
+    class _FlakySandbox(_StubSandbox):
+        def reap_settled_workspaces(self, keys) -> int:  # type: ignore[no-untyped-def]
+            raise OSError("disk hiccup")
+
+    def _pool() -> WorkerPool:
+        pool = _make_pool(settings, db)
+        pool.sandbox = _FlakySandbox()  # type: ignore[assignment]
+        return pool
+
+    db.upsert_issue(key="octo/widget#4", repo="octo/widget", number=4, state="abandoned", branch="b")
+    db.upsert_issue(key="octo/widget#5", repo="octo/widget", number=5, state="abandoned", branch="b")
+
+    assert await _pool()._reap_settled_workspaces() == 0  # noqa: SLF001
+    assert removed == []

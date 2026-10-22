@@ -405,6 +405,15 @@ class Settings(BaseSettings):
     # at boot. Costs a dependency re-download on the next run for that issue.
     reclaim_workspace_caches: bool = Field(True, alias="CARTER_OMP_RECLAIM_WORKSPACE_CACHES")
 
+    # Reaper for worktrees of settled issues. Several paths mark `abandoned`
+    # without removing the checkout (abort_task, the redispatch cap, the
+    # deleted/transferred webhook, the index pruner) — full worktrees that
+    # accumulate until the disk fills. A periodic sweep removes workspaces
+    # whose issue is `abandoned` with no queued/running event, oldest first.
+    # The release workspace (`<repo>__release`) never appears in the issues
+    # table, so it is never a candidate. 0 disables the sweep.
+    workspace_reaper_interval_seconds: float = Field(3600.0, alias="CARTER_OMP_WORKSPACE_REAPER_INTERVAL_SECONDS")
+
     @field_validator("bot_login", mode="after")
     @classmethod
     def _require_bot_login(cls, value: str) -> str:
