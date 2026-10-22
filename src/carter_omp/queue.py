@@ -289,6 +289,10 @@ class WorkerPool:
         # Periodic redispatch of stranded work, if enabled. Sleep-first.
         if self.settings.redispatch_interval_seconds > 0:
             self._workers.append(asyncio.create_task(self._redispatch_loop(), name="carter_omp-redispatch"))
+        # Periodic reaper for settled-issue worktrees, if enabled. Sleep-first
+        # so a fresh start doesn't race the boot-time reclaim sweep above.
+        if self.settings.workspace_reaper_interval_seconds > 0:
+            self._workers.append(asyncio.create_task(self._workspace_reaper_loop(), name="carter_omp-reaper"))
         # Retention for webhooks that never triggered anything. Sleep-first, so
         # a fresh start doesn't repeat the prune it just did inline above.
         if self.settings.events_retention_days > 0:
@@ -433,6 +437,57 @@ class WorkerPool:
                     log.exception("redispatch sweep raised")
         except asyncio.CancelledError:
             raise
+
+    # trace:v1 id=impl.queue-workspace-reaper-loop work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP
+    async def _workspace_reaper_loop(self) -> None:
+        """Periodically remove worktrees of settled issues.
+
+        Sleep-first; cancellation is the only exit. Any per-sweep failure is
+        logged and the loop continues — reaping must never take the
+        orchestrator down.
+        """
+        interval = self.settings.workspace_reaper_interval_seconds
+        log.info("workspace reaper loop online", extra={"interval": interval})
+        try:
+            while not self._stop.is_set():
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                    return  # stop was set during the wait
+                except TimeoutError:
+                    pass
+                try:
+                    await self._reap_settled_workspaces()
+                except Exception:
+                    log.exception("workspace reaper sweep raised")
+        except asyncio.CancelledError:
+            raise
+
+    async def _reap_settled_workspaces(self) -> int:
+        """One sweep: remove worktrees for `abandoned` issues with no live event.
+
+        Collects candidates and the active-key guard in threads (both block on
+        sqlite), then removes the survivors' worktrees off-thread one by one.
+        The active-event check races dispatch by design — worst case a freshly
+        queued run recreates its worktree via ``ensure_workspace`` — so a
+        removal failure is logged and skipped, never raised: the next sweep
+        retries it.
+        """
+        candidates = await asyncio.to_thread(self.db.abandoned_issues)
+        if not candidates:
+            return 0
+        active = await asyncio.to_thread(self.db.active_issue_keys)
+        idle = [(row.repo, row.number) for row in candidates if row.key not in active]
+        reaped = 0
+        for repo, number in idle:
+            try:
+                await asyncio.to_thread(self.sandbox.reap_settled_workspaces, [(repo, number)])
+            except Exception:
+                log.warning("workspace reaper remove failed", extra={"repo": repo, "number": number})
+                continue
+            reaped += 1
+        if reaped:
+            log.info("workspace reaper swept", extra={"workspaces": reaped})
+        return reaped
 
     # trace:v1 id=impl.queue-redispatch-stranded work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-BKNZHMZ0
     async def _redispatch_stranded(self) -> int:

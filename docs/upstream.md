@@ -28,12 +28,16 @@ carter-omp is extracted from the `python/robomp` implementation in the
 
 Reviewed against extraction `3d3ec7e` through upstream `fd4542b`
 (2026-10-03; merge of #13586 on top of the evaluated 18.5.0 wire-schema move
-`c4d3204`). Ports target the paths this repo extracted
-(`python/robomp/src` → `src/carter_omp`, `python/robomp/tests` → `tests`,
-`python/robomp/web` → `web`, `python/omp-rpc` → `vendor/omp-rpc`) with the
-package/env/branch renames (`robomp` → `carter_omp`, `ROBOMP_*` →
+`c4d3204`), plus `6e6b130d` (2026-10-07). Ports target the paths this repo
+extracted (`python/robomp/src` → `src/carter_omp`, `python/robomp/tests` →
+`tests`, `python/robomp/web` → `web`, `python/omp-rpc` → `vendor/omp-rpc`)
+with the package/env/branch renames (`robomp` → `carter_omp`, `ROBOMP_*` →
 `CARTER_OMP_*`, `farm/*` → `carter-omp/*`, `gh-proxy` → `github-proxy`)
-applied.
+applied. Watch notice for `c4d3204` (carter-omp#79): nine of its ten listed
+commits are ancestors of the extraction point (`git merge-base
+--is-ancestor` against `3d3ec7e`, all yes), so they were already in the
+extracted tree — no port involved. The tenth is `c4d3204` itself, recorded
+below.
 
 ### Ported
 
@@ -82,19 +86,26 @@ applied.
   the terminal success/fallback row (`dropped` is now the anchor list), so a
   rejected POST no longer satisfies `has_successful_tool_call`. Ported to
   `src/carter_omp/host_tools.py` and `tests/test_host_tools.py`.
-- `fd4542b21d503007d9c589cd3b6beac9a2f254d2` (2026-10-03, merge of #13586 on
-  top of `c4d3204`) — the merge carries the main-side `set_todos` merge
-  simplification from the 18.5.0 wire-schema move (`c4d3204`): follow-up runs
-  now pass live phases straight through (`set_todos([*get_todos(), *phases])`)
-  instead of rebuilding phase dicts by hand. Safe here because the vendored
-  18.2.11 client already round-trips live `TodoPhase` objects through
-  `_normalize_todo_phases` with ids/status intact. Ported to
-  `src/carter_omp/worker.py`. Companion merges `f7055447` (portable test
-  fixtures) and `e0e356fe` (local rpc install) were already satisfied by the
-  earlier ports / local `[tool.uv.sources]` resolution; the monorepo
-  `oh-my-pi` → `omp` branding rename stays an intentional divergence, and the
-  `python/omp-rpc` → `sdk/python/omp-rpc` move plus new wire features stay
-  deferred behind the deliberate `OMP_VERSION` pin.
+- `c4d3204151aaafdc4fc4b91045789ff1fed84c9f` (2026-10-03) `feat: added
+  machine-readable RPC wire schema and multi-language client SDKs` — the
+  commit's own `python/robomp`-scoped delta is two hunks: the follow-up
+  `set_todos` merge simplification (pass live phases straight through,
+  `set_todos([*get_todos(), *phases])`, instead of rebuilding phase dicts by
+  hand) and a one-line `AGENTS.md` test-recipe path update
+  (`python/omp-rpc/tests` → `sdk/python/omp-rpc/tests`). The worker hunk is
+  ported to `src/carter_omp/worker.py` (safe: the vendored 18.2.11 client
+  round-trips live `TodoPhase` objects through `_normalize_todo_phases` with
+  ids/status intact); the `AGENTS.md` hunk has no carter counterpart (no
+  monorepo root, no `bun run test:py`). The rest of the commit moves
+  `python/omp-rpc` → `sdk/python/omp-rpc` and adds wire features
+  (`prompt_result` / `session_settled`, queued-message snapshot +
+  `promote_queued_message`, `open_session` / `set_event_filter`,
+  `set_cache_warming`, `fork`, goal mode/subagents/live voice, generated
+  `_wire.py`), which stay deferred behind the deliberate `OMP_VERSION` pin
+  at `18.2.11` (`Dockerfile`); `vendor/omp-rpc` carries none of those symbols
+  by design. (Also reviewed as the main-side parent of merge `fd4542b`, whose
+  newer `test_worker.py` prompt-hook / eval-bridge hunks were already ported
+  via `08a2e807` / `41484928`.)
 
 ### Reviewed, not ported
 
