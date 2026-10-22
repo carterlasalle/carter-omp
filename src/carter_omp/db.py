@@ -1578,6 +1578,41 @@ class Database:
             classification=row["classification"],
         )
 
+    def abandoned_issues(self, *, limit: int = 500) -> list[IssueRow]:
+        """Issues in terminal `abandoned` state, oldest first.
+
+        `abandoned` has no resume path (abort_task, the redispatch cap,
+        deleted/transferred webhooks, the index pruner), so a settled row's
+        worktree is pure disk pressure — the workspace reaper consumes this.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at FROM issues WHERE state='abandoned' ORDER BY updated_at ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            IssueRow(
+                key=r["key"],
+                repo=r["repo"],
+                number=int(r["number"]),
+                branch=r["branch"],
+                session_dir=r["session_dir"],
+                pr_number=int(r["pr_number"]) if r["pr_number"] is not None else None,
+                state=r["state"],
+                updated_at=r["updated_at"],
+                classification=r["classification"],
+            )
+            for r in rows
+        ]
+
+    def active_issue_keys(self) -> set[str]:
+        """Keys with a queued or running event — a reaper must not touch them."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT issue_key FROM events WHERE state IN ('queued','running')"
+            ).fetchall()
+        return {str(r["issue_key"]) for r in rows if r["issue_key"]}
+
     def list_issues(self, limit: int = 100) -> list[IssueRow]:
         with self._lock:
             rows = self._conn.execute(
