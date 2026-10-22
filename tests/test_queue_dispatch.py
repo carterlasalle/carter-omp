@@ -539,9 +539,7 @@ async def test_cancelled_run_is_not_redispatched(settings: Settings, db: Databas
 
 
 @pytest.mark.asyncio
-async def test_reaper_removes_abandoned_workspace_without_live_event(
-    settings: Settings, db: Database
-) -> None:
+async def test_reaper_removes_abandoned_workspace_without_live_event(settings: Settings, db: Database) -> None:
     """A settled issue's worktree is pure disk pressure — the sweep removes it."""
     removed: list[tuple[str, int | str]] = []
 
@@ -562,9 +560,7 @@ async def test_reaper_removes_abandoned_workspace_without_live_event(
 
 
 @pytest.mark.asyncio
-async def test_reaper_skips_abandoned_workspace_with_live_event(
-    settings: Settings, db: Database
-) -> None:
+async def test_reaper_skips_abandoned_workspace_with_live_event(settings: Settings, db: Database) -> None:
     """An abandoned row with a queued event may be mid-reopen — never touch it."""
     removed: list[tuple[str, int | str]] = []
 
