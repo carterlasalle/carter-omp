@@ -26,18 +26,26 @@ carter-omp is extracted from the `python/robomp` implementation in the
 
 ## Later upstream commits cherry-picked or manually incorporated
 
-Reviewed against extraction `3d3ec7e` through upstream `fd4542b`
-(2026-10-03; merge of #13586 on top of the evaluated 18.5.0 wire-schema move
-`c4d3204`), plus `6e6b130d` (2026-10-07). Ports target the paths this repo
-extracted (`python/robomp/src` → `src/carter_omp`, `python/robomp/tests` →
+Reviewed against extraction `3d3ec7e` through upstream `6e6b130d`
+(2026-10-07; `fix(robomp): kept failed pr reviews out of the review-once
+ledger` (#14859)), covering the watch notice for `fd4542b` (2026-10-03;
+merge of #13586 on top of the evaluated 18.5.0 wire-schema move `c4d3204`,
+this issue). Ports target the paths this repo extracted
+(`python/robomp/src` → `src/carter_omp`, `python/robomp/tests` →
 `tests`, `python/robomp/web` → `web`, `python/omp-rpc` → `vendor/omp-rpc`)
 with the package/env/branch renames (`robomp` → `carter_omp`, `ROBOMP_*` →
 `CARTER_OMP_*`, `farm/*` → `carter-omp/*`, `gh-proxy` → `github-proxy`)
-applied. Watch notice for `c4d3204` (carter-omp#79): nine of its ten listed
-commits are ancestors of the extraction point (`git merge-base
---is-ancestor` against `3d3ec7e`, all yes), so they were already in the
-extracted tree — no port involved. The tenth is `c4d3204` itself, recorded
-below.
+applied. The notice's ten listed commits: nine pre-date extraction
+`3d3ec7e` (verified ancestors, already in the extracted tree — release
+tracking/recovery `4aa8ce59`, PR test gate `3f6173b8`, compose filename
+`c5642a5d`, anchor validation `2d883769`, usage attribution `20912497`,
+license `b3303620`, work-items fixture URL `5bd31c02`, paused-pool
+`db98a1aa` / dispatcher-isolation `c5cb91b8` server tests); the tenth is
+`fd4542b` itself, recorded below. Watch notice for `c4d3204`
+(carter-omp#79): nine of its ten listed commits are ancestors of the
+extraction point (`git merge-base --is-ancestor` against `3d3ec7e`, all
+yes), so they were already in the extracted tree — no port involved. The
+tenth is `c4d3204` itself, recorded below.
 
 ### Ported
 
@@ -156,3 +164,32 @@ below.
   at `src/carter_omp/worker.py:1145`, registered at `:1355`), so there is no
   regression to adopt. Nothing to port; no new diff.
 - `1459332dc8f48b65124fcd0b831f28881e02bb1c` (2026-09-24) prompt results /
+  session-settled frames / headless host mode, `c867895e83b1672db67244d4455ebbb2cefcaf30`
+  (2026-09-12) queued groups + Python binding, `b493cf68658b0fce88e78c745514d10c2775c14b`
+  (2026-09-24) queued-message snapshot, `10a0846131fe86d0da3252cbe405a3ec6528027a`
+  (2026-09-23) `promote_queued_message`, `0f1e064d01ccef2667440948f3b729e8ec12c9ed`
+  (2026-09-30) aborted-refresh billed usage + `set_cache_warming`,
+  `cb94bcb5eb198cbdf7ddb905cd181aaad05f9d7b` (2026-10-02) `fork` command,
+  `c2ccbee9a27575c683ece74b793d25fab486cd7f` (2026-10-03) goal
+  mode/subagents/live voice, `c4d3204151aaafdc4fc4b91045789ff1fed84c9f`
+  (2026-10-03) generated wire schema + moved `sdk/python/omp-rpc` — RPC client
+  and wire features from OMP 18.3–18.5. They bind to the 18.5.0 wire protocol;
+  carter pins the OMP binary at `18.2.11` (`Dockerfile`) and keeps
+  `vendor/omp-rpc` in sync with that binary, so incorporating them requires a
+  deliberate `OMP_VERSION` bump first.
+- `fd4542b21d503007d9c589cd3b6beac9a2f254d2` (2026-10-03, merge of #13586;
+  this watch notice) — second parent `41484928` (prompt-hook test seam) and
+  the merge's own `worker.py` / `test_worker.py` hunks (`HostToolCompletedEvent`
+  / `on_host_tool_completed` eval-bridge fix `08a2e807`, plus the `c4d3204`
+  `set_todos` simplification on the main side) were already ported via
+  `08a2e807` / `41484928` / `c4d3204` (see Ported above); `e305c2748` and
+  `c2ccbee9` in range touch only `python/omp-rpc` pre-move sources whose
+  ported equivalents already live in `vendor/omp-rpc` and the carter worker.
+  `python/robomp`-scoped tree diff against extraction `3d3ec7e` is the
+  backfill, branding, eval-bridge/prompt-hook, duplicate-test, and
+  portable-fixture hunks already ported or deliberately diverged — no new
+  `python/robomp` work. Newer `sdk/python/omp-rpc/_wire.py` symbols past
+  `6e6b130d` (`live_steered` `19703f92`, `provider_replay_through_entry_id`
+  `2cc3af08`, `resumed_tool_call_ids` `818c3974`, `narration` `50ec66f7`)
+  stay deferred behind the `OMP_VERSION` 18.2.11 pin. Nothing to port; no
+  new diff. Fixes carter-omp#87.
