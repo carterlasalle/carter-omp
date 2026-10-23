@@ -603,12 +603,17 @@ class Settings(BaseSettings):
         items = [piece.strip().lstrip("@").lower() for piece in self.reviewer_bots_raw.split(",")]
         return frozenset(item for item in items if item)
 
+    # trace:v1 id=impl.config-maintainer-logins work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     @property
     def maintainer_logins(self) -> frozenset[str]:
         items = [
             piece.strip().lstrip("@").lower().removesuffix("[bot]") for piece in self.maintainer_logins_raw.split(",")
         ]
-        return frozenset(item for item in items if item)
+        # Unset means "whoever may trigger the bot is a maintainer": a
+        # deployment that only authorized logins can trigger has no visitor
+        # left to defer to, so every run would name nobody. Set the variable
+        # to narrow it.
+        return frozenset(item for item in items if item) or self.authorized_logins
 
     # trace:v1 id=impl.config-allows-owner-scope work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-T692W95P
     def allows(self, full_name: str) -> bool:

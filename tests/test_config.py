@@ -288,3 +288,17 @@ def test_linked_repos_parses_dependencies_and_is_case_insensitive() -> None:
     )
     assert cfg.links_for("phoenix-fire-labs/mockingbird") == ("phoenix-fire-labs/jetson-infra", "octo/dep")
     assert cfg.links_for("octo/other") == ()
+
+
+def test_maintainer_logins_default_to_authorized_logins(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty maintainer list must not mean 'nobody': the trigger actor then
+    never earns the authority block, and every run defers to the maintainer
+    who is the one asking."""
+    monkeypatch.setenv("CARTER_OMP_AUTHORIZED_LOGINS", "carterlasalle")
+    monkeypatch.setenv("CARTER_OMP_MAINTAINER_LOGINS", "")
+    reset_settings_cache()
+    assert Settings().maintainer_logins == frozenset({"carterlasalle"})  # type: ignore[call-arg]
+
+    monkeypatch.setenv("CARTER_OMP_MAINTAINER_LOGINS", "@CarterLaSalle")
+    reset_settings_cache()
+    assert Settings().maintainer_logins == frozenset({"carterlasalle"})  # type: ignore[call-arg]
