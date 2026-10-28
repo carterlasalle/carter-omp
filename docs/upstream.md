@@ -30,18 +30,23 @@ Reviewed against extraction `3d3ec7e` through upstream `6e6b130d`
 (2026-10-07; `fix(robomp): kept failed pr reviews out of the review-once
 ledger` (#14859)), covering the watch notice for `fd4542b` (2026-10-03;
 merge of #13586 on top of the evaluated 18.5.0 wire-schema move `c4d3204`,
-this issue). Ports target the paths this repo extracted
-(`python/robomp/src` → `src/carter_omp`, `python/robomp/tests` →
-`tests`, `python/robomp/web` → `web`, `python/omp-rpc` → `vendor/omp-rpc`)
+this issue). Also reviewed through upstream `main` at `6f3fbc9`
+(2026-10-26): the 21 `python/robomp` / `python/omp-rpc` commits since
+extraction resolve to the already-reviewed `fd4542b` merge contents, the
+already-ported `6e6b130d` ledger fix, the ported/test-only/omitted hunks
+recorded below, and one `python/robomp`-scoped commit new since `6e6b130d`
+— `aa0b2787` (2026-10-26) `fix(robomp): scoped pre-publish gates to
+`gh_open_pr` `base` override` (#16967) — which is out of scope for this
+watch window and is tracked for the next notice. Ports target the paths
+this repo extracted (`python/robomp/src` → `src/carter_omp`,
+`python/robomp/tests` → `tests`, `python/robomp/web` → `web`,
+`python/omp-rpc` → `vendor/omp-rpc`)
 with the package/env/branch renames (`robomp` → `carter_omp`, `ROBOMP_*` →
 `CARTER_OMP_*`, `farm/*` → `carter-omp/*`, `gh-proxy` → `github-proxy`)
-applied. The notice's ten listed commits: nine pre-date extraction
-`3d3ec7e` (verified ancestors, already in the extracted tree — release
-tracking/recovery `4aa8ce59`, PR test gate `3f6173b8`, compose filename
-`c5642a5d`, anchor validation `2d883769`, usage attribution `20912497`,
-license `b3303620`, work-items fixture URL `5bd31c02`, paused-pool
-`db98a1aa` / dispatcher-isolation `c5cb91b8` server tests); the tenth is
-`fd4542b` itself, recorded below. Watch notice for `c4d3204`
+applied. The notice's ten listed commits (this `5bd31c02` watch) all
+pre-date extraction `3d3ec7e` (verified ancestors, already in the extracted
+tree); per-hunk accounting is recorded below under "Reviewed, not ported".
+Watch notice for `c4d3204`
 (carter-omp#79): nine of its ten listed commits are ancestors of the
 extraction point (`git merge-base --is-ancestor` against `3d3ec7e`, all
 yes), so they were already in the extracted tree — no port involved. The
@@ -193,3 +198,14 @@ tenth is `c4d3204` itself, recorded below.
   `2cc3af08`, `resumed_tool_call_ids` `818c3974`, `narration` `50ec66f7`)
   stay deferred behind the `OMP_VERSION` 18.2.11 pin. Nothing to port; no
   new diff. Fixes carter-omp#87.
+- `5bd31c02f863a28838ec21e2cf3b57cccd10f12a` (2026-09-05; this watch
+  notice) — all ten listed commits are ancestors of extraction `3d3ec7e`
+  (`git merge-base --is-ancestor`, all yes), so every hunk was already in
+  the extracted tree: proxy-backend threading `e599d58f`
+  (`commit_id`/`head_sha`/patch through `submit_review` /
+  `PullRequestInfo` / proxy round-trip), anchor validation `2d883769`, PR
+  test gate `3f6173b8`, release tracking/recovery `4aa8ce59`, compose
+  filename `c5642a5d`, usage attribution `20912497`, license `b3303620`,
+  work-items fixture URL fix itself, paused-pool `db98a1aa` /
+  dispatcher-isolation `c5cb91b8` server tests. Nothing to port; no new
+  diff. Fixes carter-omp#89.
