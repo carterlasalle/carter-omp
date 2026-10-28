@@ -46,6 +46,11 @@ with the package/env/branch renames (`robomp` → `carter_omp`, `ROBOMP_*` →
 applied. The notice's ten listed commits (this `5bd31c02` watch) all
 pre-date extraction `3d3ec7e` (verified ancestors, already in the extracted
 tree); per-hunk accounting is recorded below under "Reviewed, not ported".
+Also reviewed through upstream `main` at `c3b645cb` (2026-10-28): the only
+`python/robomp` / `python/omp-rpc` delta since `6f3fbc9` is the `c3b645cb`
+one-line `AGENTS.md` Bun-version doc hunk — no carter counterpart, recorded
+below. This watch notice (`c3b645cb`) is fully covered.
+
 Watch notice for `c4d3204`
 (carter-omp#79): nine of its ten listed commits are ancestors of the
 extraction point (`git merge-base --is-ancestor` against `3d3ec7e`, all
@@ -218,3 +223,15 @@ tenth is `c4d3204` itself, recorded below.
   work-items fixture URL fix itself, paused-pool `db98a1aa` /
   dispatcher-isolation `c5cb91b8` server tests. Nothing to port; no new
   diff. Fixes carter-omp#89.
+- `c3b645cb275e03ac8a176fbfb0a877cfb3a2c2ef` (2026-10-28; this watch
+  notice) — `deps: bumped required Bun version to >=1.4.4`: the full commit
+  is monorepo engine/CHANGELOG churn plus an `fs-open` → native
+  `fs.openSync` swap, none of which touches the extracted
+  `python/robomp/src` / `tests` / `web` / `python/omp-rpc` paths (verified
+  `git diff --name-only 6f3fbc9..c3b645cb`: only
+  `python/robomp/AGENTS.md`). That one hunk updates the upstream container
+  doc line from "embeds Bun 1.3.14" to "embeds Bun 1.4.4" — carter has no
+  counterpart (carter's `AGENTS.md` is the 6-line bug-corpus pointer;
+  carter pins its own runtime at `BUN_VERSION=1.3.12` in `Dockerfile` and
+  builds the web bundle with Node 22/Yarn 4.9.2). Nothing to port; no new
+  diff. Fixes carter-omp#93.
