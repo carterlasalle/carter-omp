@@ -834,6 +834,17 @@ def _receipt_block(bindings: ToolBindings) -> str:
     return "\n".join(lines)
 
 
+def _publish_base(bindings: ToolBindings, args: Mapping[str, Any]) -> str:
+    """Branch the publish gates diff against: `gh_open_pr`'s `base` override, else the repo default.
+
+    Every pre-publish range (`origin/<base>..HEAD`) — formatter amend, commit
+    message repair, identity gate — and the PR itself must agree on this
+    branch; otherwise a non-default base drags its whole history into the
+    bot-only checks.
+    """
+    return str(args.get("base") or bindings.repo.default_branch)
+
+
 def _run_pre_publish_bun_fix(
     bindings: ToolBindings,
     args: Mapping[str, Any],
@@ -927,7 +938,7 @@ def _run_pre_publish_bun_fix(
     # branch. Amending a commit `origin/<base>` contains would rewrite
     # shared history; amending a foreign-authored commit would bury our
     # diff in someone else's work.
-    base = bindings.repo.default_branch
+    base = _publish_base(bindings, args)
     ahead = _run_repo_command(bindings, ["git", "rev-list", "-n", "1", f"origin/{base}..HEAD"])
     if ahead.returncode != 0 or not ahead.stdout.strip():
         msg = (
@@ -1673,7 +1684,7 @@ def _normalize_unpushed_messages(bindings: ToolBindings, args: Mapping[str, Any]
             f"escapes or the co-author trailer) and the automatic repair failed at "
             f"`{step}`: {err}\n"
             "Reword the affected commits yourself (`git rebase -i origin/"
-            + bindings.repo.default_branch
+            + _publish_base(bindings, args)
             + "`, real newlines via `git commit -F <file>` or multiple `-m` flags) and retry."
         )
         _audit(bindings, tool_name, args, error=msg)
@@ -1788,7 +1799,7 @@ def _guarded_push_branch(bindings: ToolBindings, args: Mapping[str, Any], tool_n
     # and, on adopted review branches, after the inherited PR head) must
     # carry the configured author. Refuse to push otherwise so the agent
     # fixes it (`git commit --amend --reset-author --no-edit`).
-    base = bindings.repo.default_branch
+    base = _publish_base(bindings, args)
     identities = _run_repo_command(
         bindings,
         ["git", "log", "--format=%H%x09%ae%x09%an", *_unpushed_rev_range(bindings)],
@@ -2254,7 +2265,7 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
             body = f"{body.rstrip()}\n{_receipt_block(bindings)}"
         # Make sure the branch is pushed (idempotent) using the same preflight as gh_push_branch.
         _guarded_push_branch(bindings, args, "gh_open_pr", bindings.workspace.branch)
-        base = args.get("base") or bindings.repo.default_branch
+        base = _publish_base(bindings, args)
         was_needs_info = _issue_needs_info(bindings)
         try:
             pr = _run_coro(
@@ -2262,7 +2273,7 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
                 bindings.github.open_pull_request(
                     repo=bindings.repo.full_name,
                     head=bindings.workspace.branch,
-                    base=str(base),
+                    base=base,
                     title=title,
                     body=body,
                     draft=bool(args.get("draft", False)),

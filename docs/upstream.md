@@ -111,9 +111,18 @@ tenth is `c4d3204` itself, recorded below.
   `set_cache_warming`, `fork`, goal mode/subagents/live voice, generated
   `_wire.py`), which stay deferred behind the deliberate `OMP_VERSION` pin
   at `18.2.11` (`Dockerfile`); `vendor/omp-rpc` carries none of those symbols
-  by design. (Also reviewed as the main-side parent of merge `fd4542b`, whose
-  newer `test_worker.py` prompt-hook / eval-bridge hunks were already ported
   via `08a2e807` / `41484928`.)
+- `aa0b278776080ccde989622df403440923f725d4` (2026-10-26) `fix(robomp): scoped
+  pre-publish gates to gh_open_pr base override` (#16967) — new `_publish_base`
+  helper (`gh_open_pr`'s `base` override, else the repo default) scopes the
+  formatter-amend probe, the message-repair/identity hints, and the PR create
+  call, so a non-default base no longer drags its whole history into the
+  bot-only checks. Ported to `src/carter_omp/host_tools.py` plus the gitflow
+  regression test in `tests/test_host_tools.py`. Carter adaptation: the
+  identity scan and message rewrite themselves stay on `_unpushed_rev_range`
+  (already excludes adopted review bases and everything remote-reachable — a
+  superset of the upstream fix); only the formatter probe, both reword hints,
+  and the `gh_open_pr` base take the requested base. Fixes carter-omp#90.
 
 ### Reviewed, not ported
 
