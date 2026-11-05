@@ -96,7 +96,7 @@ def _baseline_env(tmp_path: Path) -> dict[str, str]:
         "CARTER_OMP_WORKSPACE_ROOT": str(tmp_path / "workspaces"),
         "CARTER_OMP_SQLITE_PATH": str(tmp_path / "carter-omp.sqlite"),
         "CARTER_OMP_LOG_DIR": str(tmp_path / "logs"),
-        # Production default is `/data/cache/pi-natives` (provisioned by the
+        # Production default is `/data/natives-cache` (provisioned by the
         # container entrypoint). Tests need a writable, isolated path; we also
         # default-disable the cache so its background GC loop doesn't add
         # noise to event-dispatcher timing assertions. Tests that want the

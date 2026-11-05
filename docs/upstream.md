@@ -122,18 +122,24 @@ tenth is `c4d3204` itself, recorded below.
   `_wire.py`), which stay deferred behind the deliberate `OMP_VERSION` pin
   at `18.2.11` (`Dockerfile`); `vendor/omp-rpc` carries none of those symbols
   via `08a2e807` / `41484928`.)
-- `aa0b278776080ccde989622df403440923f725d4` (2026-10-26) `fix(robomp): scoped
-  pre-publish gates to gh_open_pr base override` (#16967) — new `_publish_base`
-  helper (`gh_open_pr`'s `base` override, else the repo default) scopes the
-  formatter-amend probe, the message-repair/identity hints, and the PR create
-  call, so a non-default base no longer drags its whole history into the
-  bot-only checks. Ported to `src/carter_omp/host_tools.py` plus the gitflow
-  regression test in `tests/test_host_tools.py`. Carter adaptation: the
-  identity scan and message rewrite themselves stay on `_unpushed_rev_range`
-  (already excludes adopted review bases and everything remote-reachable — a
-  superset of the upstream fix); only the formatter probe, both reword hints,
-  and the `gh_open_pr` base take the requested base. Fixes carter-omp#90.
-
+- `b256aafa140aeb7f5c5031d6979169e66e2799d8` (2026-10-29)
+  `refactor(python/robomp): switched natives cache to copy-based isolation`
+  — replaced the hardlink `.node` + setgid `omp` group-shared cache with
+  copy/reflink isolation into a root-only `0700` cache
+  (`/data/natives-cache`, `NativesCache._directory` / `_copy_file` fd-pinned
+  copies, `expected_uid` capture check, `_MAX_ARTIFACT_SIZE` cap,
+  `_image-seed` trusted-seed lookup + `import_image_seed` server import at
+  `/opt/pi-natives-seed`, populate `owner` chown, kata→vmon prompt rename).
+  Ported to `src/carter_omp/natives_cache.py`, `src/carter_omp/sandbox.py`
+  (`_populate_natives_cache`, doc zone 3), `src/carter_omp/worker.py`
+  (`_capture_natives_cache` slot-uid expectation), `src/carter_omp/server.py`
+  (seed import), `src/carter_omp/config.py` (copies wording,
+  `/data/natives-cache` default), `entrypoint.sh` (root-only provision),
+  `src/carter_omp/prompts/system_append_release.md`,
+  `tests/test_natives_cache.py` (copy/symlink/ownership/seed tests),
+  `tests/test_permissions_e2e.py` (root-only cross-slot test),
+  `tests/test_sandbox.py` (cache-untouched-on-rewrite assertion), and
+  `docs/pr-review-handoff.md` (population wording).
 ### Reviewed, not ported
 
 - `6647b0bf145cbc409a4d37d7911e52e1d660ad84` (2026-09-24) `chore: branding` —
@@ -234,4 +240,30 @@ tenth is `c4d3204` itself, recorded below.
   counterpart (carter's `AGENTS.md` is the 6-line bug-corpus pointer;
   carter pins its own runtime at `BUN_VERSION=1.3.12` in `Dockerfile` and
   builds the web bundle with Node 22/Yarn 4.9.2). Nothing to port; no new
-  diff. Fixes carter-omp#93.
+- `add3020f4f259896c0dc05d763c3910d32f795a1` `feat(pi-builtins/rsync)` —
+  only extracted-path hunk is new `python/robomp/THIRD-PARTY-NOTICES.txt`
+  (dashboard-bundle solid-js/tailwindcss notices); carter's equivalent
+  notices already ship inside `THIRD-PARTY-NOTICES.md` (solid-js 1.9.14,
+  tailwindcss 4.3.3). Nothing to port; no new diff.
+- `d846b4a6d9982c95179295963aea271ccb695234` `style: reformat` — extracted
+  paths are `python/robomp/README.md` table/emphasis reflow and
+  `python/robomp/docs/pr-review-handoff.md` table/emphasis reflow; no
+  behavior. Nothing to port; no new diff.
+- `48fed7a450c9bfce6d1c220b8be2ef1632f1ea2a` `ci: kata → vmon sandboxes` —
+  extracted-path hunk is the one-word prompt rename ported above with
+  `b256aafa14`; the CI workflow/container changes have no carter
+  counterpart. Nothing further to port.
+- `b41126af8f6f5d03f257d890090f23e9a04a4eb0`
+  `style(robomp): format Python examples in the PR review handoff doc` —
+  ruff-format-only reflow of code blocks inside
+  `python/robomp/docs/pr-review-handoff.md`; carter's
+  `docs/pr-review-handoff.md` is a rewritten implementation plan, not a copy
+  of that file. Nothing to port; no new diff.
+- `6da15295c9dd7a0b4f82ad2675db7bac56848f49` (2026-11-04; this watch notice)
+  `refactor: consolidated native dependencies and runtime management` — the
+  commit's only extracted-path hunk is `python/robomp/web/package.json`
+  (`check:types`: `tsc --noEmit` → `bun check --no-script`, drop the
+  `typescript: catalog:` pin). Carter's `web/package.json` is standalone
+  (Yarn + pinned `typescript` 5.9.3, `typecheck: tsc --noEmit`); the monorepo
+  `catalog:`/bun-check unification has no carter counterpart. Reviewed, no
+  new diff. Fixes carter-omp#100.

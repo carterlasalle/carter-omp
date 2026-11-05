@@ -27,7 +27,9 @@ There are four ownership zones on disk; do not let them blur:
    writes are bridged by `_share_git_metadata_with_slots`.
 3. **Language tool caches** (`/data/cache/{cargo,cargo-target,rustup,bun-cache}`):
    multi-slot. Owned by `root:omp` with setgid `02770`; provisioned by
-   `entrypoint.sh`.
+   `entrypoint.sh`. The natives cache (`/data/natives-cache`) is the
+   exception: `root:root` `0700`, inaccessible to slots — populated copies
+   are chowned to the slot at populate time.
 4. **Agent HOME template** (`/srv/agent-home`): read-only, `root:root`
    `0755/0644`.
 
@@ -76,7 +78,7 @@ from carter_omp.git_ops import (
 from carter_omp.git_ops import (
     push_release as git_push_release,
 )
-from carter_omp.natives_cache import CacheHit, NativesCache
+from carter_omp.natives_cache import NativesCache
 from carter_omp.natives_cache import compute_key as natives_compute_key
 
 log = logging.getLogger(__name__)
@@ -1254,11 +1256,7 @@ class SandboxManager:
                 repo_full_name=repo,
                 issue_number=number,
             )
-            # Best-effort: hardlink pre-built natives in if we've cached this
-            # source state before. Runs AFTER the slot chown so the cache inode
-            # keeps its `root:omp` ownership (the slot reads through group `omp`);
-            # write-temp + rename in the napi build replaces with a new inode if
-            # the agent rebuilds, so the cached file is never mutated.
+            # Populate independent native artifact copies after workspace ownership is set.
             self._populate_natives_cache(workspace, slot_uid=slot_uid)
             return workspace
 
@@ -1420,20 +1418,7 @@ class SandboxManager:
 
     # trace:exempt reason=internal-detail
     def _populate_natives_cache(self, workspace: Workspace, *, slot_uid: int | None = None) -> None:
-        """Try to hardlink cached pi-natives artifacts into the worktree.
-
-        Best-effort: any failure (no cache configured, non-git worktree,
-        cache miss, link error) is logged at debug and swallowed. The agent
-        falls back to a fresh napi build, exactly as it would without the
-        cache.
-
-        Post-populate, the populated `packages/natives/native/` directory
-        and the COPIED companion files are chowned to the slot so the slot
-        can rebuild via temp + rename in that directory. The hardlinked
-        `.node` files are LEFT at `root:omp` ownership — chowning them
-        would chown the cache file too (shared inode), breaking the
-        cross-slot sharing model. The slot reads them via group `omp`.
-        """
+        """Copy cached native artifacts into the worktree on a cache hit."""
         cache = self.natives_cache
         if cache is None:
             return
@@ -1452,16 +1437,14 @@ class SandboxManager:
             )
             return
         try:
-            hit = cache.populate_workspace(workspace.repo_full_name, key, native_dir)
+            owner = (slot_uid, slot_uid) if _slot_permissions_active(slot_uid) and slot_uid is not None else None
+            hit = cache.populate_workspace(workspace.repo_full_name, key, native_dir, owner=owner)
         except OSError as exc:
             log.warning(
                 "natives_cache populate failed",
                 extra={"workspace": workspace.workspace_key, "key": key, "err": str(exc)},
             )
             return
-        if hit is not None and _slot_permissions_active(slot_uid):
-            assert slot_uid is not None
-            self._chown_natives_for_slot(native_dir, hit, slot_uid=slot_uid)
         log.info(
             "natives_cache",
             extra={
@@ -1472,35 +1455,6 @@ class SandboxManager:
                 "files": [str(p.name) for p in hit.files] if hit is not None else [],
             },
         )
-
-    # trace:exempt reason=internal-detail
-    @staticmethod
-    def _chown_natives_for_slot(native_dir: Path, hit: CacheHit, *, slot_uid: int) -> None:
-        """Hand the populated native dir to the slot WITHOUT touching the
-        hardlinked `.node` inodes (those are shared with the cache).
-
-        Files whose names match a cached `.node` are skipped — they are
-        hardlinks back into the root:omp cache and the slot reads them via
-        group `omp`. Everything else (the directory itself, copied
-        companions) is chowned to the slot so the slot can rebuild via
-        temp + rename.
-        """
-        try:
-            os.chown(native_dir, slot_uid, slot_uid)
-        except OSError as exc:
-            log.warning("natives_cache chown dir failed", extra={"err": str(exc)})
-            return
-        node_basenames = {p.name for p in hit.files if p.name.endswith(".node")}
-        for child in native_dir.iterdir():
-            if child.name in node_basenames:
-                continue  # hardlink to cache — must not chown
-            try:
-                os.chown(child, slot_uid, slot_uid, follow_symlinks=False)
-            except OSError as exc:
-                log.warning(
-                    "natives_cache chown companion failed",
-                    extra={"file": str(child), "err": str(exc)},
-                )
 
     # trace:exempt reason=internal-detail
     def remove_workspace(self, *, repo: str, number: int | str) -> None:
