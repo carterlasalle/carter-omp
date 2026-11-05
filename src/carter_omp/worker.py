@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -1733,6 +1734,9 @@ def _capture_natives_cache(inputs: TaskInputs) -> None:
             key,
             native_dir,
             source_workspace=workspace.workspace_key,
+            expected_uid=inputs.slot_uid
+            if inputs.slot_uid is not None and os.geteuid() == 0 and sys.platform == "linux"
+            else os.geteuid(),
         )
     except Exception as exc:
         log.warning(
