@@ -334,8 +334,16 @@ class GitTransport(Protocol):
         """Best-effort `git fetch origin <ref>` to ensure the base branch is local."""
         ...
 
-    # trace:exempt reason=internal-detail
-    def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None:
+    def fetch_pr_head(
+        self,
+        *,
+        repo: str,
+        pool_dir: Path,
+        pr_number: int,
+        head_ref: str | None = None,
+        head_sha: str | None = None,
+        same_repo: bool = False,
+    ) -> None:
         """Fetch `refs/pull/<n>/head` into FETCH_HEAD for detached PR review checkouts."""
         ...
 
@@ -400,9 +408,20 @@ class LocalGitTransport:
         git_fetch_ref(pool_dir, ref, token=self._token)
 
     # trace:exempt reason=internal-detail
-    def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None:
+    def fetch_pr_head(
+        self,
+        *,
+        repo: str,
+        pool_dir: Path,
+        pr_number: int,
+        head_ref: str | None = None,
+        head_sha: str | None = None,
+        same_repo: bool = False,
+    ) -> None:
         del repo
-        git_fetch_pr_head(pool_dir, pr_number, token=self._token)
+        git_fetch_pr_head(
+            pool_dir, pr_number, token=self._token, head_ref=head_ref, head_sha=head_sha, same_repo=same_repo
+        )
 
     # trace:exempt reason=internal-detail
     def push_branch(
@@ -1063,6 +1082,9 @@ class SandboxManager:
         pool: Path,
         repo_dir: Path,
         pr_head: int,
+        pr_head_ref: str | None = None,
+        pr_head_sha: str | None = None,
+        pr_head_same_repo: bool = False,
         slot_uid: int | None,
     ) -> None:
         """Re-point an existing review worktree at the PR's *current* head.
@@ -1072,7 +1094,14 @@ class SandboxManager:
         modification from an earlier run is discarded with a warning rather than
         blocking the refresh — reviewing old code is the failure being fixed.
         """
-        self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)
+        self.transport.fetch_pr_head(
+            repo=repo,
+            pool_dir=pool,
+            pr_number=pr_head,
+            head_ref=pr_head_ref,
+            head_sha=pr_head_sha,
+            same_repo=pr_head_same_repo,
+        )
         # The probe below runs in the *pool*, which is owned by root while this
         # runs as the slot uid, so both directories have to be whitelisted —
         # naming only the worktree makes git refuse the probe outright with
@@ -1114,6 +1143,9 @@ class SandboxManager:
         default_branch: str,
         existing_branch: str | None = None,
         pr_head: int | None = None,
+        pr_head_ref: str | None = None,
+        pr_head_sha: str | None = None,
+        pr_head_same_repo: bool = False,
         author_name: str,
         author_email: str,
         slot_uid: int | None = None,
@@ -1156,21 +1188,26 @@ class SandboxManager:
                 _chown_workspace(ws_root, slot_uid)
                 workspace_prepared = True
                 if pr_head is not None:
-                    # A review must see the PR as it is *now*. The worktree is
-                    # created once at the original head, so a re-review (or a
-                    # follow-up mention on a reviewed PR) otherwise inspects a
-                    # stale tree — the run says so and answers against old code
-                    # (personal_website#64: "checked out behind the PR head").
                     self._refresh_review_worktree(
                         repo=repo,
                         pool=pool,
                         repo_dir=repo_dir,
                         pr_head=pr_head,
+                        pr_head_ref=pr_head_ref,
+                        pr_head_sha=pr_head_sha,
+                        pr_head_same_repo=pr_head_same_repo,
                         slot_uid=slot_uid,
                     )
             if not repo_exists:
                 if pr_head is not None:
-                    self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)
+                    self.transport.fetch_pr_head(
+                        repo=repo,
+                        pool_dir=pool,
+                        pr_number=pr_head,
+                        head_ref=pr_head_ref,
+                        head_sha=pr_head_sha,
+                        same_repo=pr_head_same_repo,
+                    )
                     _worktree_add(
                         ["git", "worktree", "add", "--detach", str(repo_dir), "FETCH_HEAD"],
                         pool=pool,

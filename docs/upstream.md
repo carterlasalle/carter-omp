@@ -37,19 +37,13 @@ already-ported `6e6b130d` ledger fix, the ported/test-only/omitted hunks
 recorded below, and one `python/robomp`-scoped commit new since `6e6b130d`
 — `aa0b2787` (2026-10-26) `fix(robomp): scoped pre-publish gates to
 `gh_open_pr` `base` override` (#16967) — which is out of scope for this
-watch window and is tracked for the next notice. Ports target the paths
-this repo extracted (`python/robomp/src` → `src/carter_omp`,
-`python/robomp/tests` → `tests`, `python/robomp/web` → `web`,
-`python/omp-rpc` → `vendor/omp-rpc`)
-with the package/env/branch renames (`robomp` → `carter_omp`, `ROBOMP_*` →
-`CARTER_OMP_*`, `farm/*` → `carter-omp/*`, `gh-proxy` → `github-proxy`)
-applied. The notice's ten listed commits (this `5bd31c02` watch) all
-pre-date extraction `3d3ec7e` (verified ancestors, already in the extracted
-tree); per-hunk accounting is recorded below under "Reviewed, not ported".
-Also reviewed through upstream `main` at `c3b645cb` (2026-10-28): the only
-`python/robomp` / `python/omp-rpc` delta since `6f3fbc9` is the `c3b645cb`
-one-line `AGENTS.md` Bun-version doc hunk — no carter counterpart, recorded
-below. This watch notice (`c3b645cb`) is fully covered.
+watch window and is tracked for the next notice. Also reviewed through
+upstream `main` at `b9f92ef4f` (2026-11-05): the only `python/robomp` /
+`python/omp-rpc` delta since `6da15295c9` is the ported #18170 PR-head
+branch fallback recorded below (this watch notice, carter-omp#103). Ports
+target the paths this repo extracted (`python/robomp/src` →
+`src/carter_omp`, `python/robomp/tests` → `tests`, `python/robomp/web` →
+`web`, `python/omp-rpc` → `vendor/omp-rpc`)
 
 Watch notice for `c4d3204`
 (carter-omp#79): nine of its ten listed commits are ancestors of the
@@ -140,6 +134,31 @@ tenth is `c4d3204` itself, recorded below.
   `tests/test_permissions_e2e.py` (root-only cross-slot test),
   `tests/test_sandbox.py` (cache-untouched-on-rewrite assertion), and
   `docs/pr-review-handoff.md` (population wording).
+- `b9f92ef4f1081c03f6ab6374668665cd8e9111d4` (2026-11-05) merge of #18170
+  `fix(robomp): fetch PR head branch when pull ref is missing` — when
+  `refs/pull/<n>/head` is absent, same-repo PRs fall back to fetching the
+  head branch (`refs/heads/<head_ref>`) and refuse unless the fetched tip
+  equals the webhook head SHA (stale-SHA `GitCommandError`, combined
+  primary+fallback stderr on branch-fetch failure). The fallback is
+  ineligible without `same_repo` + `head_ref` + `head_sha` and when the
+  primary error is not a missing remote ref, so unrelated fetch failures
+  propagate unchanged. Branch names use git-invalid/refspec-exclusion
+  validation (`validate_fetch_ref`: no `:`, leading `-`, `~^:?*?[\`,
+  whitespace/control bytes, `..` / `//` / `@{` / lone `@` / trailing
+  `.`/`.lock` forms) instead of the old ASCII allowlist, so `+`,
+  embedded `@`, and Unicode names verify on first use; the proxy endpoint
+  validates `head_ref` only inside the fallback (deferred `ValueError` →
+  400) and rejects non-positive `pr_number` / non-bool `same_repo` at the
+  boundary. Ported to `src/carter_omp/git_ops.py` (`validate_fetch_ref`,
+  `fetch_pr_head` fallback, `invalid pr_number=` message), shared by the
+  proxy via `src/carter_omp/proxy/server.py` (`_require_fetch_ref`,
+  `/gh/v1/git/fetch_pr_head` fields), `src/carter_omp/proxy_client.py` and
+  `src/carter_omp/sandbox.py` (`LocalGitTransport` /
+  `ensure_workspace`+`_refresh_review_worktree` `pr_head_ref`/`pr_head_sha`/
+  `pr_head_same_repo`), and `src/carter_omp/tasks.py` (`review_pr` threads
+  `pr.head_ref`/`head_sha`/`head_repo == repo.full_name`), plus
+  `tests/test_git_ops.py`, `tests/test_proxy_client.py`,
+  `tests/test_proxy_server.py`, `tests/test_server.py`. Fixes carter-omp#103.
 ### Reviewed, not ported
 
 - `6647b0bf145cbc409a4d37d7911e52e1d660ad84` (2026-09-24) `chore: branding` —
