@@ -335,7 +335,16 @@ class GitTransport(Protocol):
         ...
 
     # trace:exempt reason=internal-detail
-    def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None:
+    def fetch_pr_head(
+        self,
+        *,
+        repo: str,
+        pool_dir: Path,
+        pr_number: int,
+        head_ref: str | None = None,
+        head_sha: str | None = None,
+        same_repo: bool = False,
+    ) -> None:
         """Fetch `refs/pull/<n>/head` into FETCH_HEAD for detached PR review checkouts."""
         ...
 
@@ -400,9 +409,20 @@ class LocalGitTransport:
         git_fetch_ref(pool_dir, ref, token=self._token)
 
     # trace:exempt reason=internal-detail
-    def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None:
+    def fetch_pr_head(
+        self,
+        *,
+        repo: str,
+        pool_dir: Path,
+        pr_number: int,
+        head_ref: str | None = None,
+        head_sha: str | None = None,
+        same_repo: bool = False,
+    ) -> None:
         del repo
-        git_fetch_pr_head(pool_dir, pr_number, token=self._token)
+        git_fetch_pr_head(
+            pool_dir, pr_number, token=self._token, head_ref=head_ref, head_sha=head_sha, same_repo=same_repo
+        )
 
     # trace:exempt reason=internal-detail
     def push_branch(
@@ -1114,6 +1134,9 @@ class SandboxManager:
         default_branch: str,
         existing_branch: str | None = None,
         pr_head: int | None = None,
+        pr_head_ref: str | None = None,
+        pr_head_sha: str | None = None,
+        pr_head_same_repo: bool = False,
         author_name: str,
         author_email: str,
         slot_uid: int | None = None,
@@ -1170,7 +1193,14 @@ class SandboxManager:
                     )
             if not repo_exists:
                 if pr_head is not None:
-                    self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)
+                    self.transport.fetch_pr_head(
+                        repo=repo,
+                        pool_dir=pool,
+                        pr_number=pr_head,
+                        head_ref=pr_head_ref,
+                        head_sha=pr_head_sha,
+                        same_repo=pr_head_same_repo,
+                    )
                     _worktree_add(
                         ["git", "worktree", "add", "--detach", str(repo_dir), "FETCH_HEAD"],
                         pool=pool,

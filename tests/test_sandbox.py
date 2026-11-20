@@ -70,8 +70,29 @@ class _RecordingTransport:
     def fetch_base_ref(self, *, repo: str, pool_dir: Path, ref: str) -> None:
         self.calls.append(("fetch_base_ref", {"repo": repo, "pool_dir": pool_dir, "ref": ref}))
 
-    def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None:
-        self.calls.append(("fetch_pr_head", {"repo": repo, "pool_dir": pool_dir, "pr_number": pr_number}))
+    def fetch_pr_head(
+        self,
+        *,
+        repo: str,
+        pool_dir: Path,
+        pr_number: int,
+        head_ref: str | None = None,
+        head_sha: str | None = None,
+        same_repo: bool = False,
+    ) -> None:
+        self.calls.append(
+            (
+                "fetch_pr_head",
+                {
+                    "repo": repo,
+                    "pool_dir": pool_dir,
+                    "pr_number": pr_number,
+                    "head_ref": head_ref,
+                    "head_sha": head_sha,
+                    "same_repo": same_repo,
+                },
+            )
+        )
 
     def push_branch(
         self,
