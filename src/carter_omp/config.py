@@ -384,7 +384,7 @@ class Settings(BaseSettings):
     # See `carter_omp.org_tools` and `org_tools.toml.example`.
     org_tools_file: Path | None = Field(None, alias="CARTER_OMP_ORG_TOOLS_FILE")
 
-    # pi-natives build-output cache. Copies pre-built
+    # omp-natives build-output cache. Copies pre-built
     # `packages/natives/native/*.node` (and its companions) into new
     # workspaces keyed by the git tree-hashes of inputs that determine the
     # build output. Misses are captured automatically when a task that

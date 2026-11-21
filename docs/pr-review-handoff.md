@@ -216,6 +216,15 @@ This is the load-bearing isolation change. Reuse the entire worktree machinery; 
   `LocalGitTransport`: `git fetch origin pull/<n>/head` (PAT injected per-call, as
   `fetch_base_ref` does). `ProxyGitTransport`: add the matching github-proxy git op (mirror its
   `fetch_base_ref` path over the HMAC channel + a proxy-server handler).
+
+  **PR checkout fallback.** When the `refs/pull/<n>/head` ref is missing, `fetch_pr_head`
+  falls back to the same-repo head branch (`refs/heads/<head_ref>`) only when the PR is
+  same-repo and both `head_ref` + `head_sha` are present — and the fetched tip must equal
+  `head_sha` or the checkout fails instead of reviewing the wrong commit. `head_ref` is
+  validated by `validate_fetch_ref` (shared with `/gh/v1/git/fetch_ref`; rejects refspec/option
+  injection, accepts git-valid `+`/`@`/Unicode names). `review_pr` threads
+  `pr_head_ref`/`pr_head_sha`/`pr_head_same_repo` from the PR payload through
+  `ensure_workspace` to both transports. (Upstream `b9f92ef` #18170.)
 - **`ensure_workspace`** — add `pr_head: int | None = None`. When set, in the `not repo_exists`
   branch:
   ```python

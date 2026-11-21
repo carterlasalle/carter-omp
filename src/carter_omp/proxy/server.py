@@ -32,6 +32,7 @@ from carter_omp.git_ops import (
     GitCommandError,
     HeadDriftError,
     is_workflow_permission_error,
+    validate_fetch_ref,
 )
 from carter_omp.git_ops import (
     clone as git_clone,
@@ -126,27 +127,18 @@ def _require_fetch_ref(value: Any) -> str:
     """Validate the base-branch ref for `/gh/v1/git/fetch_ref`.
 
     The orchestrator only ever fetches a branch — a bare name (`main`,
-    `carter-omp/x/y`, `alice/fix-parser`) or `refs/heads/<name>`. Reject anything
-    `git_ops._branch_refspec` would otherwise pass verbatim into the fetch
-    refspec: `:` (refspec injection — write arbitrary refs in the shared
-    pool), a leading `-` (argv option injection), and (via the charset) `*`
-    `+` `~` `^` `@` `?` `[` `\\`, whitespace, and control bytes; plus the
-    git-invalid `..` / `//` / leading-or-trailing `/` / trailing `.`|`.lock`
-    forms. Normal slashy branch names still pass.
+    `carter-omp/x/y`, `alice/fix-parser`) or `refs/heads/<name>`. Shared with
+    `git_ops.validate_fetch_ref`: rejects refspec injection (`:`), option
+    injection (leading `-`), `@{` (reflog), lone `@`, leading/trailing-dot or
+    `.lock` components, and `~` `^` `:` `?` `*` `[` `\\`, whitespace, and
+    control bytes; plus the git-invalid `..` / `//` / leading-or-trailing `/`
+    / trailing `.`|`.lock` forms. Normal slashy branch names still pass.
     """
     ref = _require_str(value, "ref")
-    body = ref.removeprefix("refs/heads/")
-    if (
-        not body
-        or ref.startswith("-")
-        or body.startswith("/")
-        or body.endswith(("/", ".", ".lock"))
-        or "//" in body
-        or ".." in body
-        or not _SAFE_REF_BODY_RE.fullmatch(body)
-    ):
-        raise HTTPException(400, "invalid ref")
-    return ref
+    try:
+        return validate_fetch_ref(ref)
+    except ValueError as exc:
+        raise HTTPException(400, "invalid ref") from exc
 
 
 def _require_branch(value: Any) -> str:
@@ -1378,6 +1370,15 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         _enforce_repo_scope(request.app.state.settings, _require_str(data.get("repo"), "repo"))
         repo = _require_str(data.get("repo"), "repo")
         pr_number = _require_int(data.get("pr_number"), "pr_number")
+        if pr_number <= 0:
+            raise HTTPException(400, "invalid 'pr_number'")
+        # head_ref is only validated by the same-repo branch fallback:
+        # the primary refs/pull/<n>/head fetch does not consume it.
+        head_ref = _require_str(data["head_ref"], "head_ref") if data.get("head_ref") is not None else None
+        head_sha = _require_str(data["head_sha"], "head_sha") if data.get("head_sha") is not None else None
+        same_repo = data.get("same_repo", False)
+        if not isinstance(same_repo, bool):
+            raise HTTPException(400, "invalid 'same_repo'")
         target = _pool_dir(settings, repo)
         remote = await asyncio.to_thread(_origin_remote_auth, target, repo, _resolve_git_token(settings, repo))
         try:
@@ -1385,12 +1386,18 @@ def create_proxy_app(settings: Settings) -> FastAPI:
                 git_fetch_pr_head,
                 target,
                 pr_number,
+                head_ref=head_ref,
+                head_sha=head_sha,
+                same_repo=same_repo,
                 token=remote.token,
                 remote_url=remote.url,
                 auth_url=remote.auth_url,
             )
         except GitCommandError as exc:
             return _git_error_response(exc)
+        except ValueError as exc:
+            # Deferred ref validation in the fallback path.
+            raise HTTPException(400, "invalid ref") from exc
         return JSONResponse({"pool_dir": str(target)})
 
     # trace:v1 id=impl.proxy-git-push-endpoint work=WORK-CO-Q8Z1HJJJ satisfies=REQ-CO-9N23MPRP

@@ -49,7 +49,13 @@ tree); per-hunk accounting is recorded below under "Reviewed, not ported".
 Also reviewed through upstream `main` at `c3b645cb` (2026-10-28): the only
 `python/robomp` / `python/omp-rpc` delta since `6f3fbc9` is the `c3b645cb`
 one-line `AGENTS.md` Bun-version doc hunk — no carter counterpart, recorded
-below. This watch notice (`c3b645cb`) is fully covered.
+below. This watch notice (`c3b645cb`) is fully covered. Also reviewed through
+upstream `main` at `35d76ddd82` (2026-11-18; this watch notice,
+carter-omp#105): newly ported are the PR-head-fallback chain (`b9f92ef`
+#18170) and the crate-rename comment/test fixtures (this commit), recorded
+under Ported below; `aa0b2787` was already ported as `aae99987d5` (#92),
+`db98a1aa` / `c5cb91b8` are extraction ancestors, and the `35d76ddd82` merge
+itself adds no further extracted-path hunks.
 
 Watch notice for `c4d3204`
 (carter-omp#79): nine of its ten listed commits are ancestors of the
@@ -140,6 +146,36 @@ tenth is `c4d3204` itself, recorded below.
   `tests/test_permissions_e2e.py` (root-only cross-slot test),
   `tests/test_sandbox.py` (cache-untouched-on-rewrite assertion), and
   `docs/pr-review-handoff.md` (population wording).
+- `b9f92ef4f1081c03f6ab6374668665cd8e9111d4` (2026-11-08) `fix(robomp):
+  fetch PR head branch when pull ref is missing` (#18170: `d1f069ce`
+  fallback, `a8eef4eb` deferred validation + head-SHA requirement,
+  `86c48c59` deferred proxy validation, `d667d3d7` git-valid charset) —
+  missing `refs/pull/<n>/head` falls back to a verified same-repo branch
+  fetch: only when `same_repo` + `head_ref` + `head_sha` are all present,
+  `head_ref` passes `validate_fetch_ref` (refspec/option-injection rejected,
+  git-valid `+`/`@`/Unicode accepted), and the fetched tip equals `head_sha`
+  (stale-SHA mismatch fails instead of reviewing the wrong commit). Ported
+  to `src/carter_omp/git_ops.py` (`validate_fetch_ref` shared with the proxy
+  `/gh/v1/git/fetch_ref` validator; `fetch_pr_head` fallback), `src/carter_omp/sandbox.py`
+  (transport protocol + `LocalGitTransport` + `ensure_workspace`
+  `pr_head_ref`/`pr_head_sha`/`pr_head_same_repo`), `src/carter_omp/proxy_client.py`
+  (request body), `src/carter_omp/proxy/server.py` (deferred `head_ref`
+  validation, non-positive `pr_number` 400, `same_repo` bool check),
+  `src/carter_omp/tasks.py` (`review_pr` threads PR payload metadata),
+  `tests/test_git_ops.py` / `tests/test_proxy_server.py` /
+  `tests/test_proxy_client.py` / `tests/test_server.py` /
+  `tests/test_sandbox.py` (fallback + validation coverage),
+  `docs/pr-review-handoff.md` (fallback paragraph). The `b9f92ef` merge
+  itself adds no further hunks beyond its two parents (`d1f069ce..d667d3d7`
+  already includes `aa0b2787`-era tree). Fixes carter-omp#105.
+- `35d76ddd82e0619aef3760ffa3ebae59075c404e` (2026-11-18) `refactor(crates):
+  renamed crates to omp-* and folded walker and watch into omp-xfs` — the
+  only `python/robomp`-scoped hunks are comment/test-fixture renames
+  (`pi-natives` → `omp-natives`, `pi-ast` → `omp-ast`); the `.node` artifact
+  lib name (`pi_natives.*.node`) and loader paths are unchanged per the
+  commit message. Ported to `src/carter_omp/config.py`,
+  `src/carter_omp/natives_cache.py`, `tests/test_natives_cache.py`, and
+  `tests/test_permissions_e2e.py`.
 ### Reviewed, not ported
 
 - `6647b0bf145cbc409a4d37d7911e52e1d660ad84` (2026-09-24) `chore: branding` —
@@ -267,3 +303,16 @@ tenth is `c4d3204` itself, recorded below.
   (Yarn + pinned `typescript` 5.9.3, `typecheck: tsc --noEmit`); the monorepo
   `catalog:`/bun-check unification has no carter counterpart. Reviewed, no
   new diff. Fixes carter-omp#100.
+- `35d76ddd82e0619aef3760ffa3ebae59075c404e` (2026-11-18; this watch
+  notice, carter-omp#105) — `refactor(crates): renamed crates to omp-* and
+  folded walker and watch into omp-xfs`. Reviewed `6f3fbc9..35d76ddd82` for
+  `python/robomp` / `python/omp-rpc`: `aa0b2787` (scoped pre-publish gates)
+  already ported as `aae99987d5` (#92); `db98a1aa` / `c5cb91b8` are ancestors
+  of extraction `3d3ec7e` (already in the tree); `e305c2748b`'s extracted-path
+  delta is the already-ported backfill / eval-bridge / prompt-hook /
+  portable-fixture hunks. Newly ported here: the PR-head-fallback chain
+  (`d1f069ce` → `a8eef4eb` → `86c48c59` → `d667d3d7`, merge `b9f92ef` #18170)
+  and the crate-rename comment/test-fixture renames (this commit), both
+  recorded under Ported above. The merge commit `35d76ddd82` itself carries
+  no `python/robomp` / `python/omp-rpc` hunks beyond those renames. Nothing
+  further to port. Fixes carter-omp#105.
